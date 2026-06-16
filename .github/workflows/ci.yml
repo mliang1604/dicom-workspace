@@ -1,0 +1,38 @@
+name: CI
+
+# Build and test every PR targeting main, so merges are gated on green checks.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs when a PR branch is pushed again.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Production build also type-checks the app and templates.
+      - name: Build (production)
+        run: npx ng build --configuration production
+
+      - name: Unit tests
+        run: npx ng test --watch=false

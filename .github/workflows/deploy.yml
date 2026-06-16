@@ -1,0 +1,61 @@
+name: Deploy to GitHub Pages
+
+# Deploy the production build whenever main advances (i.e. on merge).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: the build needs to read the repo; the deploy needs to
+# publish a Pages artifact and mint an OIDC token for the Pages environment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. Don't cancel an in-flight deploy — queue the next so
+# every merge eventually lands.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # base-href must match the project-pages path: https://<user>.github.io/dicom-workspace/
+      - name: Build (production)
+        run: npx ng build --configuration production --base-href=/dicom-workspace/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/dicom-workspace/browser
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

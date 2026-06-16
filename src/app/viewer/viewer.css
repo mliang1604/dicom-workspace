@@ -1,0 +1,135 @@
+:host {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  color: var(--accent);
+  margin-right: 8px;
+}
+
+button,
+input {
+  background: #1d212b;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+kbd {
+  font:
+    11px/1 ui-monospace,
+    monospace;
+  background: #0c0e12;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.ctrl input[type='number'] {
+  width: 84px;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 12px;
+}
+
+.hint {
+  color: var(--muted);
+}
+
+.viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #000;
+}
+
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Pane label/border overlay sits on top of the single GPU canvas. */
+.pane-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pane {
+  position: absolute;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.pane.hovered {
+  border-color: var(--accent);
+}
+
+.pane-tag {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  pointer-events: none;
+  max-width: 70%;
+}
+
+.status.error {
+  color: #ff7a7a;
+  border-color: #5a2a2a;
+}
