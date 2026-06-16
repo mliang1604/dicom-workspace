@@ -1,0 +1,77 @@
+<header class="toolbar">
+  <strong class="brand">DICOM Workspace</strong>
+
+  <button type="button" (click)="folderInput.click()">Open folder…</button>
+  <input
+    #folderInput
+    type="file"
+    webkitdirectory
+    multiple
+    hidden
+    (change)="onFilesSelected($event)"
+  />
+
+  <button type="button" (click)="filesInput.click()">Open files…</button>
+  <input #filesInput type="file" multiple hidden (change)="onFilesSelected($event)" />
+
+  <button type="button" (click)="swapMain()" [disabled]="!isReady()" title="Swap main view (X)">
+    Swap main ⟲ <kbd>X</kbd>
+  </button>
+
+  <span class="spacer">
+    @if (isReady()) {
+      <span class="hint">Scroll over a pane to change its slice</span>
+    }
+  </span>
+
+  <label class="ctrl">
+    WL
+    <input
+      type="number"
+      step="1"
+      [value]="windowCenter()"
+      (input)="onWindowCenterInput($event)"
+      [disabled]="!isReady()"
+    />
+  </label>
+
+  <label class="ctrl">
+    WW
+    <input
+      type="number"
+      step="1"
+      min="1"
+      [value]="windowWidth()"
+      (input)="onWindowWidthInput($event)"
+      [disabled]="!isReady()"
+    />
+  </label>
+</header>
+
+<main class="viewport">
+  <canvas
+    #canvas
+    (wheel)="onWheel($event)"
+    (mousemove)="onPointerMove($event)"
+    (mouseleave)="onPointerLeave()"
+  ></canvas>
+
+  <div class="pane-overlay">
+    @for (pane of panes(); track pane.orientation) {
+      <div
+        class="pane"
+        [class.hovered]="pane.orientation === hoveredOrientation()"
+        [style.left.px]="pane.rect.x"
+        [style.top.px]="pane.rect.y"
+        [style.width.px]="pane.rect.width"
+        [style.height.px]="pane.rect.height"
+      >
+        <span class="pane-tag">
+          {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
+        </span>
+      </div>
+    }
+  </div>
+
+  <div class="status" [class.error]="statusIsError()">{{ statusText() }}</div>
+</main>

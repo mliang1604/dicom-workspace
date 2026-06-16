@@ -1,0 +1,33 @@
+/* Global theme and reset. Component layout lives in each component's stylesheet. */
+:root {
+  color-scheme: dark;
+  --bg: #0c0e12;
+  --panel: #15181f;
+  --border: #262b36;
+  --text: #e6e9ef;
+  --muted: #8a92a3;
+  --accent: #4c8dff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    13px/1.4 system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+}
+
+app-root {
+  display: block;
+  height: 100%;
+}
