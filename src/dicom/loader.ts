@@ -48,6 +48,7 @@ export function parseSlice(name: string, buffer: ArrayBuffer): Slice | null {
   const columns = dataSet.uint16('x00280011');
   if (!rows || !columns) return null;
 
+  const modality = dataSet.string('x00080060')?.trim() || null;
   const bitsAllocated = dataSet.uint16('x00280100') ?? 16;
   const pixelRepresentation = dataSet.uint16('x00280103') ?? 0; // 0 unsigned, 1 signed
   const rescaleSlope = num(dataSet, 'x00281053', 1);
@@ -83,6 +84,7 @@ export function parseSlice(name: string, buffer: ArrayBuffer): Slice | null {
     position,
     orientation,
     instanceNumber: num(dataSet, 'x00200013', 0),
+    modality,
     rescaleSlope,
     rescaleIntercept,
     windowCenter,

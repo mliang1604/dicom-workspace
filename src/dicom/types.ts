@@ -14,6 +14,8 @@ export interface Slice {
   readonly orientation: readonly number[] | null;
   /** InstanceNumber, fallback ordering. Tag (0020,0013). */
   readonly instanceNumber: number;
+  /** Modality (e.g. "CT", "MR"), Tag (0008,0060). Determines the value unit. Null if absent. */
+  readonly modality: string | null;
   /** Modality LUT: rescaled value = raw * slope + intercept. */
   readonly rescaleSlope: number;
   readonly rescaleIntercept: number;
@@ -65,4 +67,25 @@ export interface Volume {
    */
   readonly rescaleSlope: number;
   readonly rescaleIntercept: number;
+  /**
+   * DICOM modality (e.g. "CT", "MR") taken from the first slice, used to label
+   * the value's unit in readouts. Null when the series has no modality tag.
+   */
+  readonly modality: string | null;
+}
+
+/**
+ * The unit of a volume's rescaled voxel values, given its DICOM modality.
+ *
+ * CT values rescaled through the modality LUT are Hounsfield Units (HU). Other
+ * modalities (e.g. MR signal intensity) have no standard scalar unit, so they
+ * return null and should be shown unitless.
+ */
+export function modalityUnit(modality: string | null): string | null {
+  switch (modality) {
+    case 'CT':
+      return 'HU';
+    default:
+      return null;
+  }
 }

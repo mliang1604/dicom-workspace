@@ -59,6 +59,7 @@ export function buildVolume(slices: Slice[]): Volume {
     windowWidth: width,
     rescaleSlope: ordered[0].rescaleSlope,
     rescaleIntercept: ordered[0].rescaleIntercept,
+    modality: ordered[0].modality,
   };
 }
 
