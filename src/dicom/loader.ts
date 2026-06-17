@@ -16,21 +16,41 @@ function num(dataSet: dicomParser.DataSet, tag: string, fallback: number): numbe
 }
 
 /**
- * Parse a single DICOM P10 file into a {@link Slice}.
- * Returns `null` for files that are not single-frame grayscale images
- * (e.g. DICOMDIR, secondary capture color, or non-DICOM files).
+ * The fields shared by every frame in a file: image geometry that is fixed by
+ * the pixel data layout, plus the byte offset where frame 0's samples begin.
  */
-export function parseSlice(name: string, buffer: ArrayBuffer): Slice | null {
+interface FileContext {
+  readonly name: string;
+  readonly buffer: ArrayBuffer;
+  readonly dataSet: dicomParser.DataSet;
+  readonly rows: number;
+  readonly columns: number;
+  readonly bitsAllocated: number;
+  readonly pixelRepresentation: number;
+  readonly modality: string | null;
+  /** Byte offset of frame 0's first sample within {@link buffer}. */
+  readonly pixelOffset: number;
+}
+
+/**
+ * Parse a single DICOM P10 file into its image frames.
+ *
+ * Returns one {@link Slice} per frame: a single slice for a classic
+ * single-frame object, or N slices for an enhanced/multiframe object
+ * (NumberOfFrames > 1, e.g. Enhanced MR/CT). Returns an empty array for files
+ * that carry no grayscale image (DICOMDIR, color secondary capture, non-DICOM).
+ */
+export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
   const bytes = new Uint8Array(buffer);
   let dataSet: dicomParser.DataSet;
   try {
     dataSet = dicomParser.parseDicom(bytes);
   } catch {
-    return null; // Not a parseable DICOM file.
+    return []; // Not a parseable DICOM file.
   }
 
   const pixelElement = dataSet.elements['x7fe00010'];
-  if (!pixelElement) return null; // No image data (e.g. DICOMDIR).
+  if (!pixelElement) return []; // No image data (e.g. DICOMDIR).
 
   const transferSyntax = dataSet.string('x00020010') ?? '1.2.840.10008.1.2';
   if (!UNCOMPRESSED_LE.has(transferSyntax)) {
@@ -41,56 +61,155 @@ export function parseSlice(name: string, buffer: ArrayBuffer): Slice | null {
 
   const samplesPerPixel = dataSet.uint16('x00280002') ?? 1;
   if (samplesPerPixel !== 1) {
-    return null; // Color image; out of scope for the grayscale volume viewer.
+    return []; // Color image; out of scope for the grayscale volume viewer.
   }
 
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
-  if (!rows || !columns) return null;
+  if (!rows || !columns) return [];
 
-  const modality = dataSet.string('x00080060')?.trim() || null;
-  const bitsAllocated = dataSet.uint16('x00280100') ?? 16;
-  const pixelRepresentation = dataSet.uint16('x00280103') ?? 0; // 0 unsigned, 1 signed
+  const ctx: FileContext = {
+    name,
+    buffer,
+    dataSet,
+    rows,
+    columns,
+    bitsAllocated: dataSet.uint16('x00280100') ?? 16,
+    pixelRepresentation: dataSet.uint16('x00280103') ?? 0, // 0 unsigned, 1 signed
+    modality: dataSet.string('x00080060')?.trim() || null,
+    pixelOffset: pixelElement.dataOffset,
+  };
+
+  const frames = Math.floor(num(dataSet, 'x00280008', 1)); // NumberOfFrames
+  return frames > 1 ? parseMultiframe(ctx, frames) : [parseSingleFrame(ctx)];
+}
+
+/** Classic single-frame object: all geometry lives in top-level tags. */
+function parseSingleFrame(ctx: FileContext): Slice {
+  const { dataSet } = ctx;
   const rescaleSlope = num(dataSet, 'x00281053', 1);
   const rescaleIntercept = num(dataSet, 'x00281052', 0);
 
-  const count = rows * columns;
-  const raw = readRawPixels(
-    buffer,
-    pixelElement.dataOffset,
-    count,
-    bitsAllocated,
-    pixelRepresentation,
-  );
+  return {
+    name: ctx.name,
+    rows: ctx.rows,
+    columns: ctx.columns,
+    pixelSpacing: readPair(dataSet, 'x00280030', [1, 1]),
+    position: readTriple(dataSet, 'x00200032'),
+    orientation: readFloats(dataSet, 'x00200037', 6),
+    instanceNumber: num(dataSet, 'x00200013', 0),
+    modality: ctx.modality,
+    rescaleSlope,
+    rescaleIntercept,
+    windowCenter: readFirstFloat(dataSet, 'x00281050'),
+    windowWidth: readFirstFloat(dataSet, 'x00281051'),
+    pixels: readFramePixels(ctx, 0, rescaleSlope, rescaleIntercept),
+  };
+}
 
-  // Apply the modality LUT now so the volume is in real units (e.g. Hounsfield).
+/**
+ * Enhanced/multiframe object: one frame per slice, with per-frame geometry in
+ * the Per-Frame Functional Groups Sequence (5200,9230), falling back to the
+ * Shared Functional Groups Sequence (5200,9229) and then to top-level tags.
+ */
+function parseMultiframe(ctx: FileContext, frames: number): Slice[] {
+  const { dataSet } = ctx;
+  const shared = firstItem(dataSet, 'x52009229');
+  const perFrameSeq = dataSet.elements['x52009230'];
+
+  const slices: Slice[] = [];
+  for (let f = 0; f < frames; f++) {
+    const fg = perFrameSeq?.items?.[f]?.dataSet ?? null;
+    const groups: FunctionalGroups = { fg, shared, top: dataSet };
+
+    // Pixel Value Transformation Sequence (0028,9145) -> Rescale Slope/Intercept.
+    const rescaleSlope =
+      readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281053')) ?? 1;
+    const rescaleIntercept =
+      readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281052')) ?? 0;
+
+    // Pixel Measures Sequence (0028,9110) -> PixelSpacing (0028,0030).
+    const spacing = readGroupValue(groups, 'x00289110', (ds) => readFloats(ds, 'x00280030', 2));
+
+    slices.push({
+      name: `${ctx.name}#${f + 1}`,
+      rows: ctx.rows,
+      columns: ctx.columns,
+      pixelSpacing: spacing ? [spacing[0], spacing[1]] : [1, 1],
+      // Plane Position Sequence (0020,9113) -> ImagePositionPatient (0020,0032).
+      position: readGroupValue(groups, 'x00209113', (ds) => readTriple(ds, 'x00200032')),
+      // Plane Orientation Sequence (0020,9116) -> ImageOrientationPatient (0020,0037).
+      orientation: readGroupValue(groups, 'x00209116', (ds) => readFloats(ds, 'x00200037', 6)),
+      instanceNumber: f + 1,
+      modality: ctx.modality,
+      rescaleSlope,
+      rescaleIntercept,
+      // Frame VOI LUT Sequence (0028,9132) -> Window Center/Width.
+      windowCenter: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281050')),
+      windowWidth: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281051')),
+      pixels: readFramePixels(ctx, f, rescaleSlope, rescaleIntercept),
+    });
+  }
+  return slices;
+}
+
+/** The three places a multiframe value may live, in lookup priority order. */
+interface FunctionalGroups {
+  /** This frame's Per-Frame Functional Groups item, if present. */
+  readonly fg: dicomParser.DataSet | null;
+  /** The single Shared Functional Groups item, if present. */
+  readonly shared: dicomParser.DataSet | null;
+  /** The top-level data set, where the value tag may sit directly. */
+  readonly top: dicomParser.DataSet;
+}
+
+/**
+ * Resolve a functional-group value: read it from the per-frame group's nested
+ * sequence item, then the shared group's, then directly from the top-level data
+ * set, returning the first non-null result.
+ */
+function readGroupValue<T>(
+  groups: FunctionalGroups,
+  seqTag: string,
+  read: (ds: dicomParser.DataSet) => T | null,
+): T | null {
+  for (const source of [
+    firstItem(groups.fg, seqTag),
+    firstItem(groups.shared, seqTag),
+    groups.top,
+  ]) {
+    if (!source) continue;
+    const v = read(source);
+    if (v !== null) return v;
+  }
+  return null;
+}
+
+/** First item's nested data set of a sequence element, or null. */
+function firstItem(
+  dataSet: dicomParser.DataSet | null,
+  seqTag: string,
+): dicomParser.DataSet | null {
+  return dataSet?.elements[seqTag]?.items?.[0]?.dataSet ?? null;
+}
+
+/** Read one frame's samples and apply the modality LUT into real units. */
+function readFramePixels(
+  ctx: FileContext,
+  frameIndex: number,
+  rescaleSlope: number,
+  rescaleIntercept: number,
+): Float32Array {
+  const count = ctx.rows * ctx.columns;
+  const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
+  const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
+  const raw = readRawPixels(ctx.buffer, offset, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+
   const pixels = new Float32Array(count);
   for (let i = 0; i < count; i++) {
     pixels[i] = raw[i] * rescaleSlope + rescaleIntercept;
   }
-
-  const pixelSpacing = readPair(dataSet, 'x00280030', [1, 1]);
-  const position = readTriple(dataSet, 'x00200032');
-  const orientation = readFloats(dataSet, 'x00200037', 6);
-
-  const windowCenter = readFirstFloat(dataSet, 'x00281050');
-  const windowWidth = readFirstFloat(dataSet, 'x00281051');
-
-  return {
-    name,
-    rows,
-    columns,
-    pixelSpacing,
-    position,
-    orientation,
-    instanceNumber: num(dataSet, 'x00200013', 0),
-    modality,
-    rescaleSlope,
-    rescaleIntercept,
-    windowCenter,
-    windowWidth,
-    pixels,
-  };
+  return pixels;
 }
 
 function readRawPixels(
