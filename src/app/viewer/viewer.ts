@@ -13,6 +13,7 @@ import {
 import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect } from '../../render/layout';
 import { SliceRenderer, type PaneView } from '../../render/slice-renderer';
+import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { Orientation, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 
@@ -62,6 +63,8 @@ export class Viewer {
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   protected readonly hoveredOrientation = signal<Orientation | null>(null);
+  /** Cursor position in CSS pixels relative to the canvas, or null when away. */
+  private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
   protected readonly windowCenter = signal(0);
   protected readonly windowWidth = signal(1);
 
@@ -102,6 +105,29 @@ export class Viewer {
   private readonly volume = computed<Volume | null>(() => {
     const state = this.load();
     return state.status === 'ready' ? state.result.volume : null;
+  });
+
+  /** Live readout of the voxel under the cursor, or null when none is hovered. */
+  protected readonly probeText = computed<string | null>(() => {
+    if (!this.isReady()) return null;
+    const cursor = this.cursor();
+    const volume = this.volume();
+    if (!cursor || !volume) return null;
+
+    const pane = placementAt(this.panes(), cursor.x, cursor.y);
+    if (!pane) return null;
+
+    const sample = probeVoxel(
+      volume,
+      pane.orientation,
+      this.sliceIndices()[pane.orientation],
+      this.zooms()[pane.orientation],
+      pane.rect,
+      cursor.x,
+      cursor.y,
+    );
+    if (!sample) return null;
+    return formatProbe(this.orientationName(pane.orientation), sample, volume);
   });
 
   private gpu: GpuContext | null = null;
@@ -175,10 +201,15 @@ export class Viewer {
   }
 
   protected onPointerMove(event: MouseEvent): void {
-    this.hoveredOrientation.set(this.paneAtEvent(event));
+    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    this.cursor.set({ x, y });
+    this.hoveredOrientation.set(findPaneAt(this.panes(), x, y));
   }
 
   protected onPointerLeave(): void {
+    this.cursor.set(null);
     this.hoveredOrientation.set(null);
   }
 
@@ -302,15 +333,33 @@ function placePanes(layout: ReturnType<typeof mprLayout>, main: Orientation): Pa
   ];
 }
 
-/** The orientation of the pane containing CSS-pixel point (x, y), or null. */
-function findPaneAt(panes: readonly PanePlacement[], x: number, y: number): Orientation | null {
+/** The pane containing CSS-pixel point (x, y), or null. */
+function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {
   for (const pane of panes) {
     const { x: rx, y: ry, width, height } = pane.rect;
     if (x >= rx && x < rx + width && y >= ry && y < ry + height) {
-      return pane.orientation;
+      return pane;
     }
   }
   return null;
+}
+
+/** The orientation of the pane containing CSS-pixel point (x, y), or null. */
+function findPaneAt(panes: readonly PanePlacement[], x: number, y: number): Orientation | null {
+  return placementAt(panes, x, y)?.orientation ?? null;
+}
+
+/** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */
+function formatProbe(name: string, probe: VoxelProbe, volume: Volume): string {
+  const [x, y, z] = probe.voxel;
+  const value = formatValue(probe.value);
+  const trivialLut = volume.rescaleSlope === 1 && volume.rescaleIntercept === 0;
+  const stored = trivialLut ? '' : ` · stored ${formatValue(probe.rawValue)}`;
+  return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}`;
+}
+
+function formatValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 function withValue(

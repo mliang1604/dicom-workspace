@@ -57,4 +57,12 @@ export interface Volume {
   /** Default display window derived from the data or file. */
   readonly windowCenter: number;
   readonly windowWidth: number;
+  /**
+   * Modality LUT used to rescale the stored pixels into {@link data}'s units:
+   * `data = rawStored * rescaleSlope + rescaleIntercept`. Taken from the first
+   * slice (assumed uniform across the series); lets callers recover the raw
+   * stored value from a rescaled voxel.
+   */
+  readonly rescaleSlope: number;
+  readonly rescaleIntercept: number;
 }

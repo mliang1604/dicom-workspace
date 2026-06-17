@@ -211,8 +211,12 @@ function planeExtent(volume: Volume, orientation: Orientation): [number, number]
   }
 }
 
-/** Letterbox scale that fits the plane into a viewport without distortion. */
-function aspectScale(
+/**
+ * Letterbox scale that fits the plane into a viewport without distortion.
+ * Exported so the CPU-side cursor probe can reproduce the exact same fit the
+ * shader uses when mapping a pixel back to a voxel.
+ */
+export function aspectScale(
   volume: Volume,
   orientation: Orientation,
   viewWidth: number,

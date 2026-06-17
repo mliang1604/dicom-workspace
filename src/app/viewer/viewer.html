@@ -74,4 +74,8 @@
   </div>
 
   <div class="status" [class.error]="statusIsError()">{{ statusText() }}</div>
+
+  @if (probeText(); as probe) {
+    <div class="probe">{{ probe }}</div>
+  }
 </main>
