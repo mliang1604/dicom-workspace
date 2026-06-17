@@ -14,7 +14,7 @@ import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect } from '../../render/layout';
 import { SliceRenderer, type PaneView } from '../../render/slice-renderer';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
-import { Orientation, type Volume } from '../../dicom/types';
+import { modalityUnit, Orientation, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
@@ -352,7 +352,8 @@ function findPaneAt(panes: readonly PanePlacement[], x: number, y: number): Orie
 /** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */
 function formatProbe(name: string, probe: VoxelProbe, volume: Volume): string {
   const [x, y, z] = probe.voxel;
-  const value = formatValue(probe.value);
+  const unit = modalityUnit(volume.modality);
+  const value = `${formatValue(probe.value)}${unit ? ` ${unit}` : ''}`;
   const trivialLut = volume.rescaleSlope === 1 && volume.rescaleIntercept === 0;
   const stored = trivialLut ? '' : ` · stored ${formatValue(probe.rawValue)}`;
   return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}`;

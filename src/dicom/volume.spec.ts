@@ -11,6 +11,7 @@ function axialSlice(z: number, value: number, instanceNumber: number): Slice {
     position: [0, 0, z],
     orientation: [1, 0, 0, 0, 1, 0],
     instanceNumber,
+    modality: 'CT',
     rescaleSlope: 1,
     rescaleIntercept: 0,
     windowCenter: null,
@@ -44,6 +45,12 @@ describe('buildVolume', () => {
     expect(volume.max).toBe(20);
     expect(volume.windowWidth).toBe(20);
     expect(volume.windowCenter).toBe(10);
+  });
+
+  it('carries the modality through from the first slice', () => {
+    const volume = buildVolume([axialSlice(0, 0, 1), axialSlice(2, 20, 2)]);
+
+    expect(volume.modality).toBe('CT');
   });
 
   it('rejects an empty slice list', () => {

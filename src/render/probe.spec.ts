@@ -21,6 +21,7 @@ function makeVolume(
     windowWidth: 1,
     rescaleSlope,
     rescaleIntercept,
+    modality: 'CT',
   };
 }
 
