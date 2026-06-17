@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { parseSlice } from '../dicom/loader';
+import { parseFile } from '../dicom/loader';
 import { buildVolume } from '../dicom/volume';
 import type { Slice, Volume } from '../dicom/types';
 
@@ -8,7 +8,7 @@ export interface LoadResult {
   readonly volume: Volume;
   /** Number of files the user selected. */
   readonly fileCount: number;
-  /** Number of those files that contributed an image slice. */
+  /** Number of image slices the files contributed (one file may yield many, if multiframe). */
   readonly sliceCount: number;
 }
 
@@ -23,8 +23,7 @@ export class VolumeLoader {
     const slices: Slice[] = [];
     for (const file of files) {
       const buffer = await file.arrayBuffer();
-      const slice = parseSlice(file.name, buffer);
-      if (slice) slices.push(slice);
+      slices.push(...parseFile(file.name, buffer));
     }
 
     const volume = buildVolume(slices);

@@ -7,6 +7,11 @@ declare module 'dicom-parser' {
     readonly dataOffset: number;
     /** Length of the element's value in bytes. */
     readonly length: number;
+    /**
+     * For SQ (sequence) elements: the parsed items, each carrying its own
+     * nested data set. Absent on non-sequence elements.
+     */
+    readonly items?: readonly { readonly dataSet: DataSet }[];
   }
 
   /** A parsed DICOM data set, queried by lowercase `xGGGGEEEE` tag keys. */
