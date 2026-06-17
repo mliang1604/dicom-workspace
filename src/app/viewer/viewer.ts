@@ -62,6 +62,8 @@ export class Viewer {
   private readonly sliceIndices = signal<PerOrientation>([0, 0, 0]);
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
+  /** When true, the sagittal view is mirrored so anterior sits on the right. */
+  protected readonly sagittalFlipped = signal(false);
   protected readonly hoveredOrientation = signal<Orientation | null>(null);
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
   private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
@@ -125,6 +127,7 @@ export class Viewer {
       pane.rect,
       cursor.x,
       cursor.y,
+      pane.orientation === Orientation.Sagittal && this.sagittalFlipped(),
     );
     if (!sample) return null;
     return formatProbe(this.orientationName(pane.orientation), sample, volume);
@@ -144,6 +147,7 @@ export class Viewer {
       const zooms = this.zooms();
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
+      const sagittalFlipped = this.sagittalFlipped();
       if (!renderer || !volume) return;
 
       const views: PaneView[] = panes.map((pane) => ({
@@ -152,6 +156,7 @@ export class Viewer {
         windowCenter,
         windowWidth,
         zoom: zooms[pane.orientation],
+        flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
         rect: scaleRect(pane.rect, dpr),
       }));
       renderer.renderPanes(views);
@@ -184,6 +189,10 @@ export class Viewer {
       const next = (ORIENTATION_ORDER.indexOf(current) + 1) % ORIENTATION_ORDER.length;
       return ORIENTATION_ORDER[next];
     });
+  }
+
+  protected toggleSagittalFlip(): void {
+    this.sagittalFlipped.update((flipped) => !flipped);
   }
 
   protected onSwapKey(event: Event): void {
@@ -293,6 +302,7 @@ export class Viewer {
     this.windowCenter.set(Math.round(result.volume.windowCenter));
     this.windowWidth.set(Math.round(result.volume.windowWidth));
     this.mainOrientation.set(Orientation.Axial);
+    this.sagittalFlipped.set(false);
     this.zooms.set([1, 1, 1]);
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),

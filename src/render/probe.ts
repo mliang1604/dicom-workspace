@@ -24,6 +24,7 @@ export interface VoxelProbe {
  * @param rect    Pane rectangle in the same pixel units as the cursor.
  * @param cursorX Cursor X relative to the canvas, same units as `rect`.
  * @param cursorY Cursor Y relative to the canvas, same units as `rect`.
+ * @param flipX   Mirror the in-plane horizontal axis, matching the shader.
  */
 export function probeVoxel(
   volume: Volume,
@@ -33,6 +34,7 @@ export function probeVoxel(
   rect: PaneRect,
   cursorX: number,
   cursorY: number,
+  flipX = false,
 ): VoxelProbe | null {
   if (rect.width < 1 || rect.height < 1) return null;
 
@@ -48,24 +50,27 @@ export function probeVoxel(
   const planeY = (v - 0.5) * (scaleY / z) + 0.5;
   if (planeX < 0 || planeX > 1 || planeY < 0 || planeY > 1) return null;
 
+  // Mirror the horizontal axis the same way the shader does when flipped.
+  const px = flipX ? 1 - planeX : planeX;
+
   const [dimX, dimY, dimZ] = volume.dims;
   let vx: number;
   let vy: number;
   let vz: number;
   switch (orientation) {
     case Orientation.Axial: // x→X, y→Y, slice walks Z.
-      vx = toIndex(planeX, dimX);
+      vx = toIndex(px, dimX);
       vy = toIndex(planeY, dimY);
       vz = clampIndex(sliceIndex, dimZ);
       break;
     case Orientation.Coronal: // x→X, y→Z (flipped), slice walks Y.
-      vx = toIndex(planeX, dimX);
+      vx = toIndex(px, dimX);
       vy = clampIndex(sliceIndex, dimY);
       vz = toIndex(1 - planeY, dimZ);
       break;
     case Orientation.Sagittal: // x→Y, y→Z (flipped), slice walks X.
       vx = clampIndex(sliceIndex, dimX);
-      vy = toIndex(planeX, dimY);
+      vy = toIndex(px, dimY);
       vz = toIndex(1 - planeY, dimZ);
       break;
     default: {

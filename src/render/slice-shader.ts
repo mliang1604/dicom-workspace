@@ -15,7 +15,8 @@ struct Params {
   orientation : u32,   // 0 axial, 1 coronal, 2 sagittal
   slicePos : f32,      // normalized position along the slicing axis, 0..1
   scale : vec2<f32>,   // aspect-fit: centered uv is multiplied by this
-  _pad : vec2<f32>,
+  flipX : u32,         // non-zero mirrors the in-plane horizontal axis
+  _pad : f32,
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -51,16 +52,19 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
+  // Optionally mirror the in-plane horizontal axis (e.g. flip sagittal L/R).
+  let px = select(plane.x, 1.0 - plane.x, P.flipX != 0u);
+
   var coord : vec3<f32>;
   switch (P.orientation) {
     case 0u: { // Axial: screen x->X, screen y->Y, slice walks Z.
-      coord = vec3<f32>(plane.x, plane.y, P.slicePos);
+      coord = vec3<f32>(px, plane.y, P.slicePos);
     }
     case 1u: { // Coronal: screen x->X, screen y->Z (flipped: superior up), slice walks Y.
-      coord = vec3<f32>(plane.x, P.slicePos, 1.0 - plane.y);
+      coord = vec3<f32>(px, P.slicePos, 1.0 - plane.y);
     }
     default: { // Sagittal: screen x->Y, screen y->Z (flipped: superior up), slice walks X.
-      coord = vec3<f32>(P.slicePos, plane.x, 1.0 - plane.y);
+      coord = vec3<f32>(P.slicePos, px, 1.0 - plane.y);
     }
   }
 

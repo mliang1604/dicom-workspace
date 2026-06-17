@@ -13,11 +13,13 @@ export interface PaneView {
   readonly windowWidth: number;
   /** Magnification factor; 1 fits the slice to the pane, >1 zooms in. */
   readonly zoom: number;
+  /** Mirror the in-plane horizontal axis (e.g. flip the sagittal view L/R). */
+  readonly flipX?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
 
-const PARAMS_SIZE = 32; // bytes: windowCenter,windowWidth,orientation,slicePos + scale.xy + pad.xy
+const PARAMS_SIZE = 32; // bytes: windowCenter,windowWidth,orientation,slicePos + scale.xy + flipX + pad
 const BYTES_PER_HALF = 2;
 const MAX_PANES = 3;
 
@@ -173,6 +175,7 @@ export class SliceRenderer {
     floats[3] = slicePos;
     floats[4] = scaleX / zoom;
     floats[5] = scaleY / zoom;
+    uints[6] = view.flipX ? 1 : 0;
     this.device.queue.writeBuffer(buffer, 0, params);
   }
 }
