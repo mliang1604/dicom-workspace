@@ -63,6 +63,18 @@ describe('probeVoxel', () => {
     expect(probe?.voxel).toEqual([1, 0, 3]);
   });
 
+  it('mirrors the horizontal axis for a flipped sagittal view', () => {
+    const volume = makeVolume([4, 4, 4]);
+
+    // Top-left of the pane: y unflipped gives the lowest Y voxel...
+    const unflipped = probeVoxel(volume, Orientation.Sagittal, 1, 1, SQUARE, 0, 0);
+    // ...and flipping the horizontal axis swaps it to the highest Y voxel.
+    const flipped = probeVoxel(volume, Orientation.Sagittal, 1, 1, SQUARE, 0, 0, true);
+
+    expect(unflipped?.voxel).toEqual([1, 0, 3]);
+    expect(flipped?.voxel).toEqual([1, 3, 3]);
+  });
+
   it('returns null when the cursor is outside the pane', () => {
     const volume = makeVolume([4, 4, 4]);
 

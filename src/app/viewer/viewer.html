@@ -18,6 +18,15 @@
     Swap main ⟲ <kbd>X</kbd>
   </button>
 
+  <button
+    type="button"
+    (click)="toggleSagittalFlip()"
+    [disabled]="!isReady()"
+    title="Flip the sagittal view between anterior-left and anterior-right"
+  >
+    Flip sagittal ⇄ {{ sagittalFlipped() ? 'A▸' : '◂A' }}
+  </button>
+
   <span class="spacer">
     @if (isReady()) {
       <span class="hint">Scroll over a pane to change its slice</span>
