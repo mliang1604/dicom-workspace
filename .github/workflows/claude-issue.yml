@@ -34,10 +34,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           # Authenticates the Claude model against your Pro/Max subscription
-          # (no metered API billing). Generate the token locally with
-          # `claude setup-token`, then add it as the CLAUDE_CODE_OAUTH_TOKEN
-          # repo secret. To use a metered API key instead, swap this for
-          # `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`.
+          # (no metered API billing). Generate the token with `claude setup-token`
+          # and store it as the CLAUDE_CODE_OAUTH_TOKEN repo secret.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Pass only the issue number (untrusted issue text is read via tools,
           # never interpolated into the prompt, to avoid prompt injection).
