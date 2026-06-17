@@ -133,3 +133,17 @@ canvas {
   color: #ff7a7a;
   border-color: #5a2a2a;
 }
+
+/* Live voxel readout, anchored opposite the status line. */
+.probe {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
