@@ -9,7 +9,8 @@ name: Claude — implement new issues
 # as soon as it is created. Enable "Allow auto-merge" in repo settings too.
 on:
   issues:
-    types: [opened]
+    # 'reopened' lets you retry an issue (e.g. after a failed run) by reopening it.
+    types: [opened, reopened]
 
 # The action needs to push branches, open PRs, and comment on the issue.
 # id-token: write lets the Claude GitHub App mint its OIDC token for GitHub auth.
