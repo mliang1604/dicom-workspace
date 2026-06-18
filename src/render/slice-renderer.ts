@@ -2,6 +2,7 @@ import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
 import { Orientation, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
+import { planeExtentMm, planeToTexMatrix, sliceCountFor } from './reslice';
 import { SLICE_SHADER } from './slice-shader';
 
 /** One pane to draw: an orientation/slice of the volume into a viewport rect. */
@@ -21,12 +22,14 @@ export interface PaneView {
   readonly rect: PaneRect;
 }
 
-// bytes: windowCenter,windowWidth,orientation,slicePos + scale.xy + pan.xy + flipX + pad.
-// Rounded up to the 16-byte uniform-struct stride.
-const PARAMS_SIZE = 48;
+// bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
+// slicePos,flipX (32). Already a multiple of the 16-byte uniform-struct stride.
+const PARAMS_SIZE = 96;
 const BYTES_PER_HALF = 2;
 const MAX_PANES = 3;
 const ORIGIN: Vec2 = { x: 0, y: 0 };
+/** Float offset of the per-frame params that follow the 4×4 reslice matrix. */
+const MATRIX_FLOATS = 16;
 
 interface PaneSlot {
   readonly buffer: GPUBuffer;
@@ -47,6 +50,8 @@ export class SliceRenderer {
 
   private volume: Volume | null = null;
   private texture: GPUTexture | null = null;
+  /** Per-orientation plane→texture matrices, indexed by Orientation value. */
+  private matrices: readonly Float32Array[] = [];
 
   constructor(gpu: GpuContext) {
     this.gpu = gpu;
@@ -80,7 +85,7 @@ export class SliceRenderer {
   /** Number of slices available along the given orientation for the loaded volume. */
   sliceCount(orientation: Orientation): number {
     if (!this.volume) return 0;
-    return this.volume.dims[axisOf(orientation)];
+    return sliceCountFor(this.volume, orientation);
   }
 
   /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
@@ -122,6 +127,11 @@ export class SliceRenderer {
 
     this.volume = volume;
     this.texture = texture;
+    // The reslice matrix depends only on the volume's geometry, so build one
+    // per orientation up front and reuse it across frames.
+    this.matrices = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map(
+      (orientation) => planeToTexMatrix(volume, orientation),
+    );
   }
 
   /** Draw the given panes into their viewports on the canvas. */
@@ -164,7 +174,7 @@ export class SliceRenderer {
   }
 
   private writeParams(buffer: GPUBuffer, view: PaneView, rect: PaneRect, volume: Volume): void {
-    const count = volume.dims[axisOf(view.orientation)];
+    const count = sliceCountFor(volume, view.orientation);
     // Sample the centre of the voxel so the first/last slices aren't clamped away.
     const slicePos = count > 1 ? (view.sliceIndex + 0.5) / count : 0.5;
     const [scaleX, scaleY] = aspectScale(volume, view.orientation, rect.width, rect.height);
@@ -175,50 +185,16 @@ export class SliceRenderer {
     const params = new ArrayBuffer(PARAMS_SIZE);
     const floats = new Float32Array(params);
     const uints = new Uint32Array(params);
-    floats[0] = view.windowCenter;
-    floats[1] = view.windowWidth;
-    uints[2] = view.orientation;
-    floats[3] = slicePos;
-    floats[4] = scaleX / zoom;
-    floats[5] = scaleY / zoom;
-    floats[6] = pan.x;
-    floats[7] = pan.y;
-    uints[8] = view.flipX ? 1 : 0;
+    floats.set(this.matrices[view.orientation], 0); // planeToTex, floats 0..15
+    floats[MATRIX_FLOATS + 0] = scaleX / zoom;
+    floats[MATRIX_FLOATS + 1] = scaleY / zoom;
+    floats[MATRIX_FLOATS + 2] = pan.x;
+    floats[MATRIX_FLOATS + 3] = pan.y;
+    floats[MATRIX_FLOATS + 4] = view.windowCenter;
+    floats[MATRIX_FLOATS + 5] = view.windowWidth;
+    floats[MATRIX_FLOATS + 6] = slicePos;
+    uints[MATRIX_FLOATS + 7] = view.flipX ? 1 : 0;
     this.device.queue.writeBuffer(buffer, 0, params);
-  }
-}
-
-/** Which volume axis (0=x, 1=y, 2=z) the slice index walks for an orientation. */
-function axisOf(orientation: Orientation): 0 | 1 | 2 {
-  switch (orientation) {
-    case Orientation.Sagittal:
-      return 0;
-    case Orientation.Coronal:
-      return 1;
-    case Orientation.Axial:
-      return 2;
-    default: {
-      const exhaustive: never = orientation;
-      return exhaustive;
-    }
-  }
-}
-
-/** Physical width/height (mm) of the slice plane for an orientation. */
-function planeExtent(volume: Volume, orientation: Orientation): [number, number] {
-  const [dx, dy, dz] = volume.dims;
-  const [sx, sy, sz] = volume.spacing;
-  switch (orientation) {
-    case Orientation.Axial:
-      return [dx * sx, dy * sy];
-    case Orientation.Coronal:
-      return [dx * sx, dz * sz];
-    case Orientation.Sagittal:
-      return [dy * sy, dz * sz];
-    default: {
-      const exhaustive: never = orientation;
-      return exhaustive;
-    }
   }
 }
 
@@ -233,7 +209,7 @@ export function aspectScale(
   viewWidth: number,
   viewHeight: number,
 ): [number, number] {
-  const [planeW, planeH] = planeExtent(volume, orientation);
+  const [planeW, planeH] = planeExtentMm(volume, orientation);
   const planeAspect = planeW / planeH;
   const viewAspect = viewWidth / viewHeight;
   if (viewAspect > planeAspect) {

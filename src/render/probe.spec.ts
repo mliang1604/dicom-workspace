@@ -1,4 +1,4 @@
-import { Orientation, type Volume } from '../dicom/types';
+import { Orientation, type Volume, type VolumeGeometry } from '../dicom/types';
 import type { PaneRect } from './layout';
 import { probeVoxel } from './probe';
 
@@ -7,6 +7,7 @@ function makeVolume(
   dims: [number, number, number],
   rescaleSlope = 1,
   rescaleIntercept = 0,
+  geometry?: VolumeGeometry,
 ): Volume {
   const [x, y, z] = dims;
   const data = new Float32Array(x * y * z);
@@ -22,6 +23,7 @@ function makeVolume(
     rescaleSlope,
     rescaleIntercept,
     modality: 'CT',
+    geometry,
   };
 }
 
@@ -113,6 +115,26 @@ describe('probeVoxel', () => {
 
     expect(centre?.voxel).toEqual([2, 2, 2]);
     expect(panned?.voxel).toEqual([1, 1, 2]);
+  });
+
+  it('reslices the anatomical plane for a sagittally-acquired volume', () => {
+    // Columns run +Y, rows run -Z, slices run +X: the acquisition axes are a
+    // permutation of the patient axes, so the axial view must reslice across
+    // the stack rather than reading a single acquired slice.
+    const geometry: VolumeGeometry = {
+      iStep: [0, 1, 0],
+      jStep: [0, 0, -1],
+      kStep: [1, 0, 0],
+      origin: [0, 0, 0],
+    };
+    const volume = makeVolume([4, 4, 4], 1, 0, geometry);
+
+    // Top-left of the axial pane, slice index 2. The naive axis mapping would
+    // have sampled [0, 0, 2]; the patient-aware reslice samples [0, 1, 0].
+    const probe = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 0, 0);
+
+    expect(probe?.voxel).toEqual([0, 1, 0]);
+    expect(probe?.value).toBe((0 * 4 + 1) * 4 + 0);
   });
 
   it('recovers the raw stored value through the modality LUT', () => {

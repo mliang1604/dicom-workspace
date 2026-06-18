@@ -14,7 +14,7 @@ import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
 import { clampPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
-import { modalityUnit, Orientation, type Volume } from '../../dicom/types';
+import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
@@ -52,6 +52,14 @@ const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.S
 const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
+
+/**
+ * Only warn about interpolation when the widest gap spans more than this
+ * multiple of the slice spacing. A gap up to 2× spacing is a single missing
+ * slice (or spacing jitter), which interpolates cleanly and isn't worth a
+ * banner; wider gaps leave a visible reconstructed region.
+ */
+const GAP_WARNING_RATIO = 2;
 
 @Component({
   selector: 'app-viewer',
@@ -101,6 +109,12 @@ export class Viewer {
   protected readonly statusIsError = computed(
     () => this.gpuError() !== null || this.load().status === 'error',
   );
+
+  /** Warns that reconstructed planes are interpolated across significant gaps. */
+  protected readonly interpolationWarning = computed<string | null>(() => {
+    const volume = this.volume();
+    return volume ? missingSliceWarning(volume.missingSlices, volume.spacing[2]) : null;
+  });
 
   protected readonly statusText = computed(() => {
     const gpuError = this.gpuError();
@@ -499,4 +513,20 @@ function clamp(value: number, min: number, max: number): number {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Warning text for an interpolated volume, or null when interpolation is
+ * negligible. Only gaps wider than {@link GAP_WARNING_RATIO}× the slice spacing
+ * are flagged, so a single missing slice or sub-voxel jitter stays quiet.
+ * Exported for direct unit testing of the threshold and wording.
+ */
+export function missingSliceWarning(
+  missing: MissingSlices | undefined,
+  spacingMm: number,
+): string | null {
+  if (!missing || missing.maxGapMm <= GAP_WARNING_RATIO * spacingMm) return null;
+  const slices = missing.count === 1 ? 'slice' : 'slices';
+  const gap = Math.round(missing.maxGapMm);
+  return `${missing.count} missing ${slices} interpolated (largest gap ${gap} mm). Views crossing a gap are reconstructed, not acquired.`;
 }

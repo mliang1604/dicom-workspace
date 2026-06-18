@@ -1,7 +1,10 @@
 /**
  * WGSL for rendering a single planar slice out of a 3D volume texture, with a
  * DICOM window/level transform. The same shader serves axial, coronal and
- * sagittal views by swapping which volume axis the slice index walks.
+ * sagittal views: a per-pane `planeToTex` affine (built in `reslice.ts` from the
+ * volume's patient-space geometry) maps the pane's (u, v, slicePos) to texture
+ * coordinates, so the anatomical plane is correct regardless of how the series
+ * was acquired (axial, sagittal, coronal, or oblique/gantry-tilted).
  *
  * Kept as a string constant (rather than a `.wgsl` asset) because Angular's
  * esbuild-based builder has no `?raw` text loader. The `language=wgsl` hint
@@ -10,14 +13,13 @@
 // language=wgsl
 export const SLICE_SHADER = /* wgsl */ `
 struct Params {
+  planeToTex : mat4x4<f32>, // (u, v, slicePos, 1) -> texture coord, patient-aware
+  scale : vec2<f32>,        // aspect-fit: centered uv is multiplied by this
+  pan : vec2<f32>,          // screen-uv translation of the slice (drag-to-pan)
   windowCenter : f32,
   windowWidth : f32,
-  orientation : u32,   // 0 axial, 1 coronal, 2 sagittal
-  slicePos : f32,      // normalized position along the slicing axis, 0..1
-  scale : vec2<f32>,   // aspect-fit: centered uv is multiplied by this
-  pan : vec2<f32>,     // screen-uv translation of the slice (drag-to-pan)
-  flipX : u32,         // non-zero mirrors the in-plane horizontal axis
-  _pad : f32,
+  slicePos : f32,           // normalized position along the slicing axis, 0..1
+  flipX : u32,              // non-zero mirrors the in-plane horizontal axis
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -55,19 +57,13 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   }
 
   // Optionally mirror the in-plane horizontal axis (e.g. flip sagittal L/R).
-  let px = select(plane.x, 1.0 - plane.x, P.flipX != 0u);
+  let u = select(plane.x, 1.0 - plane.x, P.flipX != 0u);
 
-  var coord : vec3<f32>;
-  switch (P.orientation) {
-    case 0u: { // Axial: screen x->X, screen y->Y, slice walks Z.
-      coord = vec3<f32>(px, plane.y, P.slicePos);
-    }
-    case 1u: { // Coronal: screen x->X, screen y->Z (flipped: superior up), slice walks Y.
-      coord = vec3<f32>(px, P.slicePos, 1.0 - plane.y);
-    }
-    default: { // Sagittal: screen x->Y, screen y->Z (flipped: superior up), slice walks X.
-      coord = vec3<f32>(P.slicePos, px, 1.0 - plane.y);
-    }
+  // Reslice: pane plane -> patient plane -> texture coord, via the affine.
+  let coord = (P.planeToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+  // Outside the (possibly rotated) volume the plane has no data: paint black.
+  if (any(coord < vec3<f32>(0.0)) || any(coord > vec3<f32>(1.0))) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
   let raw = textureSampleLevel(volTex, volSamp, coord, 0.0).r;
