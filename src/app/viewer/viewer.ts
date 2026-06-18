@@ -66,7 +66,10 @@ const GAP_WARNING_RATIO = 2;
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
-  host: { '(window:keydown.x)': 'onSwapKey($event)' },
+  host: {
+    '(window:keydown.x)': 'onSwapKey($event)',
+    '(window:keydown.f)': 'onFlipKey($event)',
+  },
 })
 export class Viewer {
   private readonly loader = inject(VolumeLoader);
@@ -234,6 +237,12 @@ export class Viewer {
     if (event.target instanceof HTMLInputElement || !this.isReady()) return;
     event.preventDefault();
     this.swapMain();
+  }
+
+  protected onFlipKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
+    event.preventDefault();
+    this.toggleSagittalFlip();
   }
 
   protected async onFilesSelected(event: Event): Promise<void> {

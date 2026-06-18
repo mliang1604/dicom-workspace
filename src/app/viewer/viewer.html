@@ -22,9 +22,9 @@
     type="button"
     (click)="toggleSagittalFlip()"
     [disabled]="!isReady()"
-    title="Flip the sagittal view between anterior-left and anterior-right"
+    title="Flip the sagittal view between anterior-left and anterior-right (F)"
   >
-    Flip sagittal ⇄ {{ sagittalFlipped() ? 'A▸' : '◂A' }}
+    Flip sagittal ⇄ <kbd>F</kbd> {{ sagittalFlipped() ? 'A▸' : '◂A' }}
   </button>
 
   <span class="spacer">
