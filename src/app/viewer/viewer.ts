@@ -301,7 +301,11 @@ export class Viewer {
 
     event.preventDefault();
     if (event.ctrlKey) {
-      this.zoomPane(orientation, event.deltaY);
+      const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+      this.zoomPane(orientation, event.deltaY, {
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top,
+      });
     } else {
       this.scrollSlice(orientation, event.deltaY);
     }
@@ -319,7 +323,7 @@ export class Viewer {
     });
   }
 
-  private zoomPane(orientation: Orientation, deltaY: number): void {
+  private zoomPane(orientation: Orientation, deltaY: number, cursor: Vec2): void {
     if (deltaY === 0) return;
     const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
     const from = this.zooms()[orientation];
@@ -330,11 +334,16 @@ export class Viewer {
     const placement = this.panes().find((pane) => pane.orientation === orientation);
     const volume = this.volume();
     if (!placement || !volume) return;
-    // Pivot the zoom on the pane centre, not the image centre: rescaling the pan
-    // by the zoom ratio holds the plane point under the pane centre fixed. Then
-    // re-clamp, since the pan bound scales with zoom.
+    // Pivot the zoom on the cursor, not the image centre: holding the plane point
+    // under the cursor fixed keeps the spot being inspected in place. The anchor
+    // is the cursor in screen-uv (pane-fraction) units. Then re-clamp, since the
+    // pan bound scales with zoom.
+    const anchor: Vec2 = {
+      x: (cursor.x - placement.rect.x) / placement.rect.width,
+      y: (cursor.y - placement.rect.y) / placement.rect.height,
+    };
     this.pans.update((pans) => {
-      const anchored = rezoomPan(pans[orientation], from, to);
+      const anchored = rezoomPan(pans[orientation], from, to, anchor);
       const clamped = clampPan(
         volume,
         orientation,
