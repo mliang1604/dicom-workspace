@@ -53,7 +53,10 @@ jobs:
             1. Create a new branch named claude/issue-${{ github.event.issue.number }}.
             2. Make the change, following the conventions in CLAUDE.md and the
                surrounding code.
-            3. Run the production build and the unit tests; make them pass.
+            3. Install dependencies with `npm ci` (never `npm install`, which
+               rewrites package-lock.json on the runner and wastes turns).
+               Run the production build and the unit tests; make them pass.
+               Leave package-lock.json unchanged — do not stage or commit it.
             4. Open a pull request into main whose body contains
                "Closes #${{ github.event.issue.number }}".
             5. Enable auto-merge so it lands when checks pass:
@@ -66,5 +69,5 @@ jobs:
           # action's agent mode denies them and the run does nothing.
           claude_args: |
             --model claude-opus-4-8
-            --max-turns 40
+            --max-turns 80
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
