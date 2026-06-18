@@ -1,5 +1,5 @@
 import { Orientation, type Volume } from '../dicom/types';
-import { clampPan } from './slice-renderer';
+import { clampPan, rezoomPan } from './slice-renderer';
 
 /** A minimal volume; only dims/spacing matter to the pan geometry. */
 function makeVolume(
@@ -57,5 +57,22 @@ describe('clampPan', () => {
       x: 0.25,
       y: 0.5,
     });
+  });
+});
+
+describe('rezoomPan', () => {
+  it('scales the pan by the zoom ratio so the pane centre stays put', () => {
+    // Doubling the zoom doubles the pan: -pan*scale/zoom is then unchanged.
+    expect(rezoomPan({ x: 0.25, y: -0.1 }, 1, 2)).toEqual({ x: 0.5, y: -0.2 });
+    // Halving the zoom halves the pan.
+    expect(rezoomPan({ x: 0.4, y: 0.4 }, 2, 1)).toEqual({ x: 0.2, y: 0.2 });
+  });
+
+  it('leaves a centred (zero) pan at the origin', () => {
+    expect(rezoomPan({ x: 0, y: 0 }, 1, 4)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('treats a non-positive zoom as 1x rather than dividing by zero', () => {
+    expect(rezoomPan({ x: 0.3, y: 0.3 }, 0, 2)).toEqual({ x: 0.6, y: 0.6 });
   });
 });

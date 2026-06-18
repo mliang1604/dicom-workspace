@@ -12,7 +12,7 @@ import {
 } from '@angular/core';
 import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
-import { clampPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
+import { clampPan, rezoomPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { modalityUnit, Orientation, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
@@ -293,27 +293,6 @@ export class Viewer {
     });
   }
 
-  /** Re-clamp a pane's pan after its zoom changes, since the bound scales with zoom. */
-  private reclampPan(orientation: Orientation): void {
-    const placement = this.panes().find((pane) => pane.orientation === orientation);
-    const volume = this.volume();
-    if (!placement || !volume) return;
-    const zoom = this.zooms()[orientation];
-    this.pans.update((pans) => {
-      const clamped = clampPan(
-        volume,
-        orientation,
-        placement.rect.width,
-        placement.rect.height,
-        zoom,
-        pans[orientation],
-      );
-      return clamped.x === pans[orientation].x && clamped.y === pans[orientation].y
-        ? pans
-        : withValue(pans, orientation, clamped);
-    });
-  }
-
   /** Wheel over a pane scrolls its slices; Ctrl+wheel zooms it. */
   protected onWheel(event: WheelEvent): void {
     if (!this.isReady()) return;
@@ -343,12 +322,29 @@ export class Viewer {
   private zoomPane(orientation: Orientation, deltaY: number): void {
     if (deltaY === 0) return;
     const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    this.zooms.update((zooms) => {
-      const next = clamp(zooms[orientation] * factor, MIN_ZOOM, MAX_ZOOM);
-      return next === zooms[orientation] ? zooms : withValue(zooms, orientation, next);
+    const from = this.zooms()[orientation];
+    const to = clamp(from * factor, MIN_ZOOM, MAX_ZOOM);
+    if (to === from) return;
+    this.zooms.update((zooms) => withValue(zooms, orientation, to));
+
+    const placement = this.panes().find((pane) => pane.orientation === orientation);
+    const volume = this.volume();
+    if (!placement || !volume) return;
+    // Pivot the zoom on the pane centre, not the image centre: rescaling the pan
+    // by the zoom ratio holds the plane point under the pane centre fixed. Then
+    // re-clamp, since the pan bound scales with zoom.
+    this.pans.update((pans) => {
+      const anchored = rezoomPan(pans[orientation], from, to);
+      const clamped = clampPan(
+        volume,
+        orientation,
+        placement.rect.width,
+        placement.rect.height,
+        to,
+        anchored,
+      );
+      return withValue(pans, orientation, clamped);
     });
-    // Zooming out shrinks the pan bound; pull the offset back inside it.
-    this.reclampPan(orientation);
   }
 
   protected onWindowCenterInput(event: Event): void {
