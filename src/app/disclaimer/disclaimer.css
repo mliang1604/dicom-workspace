@@ -1,0 +1,61 @@
+:host {
+  display: flex;
+  height: 100%;
+}
+
+.gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.card {
+  max-width: 520px;
+  padding: 28px 32px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.brand {
+  color: var(--accent);
+}
+
+h1 {
+  margin: 12px 0 16px;
+  font-size: 20px;
+}
+
+.notice {
+  margin: 0 0 24px;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+button {
+  background: #1d212b;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.accept {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0c0e12;
+}
