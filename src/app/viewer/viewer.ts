@@ -11,8 +11,8 @@ import {
   viewChild,
 } from '@angular/core';
 import { initWebGpu, type GpuContext } from '../../render/device';
-import { mprLayout, scaleRect, type PaneRect } from '../../render/layout';
-import { SliceRenderer, type PaneView } from '../../render/slice-renderer';
+import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
+import { clampPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { modalityUnit, Orientation, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
@@ -32,6 +32,19 @@ interface PanePlacement {
 
 /** A value per orientation, indexed by the orientation's numeric value. */
 type PerOrientation = readonly [number, number, number];
+
+/** A pan offset per orientation, indexed by the orientation's numeric value. */
+type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
+
+/** A pane being dragged to pan, with the last pointer position in client pixels. */
+interface PanDrag {
+  readonly orientation: Orientation;
+  readonly lastX: number;
+  readonly lastY: number;
+}
+
+const NO_PAN: Vec2 = { x: 0, y: 0 };
+const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
 
 /** Order the main pane cycles through when swapping. */
 const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
@@ -61,6 +74,11 @@ export class Viewer {
 
   private readonly sliceIndices = signal<PerOrientation>([0, 0, 0]);
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
+  /** Per-orientation pan offset in screen-uv units; drives shader + probe. */
+  private readonly pans = signal<PerOrientationPan>(NO_PANS);
+  /** The in-progress pan drag, or null when no button is held over a pane. */
+  private readonly panDrag = signal<PanDrag | null>(null);
+  protected readonly isPanning = computed(() => this.panDrag() !== null);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   /** When true, the sagittal view is mirrored so anterior sits on the right. */
   protected readonly sagittalFlipped = signal(false);
@@ -128,6 +146,7 @@ export class Viewer {
       cursor.x,
       cursor.y,
       pane.orientation === Orientation.Sagittal && this.sagittalFlipped(),
+      this.pans()[pane.orientation],
     );
     if (!sample) return null;
     return formatProbe(this.orientationName(pane.orientation), sample, volume);
@@ -145,6 +164,7 @@ export class Viewer {
       const { dpr } = this.viewport();
       const indices = this.sliceIndices();
       const zooms = this.zooms();
+      const pans = this.pans();
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
       const sagittalFlipped = this.sagittalFlipped();
@@ -156,6 +176,7 @@ export class Viewer {
         windowCenter,
         windowWidth,
         zoom: zooms[pane.orientation],
+        pan: pans[pane.orientation],
         flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
         rect: scaleRect(pane.rect, dpr),
       }));
@@ -209,7 +230,21 @@ export class Viewer {
     if (files.length > 0) await this.loadFiles(files);
   }
 
-  protected onPointerMove(event: MouseEvent): void {
+  /** Begin a click-drag pan of the pane under the pointer (primary button). */
+  protected onPointerDown(event: PointerEvent): void {
+    if (!this.isReady() || event.button !== 0) return;
+    const orientation = this.paneAtEvent(event);
+    if (orientation === null) return;
+    event.preventDefault();
+    // Capture so the drag keeps tracking even if the pointer leaves the canvas.
+    this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
+    this.panDrag.set({ orientation, lastX: event.clientX, lastY: event.clientY });
+  }
+
+  protected onPointerMove(event: PointerEvent): void {
+    const drag = this.panDrag();
+    if (drag) this.dragPan(event, drag);
+
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
     const x = event.clientX - bounds.left;
     const y = event.clientY - bounds.top;
@@ -217,9 +252,66 @@ export class Viewer {
     this.hoveredOrientation.set(findPaneAt(this.panes(), x, y));
   }
 
+  protected onPointerUp(event: PointerEvent): void {
+    if (!this.panDrag()) return;
+    const canvas = this.canvasRef().nativeElement;
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    this.panDrag.set(null);
+  }
+
   protected onPointerLeave(): void {
     this.cursor.set(null);
     this.hoveredOrientation.set(null);
+  }
+
+  /** Accumulate a pointer move into the dragged pane's pan, clamped to bounds. */
+  private dragPan(event: PointerEvent, drag: PanDrag): void {
+    const next: PanDrag = { ...drag, lastX: event.clientX, lastY: event.clientY };
+    this.panDrag.set(next);
+
+    const placement = this.panes().find((pane) => pane.orientation === drag.orientation);
+    const volume = this.volume();
+    if (!placement || !volume || placement.rect.width < 1 || placement.rect.height < 1) return;
+
+    const dx = (event.clientX - drag.lastX) / placement.rect.width;
+    const dy = (event.clientY - drag.lastY) / placement.rect.height;
+    const zoom = this.zooms()[drag.orientation];
+    this.pans.update((pans) => {
+      const current = pans[drag.orientation];
+      const moved = clampPan(
+        volume,
+        drag.orientation,
+        placement.rect.width,
+        placement.rect.height,
+        zoom,
+        {
+          x: current.x + dx,
+          y: current.y + dy,
+        },
+      );
+      return withValue(pans, drag.orientation, moved);
+    });
+  }
+
+  /** Re-clamp a pane's pan after its zoom changes, since the bound scales with zoom. */
+  private reclampPan(orientation: Orientation): void {
+    const placement = this.panes().find((pane) => pane.orientation === orientation);
+    const volume = this.volume();
+    if (!placement || !volume) return;
+    const zoom = this.zooms()[orientation];
+    this.pans.update((pans) => {
+      const clamped = clampPan(
+        volume,
+        orientation,
+        placement.rect.width,
+        placement.rect.height,
+        zoom,
+        pans[orientation],
+      );
+      return clamped.x === pans[orientation].x && clamped.y === pans[orientation].y
+        ? pans
+        : withValue(pans, orientation, clamped);
+    });
   }
 
   /** Wheel over a pane scrolls its slices; Ctrl+wheel zooms it. */
@@ -255,6 +347,8 @@ export class Viewer {
       const next = clamp(zooms[orientation] * factor, MIN_ZOOM, MAX_ZOOM);
       return next === zooms[orientation] ? zooms : withValue(zooms, orientation, next);
     });
+    // Zooming out shrinks the pan bound; pull the offset back inside it.
+    this.reclampPan(orientation);
   }
 
   protected onWindowCenterInput(event: Event): void {
@@ -304,6 +398,7 @@ export class Viewer {
     this.mainOrientation.set(Orientation.Axial);
     this.sagittalFlipped.set(false);
     this.zooms.set([1, 1, 1]);
+    this.pans.set(NO_PANS);
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),
@@ -373,12 +468,12 @@ function formatValue(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
-function withValue(
-  values: PerOrientation,
+function withValue<T>(
+  values: readonly [T, T, T],
   orientation: Orientation,
-  value: number,
-): PerOrientation {
-  const next: [number, number, number] = [...values];
+  value: T,
+): readonly [T, T, T] {
+  const next: [T, T, T] = [...values];
   next[orientation] = value;
   return next;
 }

@@ -15,6 +15,7 @@ struct Params {
   orientation : u32,   // 0 axial, 1 coronal, 2 sagittal
   slicePos : f32,      // normalized position along the slicing axis, 0..1
   scale : vec2<f32>,   // aspect-fit: centered uv is multiplied by this
+  pan : vec2<f32>,     // screen-uv translation of the slice (drag-to-pan)
   flipX : u32,         // non-zero mirrors the in-plane horizontal axis
   _pad : f32,
 };
@@ -46,8 +47,9 @@ fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
 
 @fragment
 fn fs(in : VSOut) -> @location(0) vec4<f32> {
-  // Letterbox to preserve the slice's physical aspect ratio.
-  let plane = (in.uv - vec2<f32>(0.5)) * P.scale + vec2<f32>(0.5);
+  // Pan shifts the slice within the pane (screen-uv), then letterbox to
+  // preserve the slice's physical aspect ratio.
+  let plane = (in.uv - vec2<f32>(0.5) - P.pan) * P.scale + vec2<f32>(0.5);
   if (plane.x < 0.0 || plane.x > 1.0 || plane.y < 0.0 || plane.y > 1.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
