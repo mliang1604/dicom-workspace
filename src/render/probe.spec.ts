@@ -1,6 +1,7 @@
 import { Orientation, type Volume, type VolumeGeometry } from '../dicom/types';
 import type { PaneRect } from './layout';
 import { probeVoxel } from './probe';
+import { rezoomPan } from './slice-renderer';
 
 /** A dims[0]×dims[1]×dims[2] volume whose every voxel holds its flat index. */
 function makeVolume(
@@ -135,6 +136,26 @@ describe('probeVoxel', () => {
 
     expect(probe?.voxel).toEqual([0, 1, 0]);
     expect(probe?.value).toBe((0 * 4 + 1) * 4 + 0);
+  });
+
+  it('keeps the pane-centre voxel fixed when zoom is anchored to the centre', () => {
+    const volume = makeVolume([8, 8, 8]);
+    const pan = { x: 0.25, y: 0.25 };
+
+    // The voxel under the pane centre before zooming.
+    const before = probeVoxel(volume, Orientation.Axial, 4, 1, SQUARE, 50, 50, false, pan);
+
+    // Rescaling the pan by the zoom ratio (the centre-anchored zoom) keeps the
+    // same voxel under the pane centre after zooming in.
+    const anchored = probeVoxel(volume, Orientation.Axial, 4, 2, SQUARE, 50, 50, false, {
+      ...rezoomPan(pan, 1, 2),
+    });
+    // Leaving the pan untouched (the old image-centre pivot) drifts off it.
+    const naive = probeVoxel(volume, Orientation.Axial, 4, 2, SQUARE, 50, 50, false, pan);
+
+    expect(before?.voxel).toEqual([2, 2, 4]);
+    expect(anchored?.voxel).toEqual([2, 2, 4]);
+    expect(naive?.voxel).not.toEqual([2, 2, 4]);
   });
 
   it('recovers the raw stored value through the modality LUT', () => {
