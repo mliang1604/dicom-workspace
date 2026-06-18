@@ -29,7 +29,7 @@
 
   <span class="spacer">
     @if (isReady()) {
-      <span class="hint">Scroll over a pane to change its slice</span>
+      <span class="hint">Drag to pan · scroll to change slice · Ctrl+scroll to zoom</span>
     }
   </span>
 
@@ -60,9 +60,14 @@
 <main class="viewport">
   <canvas
     #canvas
+    [class.grabbable]="isReady()"
+    [class.grabbing]="isPanning()"
     (wheel)="onWheel($event)"
-    (mousemove)="onPointerMove($event)"
-    (mouseleave)="onPointerLeave()"
+    (pointerdown)="onPointerDown($event)"
+    (pointermove)="onPointerMove($event)"
+    (pointerup)="onPointerUp($event)"
+    (pointercancel)="onPointerUp($event)"
+    (pointerleave)="onPointerLeave()"
   ></canvas>
 
   <div class="pane-overlay">

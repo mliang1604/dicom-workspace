@@ -1,5 +1,5 @@
 import { Orientation, type Volume } from '../dicom/types';
-import type { PaneRect } from './layout';
+import type { PaneRect, Vec2 } from './layout';
 import { aspectScale } from './slice-renderer';
 
 /** A voxel sampled under the cursor: its volume index and value. */
@@ -15,16 +15,17 @@ export interface VoxelProbe {
 /**
  * Map a cursor position over a pane back to the voxel it displays.
  *
- * This is the inverse of the reslice in `slice-shader.ts`: it letterboxes the
- * pane the same way (via {@link aspectScale} and the pane's zoom), then applies
- * the per-orientation axis mapping. Keep the orientation `switch` here in sync
- * with the shader's. Returns `null` when the cursor is outside the pane or over
- * its letterbox margin (where no voxel is drawn).
+ * This is the inverse of the reslice in `slice-shader.ts`: it pans and
+ * letterboxes the pane the same way (via {@link aspectScale} and the pane's
+ * zoom), then applies the per-orientation axis mapping. Keep the orientation
+ * `switch` here in sync with the shader's. Returns `null` when the cursor is
+ * outside the pane or over its letterbox margin (where no voxel is drawn).
  *
  * @param rect    Pane rectangle in the same pixel units as the cursor.
  * @param cursorX Cursor X relative to the canvas, same units as `rect`.
  * @param cursorY Cursor Y relative to the canvas, same units as `rect`.
  * @param flipX   Mirror the in-plane horizontal axis, matching the shader.
+ * @param pan     Pane pan offset in screen-uv units, matching the shader.
  */
 export function probeVoxel(
   volume: Volume,
@@ -35,6 +36,7 @@ export function probeVoxel(
   cursorX: number,
   cursorY: number,
   flipX = false,
+  pan: Vec2 = { x: 0, y: 0 },
 ): VoxelProbe | null {
   if (rect.width < 1 || rect.height < 1) return null;
 
@@ -43,11 +45,12 @@ export function probeVoxel(
   const v = (cursorY - rect.y) / rect.height;
   if (u < 0 || u > 1 || v < 0 || v > 1) return null;
 
-  // Undo the letterbox: the shader scales the centered uv by aspect-fit / zoom.
+  // Undo the pan and letterbox: the shader translates by pan in screen-uv, then
+  // scales the centered uv by aspect-fit / zoom.
   const z = zoom > 0 ? zoom : 1;
   const [scaleX, scaleY] = aspectScale(volume, orientation, rect.width, rect.height);
-  const planeX = (u - 0.5) * (scaleX / z) + 0.5;
-  const planeY = (v - 0.5) * (scaleY / z) + 0.5;
+  const planeX = (u - 0.5 - pan.x) * (scaleX / z) + 0.5;
+  const planeY = (v - 0.5 - pan.y) * (scaleY / z) + 0.5;
   if (planeX < 0 || planeX > 1 || planeY < 0 || planeY > 1) return null;
 
   // Mirror the horizontal axis the same way the shader does when flipped.
@@ -81,9 +84,7 @@ export function probeVoxel(
 
   const value = volume.data[(vz * dimY + vy) * dimX + vx];
   const rawValue =
-    volume.rescaleSlope !== 0
-      ? (value - volume.rescaleIntercept) / volume.rescaleSlope
-      : value;
+    volume.rescaleSlope !== 0 ? (value - volume.rescaleIntercept) / volume.rescaleSlope : value;
   return { voxel: [vx, vy, vz], value, rawValue };
 }
 

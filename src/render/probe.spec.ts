@@ -100,6 +100,21 @@ describe('probeVoxel', () => {
     expect(probeVoxel(volume, Orientation.Axial, 0, 4, SQUARE, 2, 50)?.voxel).toEqual([1, 2, 0]);
   });
 
+  it('shifts the sampled voxel to match a panned pane', () => {
+    const volume = makeVolume([4, 4, 4]);
+
+    // Panning the slice right/down (positive pan) brings lower-index voxels
+    // under a fixed cursor, mirroring the translation the shader applies.
+    const centre = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 50, 50);
+    const panned = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 50, 50, false, {
+      x: 0.25,
+      y: 0.25,
+    });
+
+    expect(centre?.voxel).toEqual([2, 2, 2]);
+    expect(panned?.voxel).toEqual([1, 1, 2]);
+  });
+
   it('recovers the raw stored value through the modality LUT', () => {
     const volume = makeVolume([4, 4, 4], 2, -1024);
 

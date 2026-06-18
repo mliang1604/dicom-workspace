@@ -6,6 +6,12 @@ export interface PaneRect {
   readonly height: number;
 }
 
+/** A 2D offset. Used for the per-pane pan, in screen-uv (pane-fraction) units. */
+export interface Vec2 {
+  readonly x: number;
+  readonly y: number;
+}
+
 /** The "1 + 2" MPR arrangement: one large main pane and two stacked side panes. */
 export interface MprLayout {
   readonly main: PaneRect;

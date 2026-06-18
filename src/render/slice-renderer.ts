@@ -1,7 +1,7 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
 import { Orientation, type Volume } from '../dicom/types';
-import type { PaneRect } from './layout';
+import type { PaneRect, Vec2 } from './layout';
 import { SLICE_SHADER } from './slice-shader';
 
 /** One pane to draw: an orientation/slice of the volume into a viewport rect. */
@@ -13,15 +13,20 @@ export interface PaneView {
   readonly windowWidth: number;
   /** Magnification factor; 1 fits the slice to the pane, >1 zooms in. */
   readonly zoom: number;
+  /** Pan offset in screen-uv (pane-fraction) units; defaults to no shift. */
+  readonly pan?: Vec2;
   /** Mirror the in-plane horizontal axis (e.g. flip the sagittal view L/R). */
   readonly flipX?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
 
-const PARAMS_SIZE = 32; // bytes: windowCenter,windowWidth,orientation,slicePos + scale.xy + flipX + pad
+// bytes: windowCenter,windowWidth,orientation,slicePos + scale.xy + pan.xy + flipX + pad.
+// Rounded up to the 16-byte uniform-struct stride.
+const PARAMS_SIZE = 48;
 const BYTES_PER_HALF = 2;
 const MAX_PANES = 3;
+const ORIGIN: Vec2 = { x: 0, y: 0 };
 
 interface PaneSlot {
   readonly buffer: GPUBuffer;
@@ -165,6 +170,7 @@ export class SliceRenderer {
     const [scaleX, scaleY] = aspectScale(volume, view.orientation, rect.width, rect.height);
     // Dividing the letterbox scale by the zoom magnifies (covers less of the plane).
     const zoom = view.zoom > 0 ? view.zoom : 1;
+    const pan = view.pan ?? ORIGIN;
 
     const params = new ArrayBuffer(PARAMS_SIZE);
     const floats = new Float32Array(params);
@@ -175,7 +181,9 @@ export class SliceRenderer {
     floats[3] = slicePos;
     floats[4] = scaleX / zoom;
     floats[5] = scaleY / zoom;
-    uints[6] = view.flipX ? 1 : 0;
+    floats[6] = pan.x;
+    floats[7] = pan.y;
+    uints[8] = view.flipX ? 1 : 0;
     this.device.queue.writeBuffer(buffer, 0, params);
   }
 }
@@ -232,6 +240,31 @@ export function aspectScale(
     return [viewAspect / planeAspect, 1];
   }
   return [1, planeAspect / viewAspect];
+}
+
+/**
+ * Constrain a pane's pan offset (screen-uv units) so the pane centre always
+ * lands on the slice rather than its letterbox margin. The bound grows with
+ * zoom, so a magnified pane can be panned proportionally further to reach its
+ * edges. Mirrors the pan applied in `slice-shader.ts` and undone in `probe.ts`.
+ */
+export function clampPan(
+  volume: Volume,
+  orientation: Orientation,
+  viewWidth: number,
+  viewHeight: number,
+  zoom: number,
+  pan: Vec2,
+): Vec2 {
+  const z = zoom > 0 ? zoom : 1;
+  const [scaleX, scaleY] = aspectScale(volume, orientation, viewWidth, viewHeight);
+  // Pane centre stays on the plane while |pan * (aspectScale / zoom)| <= 0.5.
+  const maxX = (0.5 * z) / scaleX;
+  const maxY = (0.5 * z) / scaleY;
+  return {
+    x: Math.min(maxX, Math.max(-maxX, pan.x)),
+    y: Math.min(maxY, Math.max(-maxY, pan.y)),
+  };
 }
 
 /** Keep a rect within the [0, maxW] × [0, maxH] bounds of the canvas. */
