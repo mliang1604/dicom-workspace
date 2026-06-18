@@ -1,5 +1,6 @@
 import { Orientation, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
+import { planeToTex, sliceCountFor, texCoordAt } from './reslice';
 import { aspectScale } from './slice-renderer';
 
 /** A voxel sampled under the cursor: its volume index and value. */
@@ -17,9 +18,11 @@ export interface VoxelProbe {
  *
  * This is the inverse of the reslice in `slice-shader.ts`: it pans and
  * letterboxes the pane the same way (via {@link aspectScale} and the pane's
- * zoom), then applies the per-orientation axis mapping. Keep the orientation
- * `switch` here in sync with the shader's. Returns `null` when the cursor is
- * outside the pane or over its letterbox margin (where no voxel is drawn).
+ * zoom), then runs the pane coordinate through the very same `planeToTex`
+ * affine the shader uses (from `reslice.ts`), so the sampled voxel always
+ * matches the pixel drawn — even for oblique acquisitions. Returns `null` when
+ * the cursor is outside the pane, over its letterbox margin, or over a part of
+ * the plane that lies outside the (possibly rotated) volume.
  *
  * @param rect    Pane rectangle in the same pixel units as the cursor.
  * @param cursorX Cursor X relative to the canvas, same units as `rect`.
@@ -56,41 +59,20 @@ export function probeVoxel(
   // Mirror the horizontal axis the same way the shader does when flipped.
   const px = flipX ? 1 - planeX : planeX;
 
+  const count = sliceCountFor(volume, orientation);
+  const slicePos = count > 1 ? (sliceIndex + 0.5) / count : 0.5;
+  const coord = texCoordAt(planeToTex(volume, orientation), px, planeY, slicePos);
+  if (coord.some((c) => c < 0 || c > 1)) return null; // outside the volume
+
   const [dimX, dimY, dimZ] = volume.dims;
-  let vx: number;
-  let vy: number;
-  let vz: number;
-  switch (orientation) {
-    case Orientation.Axial: // x→X, y→Y, slice walks Z.
-      vx = toIndex(px, dimX);
-      vy = toIndex(planeY, dimY);
-      vz = clampIndex(sliceIndex, dimZ);
-      break;
-    case Orientation.Coronal: // x→X, y→Z (flipped), slice walks Y.
-      vx = toIndex(px, dimX);
-      vy = clampIndex(sliceIndex, dimY);
-      vz = toIndex(1 - planeY, dimZ);
-      break;
-    case Orientation.Sagittal: // x→Y, y→Z (flipped), slice walks X.
-      vx = clampIndex(sliceIndex, dimX);
-      vy = toIndex(px, dimY);
-      vz = toIndex(1 - planeY, dimZ);
-      break;
-    default: {
-      const exhaustive: never = orientation;
-      return exhaustive;
-    }
-  }
+  const vx = clampIndex(Math.floor(coord[0] * dimX), dimX);
+  const vy = clampIndex(Math.floor(coord[1] * dimY), dimY);
+  const vz = clampIndex(Math.floor(coord[2] * dimZ), dimZ);
 
   const value = volume.data[(vz * dimY + vy) * dimX + vx];
   const rawValue =
     volume.rescaleSlope !== 0 ? (value - volume.rescaleIntercept) / volume.rescaleSlope : value;
   return { voxel: [vx, vy, vz], value, rawValue };
-}
-
-/** Normalized coordinate (0..1) → nearest voxel index, clamped into the volume. */
-function toIndex(norm: number, dim: number): number {
-  return clampIndex(Math.floor(norm * dim), dim);
 }
 
 function clampIndex(index: number, dim: number): number {

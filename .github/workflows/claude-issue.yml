@@ -75,5 +75,5 @@ jobs:
           # action's agent mode denies them and the run does nothing.
           claude_args: |
             --model claude-opus-4-8
-            --max-turns 80
+            --max-turns 160
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"

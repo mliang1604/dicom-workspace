@@ -126,6 +126,23 @@ canvas.grabbing {
   font-variant-numeric: tabular-nums;
 }
 
+/* Missing-slice interpolation warning, centred along the top of the viewport. */
+.warning {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 6px 12px;
+  background: rgba(60, 42, 8, 0.9);
+  border: 1px solid #b8860b;
+  border-radius: 6px;
+  color: #ffd479;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .status {
   position: absolute;
   left: 12px;

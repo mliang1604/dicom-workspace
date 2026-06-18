@@ -41,6 +41,32 @@ export const Orientation = {
 
 export type Orientation = (typeof Orientation)[keyof typeof Orientation];
 
+/** A 3-vector, used for patient-space (LPS, millimetre) positions and steps. */
+export type Vec3 = readonly [number, number, number];
+
+/**
+ * The index→patient affine for a volume: where each voxel sits in the DICOM
+ * patient coordinate system (LPS — +x left, +y posterior, +z superior), in
+ * millimetres. Derived from ImageOrientationPatient, ImagePositionPatient and
+ * PixelSpacing.
+ *
+ * For a continuous voxel index `(i, j, k)` — column, row, slice — the patient
+ * point is `origin + i·iStep + j·jStep + k·kStep`. The three steps are the
+ * columns of the 3×3 linear map; together with `origin` they let the viewer
+ * reslice true anatomical planes regardless of how the series was acquired
+ * (axial, sagittal, coronal, or oblique/gantry-tilted).
+ */
+export interface VolumeGeometry {
+  /** Patient displacement per +1 column index (i): `colSpacing · rowDirection`. */
+  readonly iStep: Vec3;
+  /** Patient displacement per +1 row index (j): `rowSpacing · colDirection`. */
+  readonly jStep: Vec3;
+  /** Patient displacement per +1 slice index (k): the inter-slice vector. */
+  readonly kStep: Vec3;
+  /** Patient coordinates of voxel (0, 0, 0): the first slice's ImagePositionPatient. */
+  readonly origin: Vec3;
+}
+
 /**
  * A 3D scalar volume assembled from a stack of slices.
  * Voxels are stored row-major as [z][y][x] in a single Float32Array,
@@ -72,6 +98,27 @@ export interface Volume {
    * the value's unit in readouts. Null when the series has no modality tag.
    */
   readonly modality: string | null;
+  /**
+   * Index→patient (LPS) placement, used to reslice anatomical planes. Optional:
+   * when absent (e.g. a series with no spatial metadata, or a hand-built test
+   * volume), reslicing treats the acquisition axes as the patient axes.
+   */
+  readonly geometry?: VolumeGeometry;
+  /**
+   * Set when the source series had missing slices (gaps wider than the
+   * representative slice spacing). The volume was resampled onto a uniform grid
+   * and the absent slices filled by interpolation, so reconstructed planes that
+   * cross a gap are not acquired data. Absent when the series is uniform.
+   */
+  readonly missingSlices?: MissingSlices;
+}
+
+/** Summary of through-plane interpolation done to fill a gapped series. */
+export interface MissingSlices {
+  /** Grid layers synthesized to fill gaps (grid depth − acquired slice count). */
+  readonly count: number;
+  /** Largest inter-slice gap in the source series, in mm. */
+  readonly maxGapMm: number;
 }
 
 /**

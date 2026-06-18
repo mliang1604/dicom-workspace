@@ -87,6 +87,10 @@
     }
   </div>
 
+  @if (isReady() && interpolationWarning(); as warning) {
+    <div class="warning" role="status">⚠ {{ warning }}</div>
+  }
+
   <div class="status" [class.error]="statusIsError()">{{ statusText() }}</div>
 
   @if (probeText(); as probe) {
