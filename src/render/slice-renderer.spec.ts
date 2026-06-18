@@ -1,4 +1,5 @@
 import { Orientation, type Volume } from '../dicom/types';
+import type { Vec2 } from './layout';
 import { clampPan, rezoomPan } from './slice-renderer';
 
 /** A minimal volume; only dims/spacing matter to the pan geometry. */
@@ -74,5 +75,24 @@ describe('rezoomPan', () => {
 
   it('treats a non-positive zoom as 1x rather than dividing by zero', () => {
     expect(rezoomPan({ x: 0.3, y: 0.3 }, 0, 2)).toEqual({ x: 0.6, y: 0.6 });
+  });
+
+  it('defaults the anchor to the pane centre', () => {
+    expect(rezoomPan({ x: 0.25, y: -0.1 }, 1, 2)).toEqual(
+      rezoomPan({ x: 0.25, y: -0.1 }, 1, 2, { x: 0.5, y: 0.5 }),
+    );
+  });
+
+  it('holds the plane point under a non-central anchor fixed across the zoom', () => {
+    // With aspectScale 1, the shader maps screen-uv `a` to plane point
+    // `(a - 0.5 - pan) / zoom + 0.5`; that point must not move when zooming about a.
+    const planeAt = (a: Vec2, pan: Vec2, zoom: number): Vec2 => ({
+      x: (a.x - 0.5 - pan.x) / zoom + 0.5,
+      y: (a.y - 0.5 - pan.y) / zoom + 0.5,
+    });
+    const anchor = { x: 1, y: 0 }; // top-right corner of the pane
+    const pan = { x: 0.1, y: -0.2 };
+    const next = rezoomPan(pan, 1, 2, anchor);
+    expect(planeAt(anchor, next, 2)).toEqual(planeAt(anchor, pan, 1));
   });
 });
