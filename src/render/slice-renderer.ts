@@ -267,6 +267,20 @@ export function clampPan(
   };
 }
 
+/**
+ * Rescale a pan offset so a zoom change pivots about the pane centre instead of
+ * the image centre. The shader maps the pane centre (uv = 0.5) to the plane
+ * point `0.5 - pan * (aspectScale / zoom)`; holding that point fixed across a
+ * zoom change from `fromZoom` to `toZoom` means scaling the pan by their ratio.
+ * Apply {@link clampPan} afterwards, since the pan bound grows with zoom.
+ */
+export function rezoomPan(pan: Vec2, fromZoom: number, toZoom: number): Vec2 {
+  const from = fromZoom > 0 ? fromZoom : 1;
+  const to = toZoom > 0 ? toZoom : 1;
+  const ratio = to / from;
+  return { x: pan.x * ratio, y: pan.y * ratio };
+}
+
 /** Keep a rect within the [0, maxW] × [0, maxH] bounds of the canvas. */
 function clampRect(rect: PaneRect, maxWidth: number, maxHeight: number): PaneRect {
   const x = Math.max(0, Math.min(rect.x, maxWidth));
