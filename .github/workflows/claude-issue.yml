@@ -1,16 +1,20 @@
-name: Claude — implement new issues
+name: Claude — implement labeled issues
 
-# When an issue is opened, have Claude implement it on a claude/ branch and
-# open a PR that closes the issue. Auto-merge is requested on the PR, so it
-# lands once the required "Build & test" check passes.
+# Add the `claude` label to an issue to have Claude implement it on a claude/
+# branch and open a PR that closes the issue. Auto-merge is requested on the
+# PR, so it lands once the required "Build & test" check passes.
+#
+# Gating on a label (rather than every opened issue) makes auto-implement
+# explicit opt-in: only someone who can label the repo can trigger a run, and
+# you retry a failed run by removing and re-adding the `claude` label.
 #
 # NOTE: auto-merge only waits for CI if `main` has a branch protection rule
 # requiring the "Build & test" status check. Without that rule the PR merges
 # as soon as it is created. Enable "Allow auto-merge" in repo settings too.
 on:
   issues:
-    # 'reopened' lets you retry an issue (e.g. after a failed run) by reopening it.
-    types: [opened, reopened]
+    # Fires when any label is added; the job filters for the `claude` label.
+    types: [labeled]
 
 # The action needs to push branches, open PRs, and comment on the issue.
 # id-token: write lets the Claude GitHub App mint its OIDC token for GitHub auth.
@@ -28,6 +32,8 @@ concurrency:
 jobs:
   implement:
     name: Implement issue
+    # Opt-in gate: only run when the `claude` label is the one just added.
+    if: github.event.label.name == 'claude'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -46,8 +52,8 @@ jobs:
           # Pass only the issue number (untrusted issue text is read via tools,
           # never interpolated into the prompt, to avoid prompt injection).
           prompt: |
-            Issue #${{ github.event.issue.number }} was just opened in this
-            repository. Read the issue with your GitHub tools to understand it.
+            Issue #${{ github.event.issue.number }} in this repository was
+            flagged for implementation. Read it with your GitHub tools first.
 
             Then implement it:
             1. Create a new branch named claude/issue-${{ github.event.issue.number }}.
