@@ -157,6 +157,33 @@
     }
   </div>
 
+  <!-- Anatomical orientation indicator in the 3D pane corner; rotates with the orbit. -->
+  @if (axisIndicator(); as axes) {
+    <svg
+      class="axis-indicator"
+      aria-hidden="true"
+      [style.left.px]="axes.left"
+      [style.top.px]="axes.top"
+      [attr.width]="axes.size"
+      [attr.height]="axes.size"
+    >
+      @for (axis of axes.markers; track axis.label) {
+        <line
+          class="axis-spoke"
+          [attr.x1]="axes.center"
+          [attr.y1]="axes.center"
+          [attr.x2]="axis.x"
+          [attr.y2]="axis.y"
+          [style.opacity]="axis.opacity"
+        />
+        <text class="axis-text" [attr.x]="axis.x" [attr.y]="axis.y" [style.opacity]="axis.opacity">
+          {{ axis.label }}
+        </text>
+      }
+      <circle class="axis-hub" [attr.cx]="axes.center" [attr.cy]="axes.center" r="2" />
+    </svg>
+  }
+
   @if (isReady() && interpolationWarning(); as warning) {
     <div class="warning" role="status">⚠ {{ warning }}</div>
   }
