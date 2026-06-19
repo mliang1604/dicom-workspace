@@ -21,6 +21,12 @@ import {
   type PaneView,
 } from '../../render/slice-renderer';
 import { volumeBounds } from '../../render/reslice';
+import {
+  windowLevelDrag,
+  windowLevelSensitivity,
+  windowPresets,
+  type WindowPreset,
+} from '../../render/window-level';
 import type { OrbitCamera } from '../../render/camera';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
@@ -44,7 +50,12 @@ type PerOrientation = readonly [number, number, number];
 /** A pan offset per orientation, indexed by the orientation's numeric value. */
 type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
 
-/** An in-progress drag: panning an MPR pane, or orbiting the 3D pane. */
+/**
+ * An in-progress drag: panning an MPR pane, orbiting the 3D pane, or adjusting
+ * the shared window/level. The window/level drag remembers the window it began
+ * from and the pointer's start, so the move maps total displacement (not a
+ * per-event delta) onto the new window — see {@link Viewer.dragWindow}.
+ */
 type Drag =
   | {
       readonly kind: 'pan';
@@ -52,7 +63,14 @@ type Drag =
       readonly lastX: number;
       readonly lastY: number;
     }
-  | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number };
+  | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
+  | {
+      readonly kind: 'windowLevel';
+      readonly startCenter: number;
+      readonly startWidth: number;
+      readonly startX: number;
+      readonly startY: number;
+    };
 
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
@@ -145,6 +163,12 @@ export class Viewer {
   private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
   protected readonly windowCenter = signal(0);
   protected readonly windowWidth = signal(1);
+
+  /** Window/level presets offered for the loaded volume (CT windows, or default). */
+  protected readonly wlPresets = computed<WindowPreset[]>(() => {
+    const volume = this.volume();
+    return volume ? windowPresets(volume) : [];
+  });
 
   protected readonly isReady = computed(
     () => this.load().status === 'ready' && this.renderer() !== null,
@@ -374,11 +398,30 @@ export class Viewer {
     if (files.length > 0) await this.loadFiles(files);
   }
 
-  /** Begin a click-drag over the pane under the pointer (primary button). */
+  /** Begin a click-drag over the pane under the pointer. */
   protected onPointerDown(event: PointerEvent): void {
-    if (!this.isReady() || event.button !== 0) return;
+    if (!this.isReady()) return;
     const placement = this.placementAtEvent(event);
     if (!placement) return;
+
+    // Right-button drag adjusts the shared window/level over any pane — the
+    // standard PACS gesture, picked because it never clashes with the
+    // left-button pan/orbit or the Ctrl+wheel zoom. Horizontal moves the centre,
+    // vertical the width (see dragWindow). The context menu is suppressed below.
+    if (event.button === 2) {
+      event.preventDefault();
+      this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
+      this.drag.set({
+        kind: 'windowLevel',
+        startCenter: this.windowCenter(),
+        startWidth: this.windowWidth(),
+        startX: event.clientX,
+        startY: event.clientY,
+      });
+      return;
+    }
+
+    if (event.button !== 0) return;
     event.preventDefault();
     // Capture so the drag keeps tracking even if the pointer leaves the canvas.
     this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
@@ -395,10 +438,16 @@ export class Viewer {
     );
   }
 
+  /** Suppress the browser context menu so right-button W/L drags work. */
+  protected onContextMenu(event: Event): void {
+    if (this.isReady()) event.preventDefault();
+  }
+
   protected onPointerMove(event: PointerEvent): void {
     const drag = this.drag();
     if (drag?.kind === 'pan') this.dragPan(event, drag);
     else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
+    else if (drag?.kind === 'windowLevel') this.dragWindow(event, drag);
 
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
     const x = event.clientX - bounds.left;
@@ -460,6 +509,25 @@ export class Viewer {
       );
       return withValue(pans, drag.orientation, moved);
     });
+  }
+
+  /**
+   * Map a window/level drag onto the shared window: horizontal displacement
+   * shifts the centre, vertical the width, both measured from where the drag
+   * began so the window tracks total movement rather than accumulating jitter.
+   */
+  private dragWindow(event: PointerEvent, drag: Extract<Drag, { kind: 'windowLevel' }>): void {
+    const volume = this.volume();
+    if (!volume) return;
+    const next = windowLevelDrag(
+      { center: drag.startCenter, width: drag.startWidth },
+      event.clientX - drag.startX,
+      event.clientY - drag.startY,
+      windowLevelSensitivity(volume.min, volume.max),
+    );
+    this.windowCenter.set(next.center);
+    this.windowWidth.set(next.width);
+    this.markMipSettling();
   }
 
   /**
@@ -550,6 +618,17 @@ export class Viewer {
 
   protected onWindowWidthInput(event: Event): void {
     this.windowWidth.set(Math.max(1, intValue(event)));
+    this.markMipSettling();
+  }
+
+  /** Apply the chosen window/level preset, then reset the selector to its label. */
+  protected onPresetChange(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const preset = this.wlPresets()[Number(event.target.value)];
+    event.target.selectedIndex = 0; // back to the "Preset…" placeholder so re-picking fires
+    if (!preset) return;
+    this.windowCenter.set(preset.center);
+    this.windowWidth.set(preset.width);
     this.markMipSettling();
   }
 

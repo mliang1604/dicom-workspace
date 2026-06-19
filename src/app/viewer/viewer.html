@@ -30,8 +30,8 @@
   <span class="spacer">
     @if (isReady()) {
       <span class="hint"
-        >Drag to pan · scroll to change slice · Ctrl+scroll to zoom · drag/scroll the 3D pane to
-        orbit/zoom</span
+        >Drag to pan · right-drag for W/L · scroll to change slice · Ctrl+scroll to zoom ·
+        drag/scroll the 3D pane to orbit/zoom</span
       >
     }
   </span>
@@ -62,7 +62,17 @@
     />
   </label>
 
-  <label class="ctrl">
+  <label class="ctrl" title="Apply a window/level preset">
+    Preset
+    <select (change)="onPresetChange($event)" [disabled]="!isReady()">
+      <option value="" disabled selected>Preset…</option>
+      @for (preset of wlPresets(); track preset.label; let i = $index) {
+        <option [value]="i">{{ preset.label }} ({{ preset.center }} / {{ preset.width }})</option>
+      }
+    </select>
+  </label>
+
+  <label class="ctrl" title="Window centre (level); right-drag a pane to adjust">
     WL
     <input
       type="number"
@@ -97,6 +107,7 @@
     (pointerup)="onPointerUp($event)"
     (pointercancel)="onPointerUp($event)"
     (pointerleave)="onPointerLeave()"
+    (contextmenu)="onContextMenu($event)"
   ></canvas>
 
   <div class="pane-overlay">
