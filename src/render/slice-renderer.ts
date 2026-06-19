@@ -1,6 +1,6 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
-import { Orientation, type Volume } from '../dicom/types';
+import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import type { PaneRect, Vec2 } from './layout';
 import { patientToTexMatrix, planeExtentMm, planeToTexMatrix, sliceCountFor } from './reslice';
@@ -32,6 +32,12 @@ export interface MipPaneView {
   readonly windowWidth: number;
   /** Orbit camera state (azimuth/elevation/zoom). */
   readonly camera: OrbitCamera;
+  /**
+   * Render at a reduced level of detail (fewer march samples) for a smoother
+   * frame while the view is being manipulated. Omitted/false renders the
+   * full-quality image, identical to the settled output.
+   */
+  readonly interactive?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
@@ -50,6 +56,12 @@ const MAX_MPR_PANES = 3;
 const ORIGIN: Vec2 = { x: 0, y: 0 };
 /** Float offset of the per-frame params that follow the 4×4 reslice matrix. */
 const MATRIX_FLOATS = 16;
+/**
+ * Fraction of the full MIP sample budget used while the 3D view is actively
+ * manipulated (orbit/zoom/window-level). Halving the samples roughly halves the
+ * march cost; the settled frame renders at full quality.
+ */
+const MIP_INTERACTIVE_LOD = 0.5;
 
 interface PaneSlot {
   readonly buffer: GPUBuffer;
@@ -76,7 +88,7 @@ export class SliceRenderer {
   private matrices: readonly Float32Array[] = [];
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
-  /** March step count for the MIP, scaled to the volume's voxel diagonal. */
+  /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
   private mipSteps = 1;
 
   constructor(gpu: GpuContext) {
@@ -246,15 +258,24 @@ export class SliceRenderer {
     volume: Volume,
   ): void {
     const basis: CameraBasis = cameraBasis(volume, view.camera, rect.width, rect.height);
+    // Reduce the sample budget while the view is being manipulated, then restore
+    // it for the settled frame. The cap and the per-t scale move together so the
+    // whole image coarsens uniformly; at full quality (lod 1) the output equals
+    // a one-sample-per-voxel march.
+    const lod = view.interactive ? MIP_INTERACTIVE_LOD : 1;
+    const maxSteps = Math.max(1, Math.ceil(this.mipSteps * lod));
+    const stepScale = mipStepScale(this.patientToTex, basis.forward, volume.dims) * lod;
+
     const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
     floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
     floats.set(basis.eye, 16);
-    floats[19] = this.mipSteps;
+    floats[19] = maxSteps;
     floats.set(basis.axisU, 20);
     floats[23] = view.windowCenter;
     floats.set(basis.axisV, 24);
     floats[27] = view.windowWidth;
     floats.set(basis.forward, 28);
+    floats[31] = stepScale;
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 
@@ -301,6 +322,33 @@ export function aspectScale(
     return [viewAspect / planeAspect, 1];
   }
   return [1, planeAspect / viewAspect];
+}
+
+/**
+ * Voxels crossed per unit of ray parameter `t` for the MIP's shared orthographic
+ * direction. Multiplying this by a ray's `tExit − tEntry` span gives ≈ one sample
+ * per voxel along that ray's real path, so the shader can size its march to the
+ * actual traversal instead of the worst-case full diagonal.
+ *
+ * `forward` is the patient-space ray direction; `patientToTex` is the column-major
+ * affine from {@link patientToTexMatrix}. Its linear part maps the direction into
+ * texture space (matching `(patientToTex * vec4(forward, 0)).xyz` in the shader),
+ * and scaling each texture component by `dims` converts the step to voxel units.
+ * The direction is shared by every fragment (orthographic), so this is computed
+ * once per frame on the CPU and passed as a uniform.
+ */
+export function mipStepScale(
+  patientToTex: Float32Array,
+  forward: Vec3,
+  dims: readonly [number, number, number],
+): number {
+  const [fx, fy, fz] = forward;
+  const m = patientToTex;
+  // Column-major mat4x4 · vec4(forward, 0): texture component c = m[c] + m[4+c] + m[8+c].
+  const rx = m[0] * fx + m[4] * fy + m[8] * fz;
+  const ry = m[1] * fx + m[5] * fy + m[9] * fz;
+  const rz = m[2] * fx + m[6] * fy + m[10] * fz;
+  return Math.hypot(rx * dims[0], ry * dims[1], rz * dims[2]);
 }
 
 /**
