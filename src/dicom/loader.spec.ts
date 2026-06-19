@@ -6,6 +6,7 @@ import { parseFile, UnsupportedDicomError } from './loader';
 // patient data; every byte here is fabricated.
 
 const EXPLICIT_VR_LE = '1.2.840.10008.1.2.1';
+const RLE_LOSSLESS = '1.2.840.10008.1.2.5';
 
 /** VRs that use the 2-reserved-byte + 4-byte-length header form. */
 const LONG_VRS = new Set(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN']);
@@ -94,6 +95,49 @@ function u32le(value: number): Uint8Array {
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, value, true);
   return out;
+}
+
+/** One RLE frame for 16-bit unsigned pixels, each byte-plane a single literal run. */
+function rleFrame16(pixels: readonly number[]): Uint8Array {
+  const literal = (bytes: number[]): number[] => [bytes.length - 1, ...bytes];
+  const seg0 = literal(pixels.map((p) => (p >> 8) & 0xff)); // high bytes
+  const seg1 = literal(pixels.map((p) => p & 0xff)); // low bytes
+
+  const header = new Uint8Array(64);
+  const hv = new DataView(header.buffer);
+  hv.setUint32(0, 2, true); // two segments
+  hv.setUint32(4, 64, true); // segment 0 offset
+  hv.setUint32(8, 64 + seg0.length, true); // segment 1 offset
+
+  return concat([header, Uint8Array.from(seg0), Uint8Array.from(seg1)]);
+}
+
+/** A DICOM item (FFFE,E000) wrapping `body`. */
+function item(body: Uint8Array): Uint8Array {
+  const header = new Uint8Array(8);
+  const view = new DataView(header.buffer);
+  view.setUint16(0, 0xfffe, true);
+  view.setUint16(2, 0xe000, true);
+  view.setUint32(4, body.length, true);
+  return concat([header, body]);
+}
+
+/** Encapsulated PixelData (undefined length): empty Basic Offset Table + one item per frame. */
+function encapsulatedPixelData(frames: Uint8Array[]): Uint8Array {
+  const header = new Uint8Array(12);
+  const view = new DataView(header.buffer);
+  view.setUint16(0, 0x7fe0, true);
+  view.setUint16(2, 0x0010, true);
+  header[4] = 'O'.charCodeAt(0);
+  header[5] = 'B'.charCodeAt(0);
+  view.setUint32(8, 0xffffffff, true); // undefined length marks encapsulation
+
+  const delimiter = new Uint8Array(8);
+  const dv = new DataView(delimiter.buffer);
+  dv.setUint16(0, 0xfffe, true);
+  dv.setUint16(2, 0xe0dd, true); // Sequence Delimitation Item
+
+  return concat([header, item(new Uint8Array(0)), ...frames.map(item), delimiter]);
 }
 
 /** Assemble a full P10 file (preamble + DICM + meta group + data set). */
@@ -203,6 +247,20 @@ function multiframeMr(): ArrayBuffer {
   return dicomFile(body);
 }
 
+/** A classic single-frame CT, 2×2, with RLE Lossless encapsulated PixelData. */
+function rleCt(): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0060, 'CS', text('CT')), // Modality
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0010, 'US', u16le(2)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(2)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(16)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    encapsulatedPixelData([rleFrame16([0x0102, 0x0304, 0x0506, 0x0708])]),
+  ]);
+  return dicomFile(body, RLE_LOSSLESS);
+}
+
 // --- Tests ------------------------------------------------------------------
 
 describe('parseFile — single frame', () => {
@@ -267,6 +325,19 @@ describe('parseFile — multiframe', () => {
     expect(slices[0].rescaleSlope).toBe(2);
     expect(slices[1].rescaleSlope).toBe(3);
     expect(slices[2].rescaleSlope).toBe(2);
+  });
+});
+
+describe('parseFile — RLE compressed', () => {
+  it('decodes an RLE Lossless single-frame image into raw samples', () => {
+    const slices = parseFile('rle.dcm', rleCt());
+
+    expect(slices).toHaveLength(1);
+    const s = slices[0];
+    expect(s.rows).toBe(2);
+    expect(s.columns).toBe(2);
+    // No rescale tags -> slope 1, intercept 0: pixels equal the decoded samples.
+    expect(Array.from(s.pixels)).toEqual([0x0102, 0x0304, 0x0506, 0x0708]);
   });
 });
 

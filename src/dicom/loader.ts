@@ -1,4 +1,5 @@
 import * as dicomParser from 'dicom-parser';
+import { decodeRleFrame } from './rle';
 import type { Slice } from './types';
 
 /** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
@@ -6,6 +7,25 @@ const UNCOMPRESSED_LE = new Set([
   '1.2.840.10008.1.2', // Implicit VR Little Endian
   '1.2.840.10008.1.2.1', // Explicit VR Little Endian
 ]);
+
+/**
+ * Decodes one encapsulated frame's bytes into raw samples (before the modality
+ * LUT). Same shape as {@link readRawPixels}.
+ */
+type FrameCodec = (
+  frame: Uint8Array,
+  count: number,
+  bitsAllocated: number,
+  pixelRepresentation: number,
+) => Int16Array | Uint16Array | Uint8Array;
+
+/**
+ * Pure-JS frame codecs by transfer syntax UID. Add an entry here to support a
+ * further compressed syntax that can be decoded without a third-party library.
+ */
+const FRAME_CODECS: Record<string, FrameCodec> = {
+  '1.2.840.10008.1.2.5': decodeRleFrame, // RLE Lossless
+};
 
 export class UnsupportedDicomError extends Error {}
 
@@ -28,7 +48,11 @@ interface FileContext {
   readonly bitsAllocated: number;
   readonly pixelRepresentation: number;
   readonly modality: string | null;
-  /** Byte offset of frame 0's first sample within {@link buffer}. */
+  /** The PixelData (7FE0,0010) element — the source of encapsulated frames. */
+  readonly pixelElement: dicomParser.Element;
+  /** Frame codec for a compressed transfer syntax, or null when uncompressed. */
+  readonly codec: FrameCodec | null;
+  /** Byte offset of frame 0's first sample within {@link buffer} (uncompressed only). */
   readonly pixelOffset: number;
 }
 
@@ -53,7 +77,8 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
   if (!pixelElement) return []; // No image data (e.g. DICOMDIR).
 
   const transferSyntax = dataSet.string('x00020010') ?? '1.2.840.10008.1.2';
-  if (!UNCOMPRESSED_LE.has(transferSyntax)) {
+  const codec = FRAME_CODECS[transferSyntax] ?? null;
+  if (!codec && !UNCOMPRESSED_LE.has(transferSyntax)) {
     throw new UnsupportedDicomError(
       `Compressed transfer syntax ${transferSyntax} is not supported yet (${name}).`,
     );
@@ -77,6 +102,8 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
     bitsAllocated: dataSet.uint16('x00280100') ?? 16,
     pixelRepresentation: dataSet.uint16('x00280103') ?? 0, // 0 unsigned, 1 signed
     modality: dataSet.string('x00080060')?.trim() || null,
+    pixelElement,
+    codec,
     pixelOffset: pixelElement.dataOffset,
   };
 
@@ -201,15 +228,45 @@ function readFramePixels(
   rescaleIntercept: number,
 ): Float32Array {
   const count = ctx.rows * ctx.columns;
-  const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
-  const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
-  const raw = readRawPixels(ctx.buffer, offset, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+  const raw = readFrameSamples(ctx, frameIndex, count);
 
   const pixels = new Float32Array(count);
   for (let i = 0; i < count; i++) {
     pixels[i] = raw[i] * rescaleSlope + rescaleIntercept;
   }
   return pixels;
+}
+
+/** Read one frame's raw samples, decoding through the codec when compressed. */
+function readFrameSamples(
+  ctx: FileContext,
+  frameIndex: number,
+  count: number,
+): Int16Array | Uint16Array | Uint8Array {
+  if (ctx.codec) {
+    const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
+    return ctx.codec(frame, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+  }
+  const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
+  const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
+  return readRawPixels(ctx.buffer, offset, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+}
+
+/**
+ * Extract one frame's compressed bytes from an encapsulated PixelData element:
+ * via the Basic Offset Table when present, otherwise treating each fragment as
+ * one frame (the usual RLE layout).
+ */
+function encapsulatedFrame(
+  dataSet: dicomParser.DataSet,
+  pixelElement: dicomParser.Element,
+  frameIndex: number,
+): Uint8Array {
+  const bot = pixelElement.basicOffsetTable;
+  if (bot && bot.length > 0) {
+    return dicomParser.readEncapsulatedImageFrame(dataSet, pixelElement, frameIndex);
+  }
+  return dicomParser.readEncapsulatedPixelDataFromFragments(dataSet, pixelElement, frameIndex);
 }
 
 function readRawPixels(
