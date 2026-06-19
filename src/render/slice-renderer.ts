@@ -3,9 +3,45 @@ import { floatsToHalf } from '../dicom/half';
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import type { PaneRect, Vec2 } from './layout';
-import { patientToTexMatrix, planeExtentMm, planeToTexMatrix, sliceCountFor } from './reslice';
+import {
+  patientToTexMatrix,
+  planeExtentMm,
+  planeToTexMatrix,
+  slabTRange,
+  sliceCountFor,
+  volumeBounds,
+} from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
+
+/**
+ * How the 3D pane reduces the samples along each ray. The numeric values are the
+ * codes the raycast shader switches on, kept in sync via {@link projectionModeCode}.
+ */
+export enum ProjectionMode {
+  /** Maximum Intensity Projection — the brightest sample (default). */
+  Max = 0,
+  /** Minimum Intensity Projection — the darkest sample. */
+  Min = 1,
+  /** Average (mean) of the samples along the ray. */
+  Mean = 2,
+}
+
+/** Shader code for a projection mode; an exhaustive map kept beside the WGSL. */
+export function projectionModeCode(mode: ProjectionMode): number {
+  switch (mode) {
+    case ProjectionMode.Max:
+      return 0;
+    case ProjectionMode.Min:
+      return 1;
+    case ProjectionMode.Mean:
+      return 2;
+    default: {
+      const exhaustive: never = mode;
+      return exhaustive;
+    }
+  }
+}
 
 /** One MPR pane: an orientation/slice of the volume drawn into a viewport rect. */
 export interface MprPaneView {
@@ -33,6 +69,16 @@ export interface MipPaneView {
   /** Orbit camera state (azimuth/elevation/zoom). */
   readonly camera: OrbitCamera;
   /**
+   * Which projection to accumulate along each ray. Omitted defaults to
+   * {@link ProjectionMode.Max} (MIP), reproducing the historical behaviour.
+   */
+  readonly projectionMode?: ProjectionMode;
+  /**
+   * Thickness (mm) of the projected slab, centred on the volume along the view
+   * direction. Omitted or ≥ the volume's full depth projects the whole volume.
+   */
+  readonly slabThicknessMm?: number;
+  /**
    * Render at a reduced level of detail (fewer march samples) for a smoother
    * frame while the view is being manipulated. Omitted/false renders the
    * full-quality image, identical to the settled output.
@@ -48,8 +94,9 @@ export type PaneView = MprPaneView | MipPaneView;
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
 // slicePos,flipX (32). Already a multiple of the 16-byte uniform-struct stride.
 const PARAMS_SIZE = 96;
-// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward (4 × vec4 = 64).
-const MIP_PARAMS_SIZE = 128;
+// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab
+// (5 × vec4 = 80).
+const MIP_PARAMS_SIZE = 144;
 const BYTES_PER_HALF = 2;
 /** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
 const MAX_MPR_PANES = 3;
@@ -266,6 +313,12 @@ export class SliceRenderer {
     const maxSteps = Math.max(1, Math.ceil(this.mipSteps * lod));
     const stepScale = mipStepScale(this.patientToTex, basis.forward, volume.dims) * lod;
 
+    // Thick-slab clip planes (perpendicular to the shared orthographic view) as a
+    // t-range along the ray; full thickness yields ±∞, leaving the march unclipped.
+    const thickness = view.slabThicknessMm ?? Infinity;
+    const [slabLo, slabHi] = slabTRange(volumeBounds(volume), basis.eye, basis.forward, thickness);
+    const mode = projectionModeCode(view.projectionMode ?? ProjectionMode.Max);
+
     const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
     floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
     floats.set(basis.eye, 16);
@@ -276,6 +329,9 @@ export class SliceRenderer {
     floats[27] = view.windowWidth;
     floats.set(basis.forward, 28);
     floats[31] = stepScale;
+    floats[32] = mode;
+    floats[33] = slabLo;
+    floats[34] = slabHi;
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 

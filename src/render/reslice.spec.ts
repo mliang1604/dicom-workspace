@@ -1,5 +1,12 @@
-import { Orientation, type Volume, type VolumeGeometry } from '../dicom/types';
-import { planeExtentMm, planeToTex, sliceCountFor, texCoordAt } from './reslice';
+import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
+import {
+  planeExtentMm,
+  planeToTex,
+  slabTRange,
+  sliceCountFor,
+  texCoordAt,
+  type VolumeBounds,
+} from './reslice';
 
 function makeVolume(dims: [number, number, number], geometry?: VolumeGeometry): Volume {
   const [x, y, z] = dims;
@@ -88,5 +95,33 @@ describe('sliceCountFor / planeExtentMm', () => {
     expect(sliceCountFor(volume, Orientation.Sagittal)).toBe(6); // walks +X = k
     expect(sliceCountFor(volume, Orientation.Axial)).toBe(4); // walks +Z = -j
     expect(sliceCountFor(volume, Orientation.Coronal)).toBe(4); // walks +Y = i
+  });
+});
+
+describe('slabTRange', () => {
+  // Centre at the origin, radius 10 → full depth (diameter) is 20.
+  const bounds: VolumeBounds = {
+    min: [-10, -10, -10],
+    max: [10, 10, 10],
+    center: [0, 0, 0],
+    radius: 10,
+  };
+  // Eye 20 mm in front of the centre (depth0 = −20); the centre sits at t = 20.
+  const eye: Vec3 = [0, 0, -20];
+  const forward: Vec3 = [0, 0, 1];
+
+  it('centres a thin slab on the volume centre along the view direction', () => {
+    // 4 mm slab → t ∈ [18, 22], a 4 mm interval bracketing the centre at t = 20.
+    expect(slabTRange(bounds, eye, forward, 4)).toEqual([18, 22]);
+  });
+
+  it('is unbounded at full thickness, leaving the march unclipped', () => {
+    expect(slabTRange(bounds, eye, forward, 20)).toEqual([-Infinity, Infinity]);
+    expect(slabTRange(bounds, eye, forward, 1000)).toEqual([-Infinity, Infinity]);
+  });
+
+  it('accounts for the eye offset so the slab tracks the actual view depth', () => {
+    // Move the eye twice as far; depth0 = −40, so the centre (and slab) shift to t = 40.
+    expect(slabTRange(bounds, [0, 0, -40], forward, 6)).toEqual([37, 43]);
   });
 });
