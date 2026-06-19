@@ -2,8 +2,33 @@ import type { Vec3, Volume } from '../dicom/types';
 import { add, scale } from '../dicom/vec3';
 import { cameraBasis, intersectUnitBox, type OrbitCamera } from './camera';
 import type { PaneRect } from './layout';
-import { patientToTexMatrix, slabTRange, volumeBounds } from './reslice';
-import { mipStepScale, ProjectionMode } from './slice-renderer';
+import {
+  clipTRange,
+  patientToTexMatrix,
+  slabTRange,
+  viewClipHalfSpaces,
+  volumeBounds,
+} from './reslice';
+import { isDvr, mipStepScale, ProjectionMode } from './slice-renderer';
+import {
+  sampleTransferFunction,
+  transferFunction,
+  TransferFunctionPreset,
+} from './transfer-function';
+import { compositeOver } from './dvr';
+
+/** Optional 3D-pane state the pick must mirror to track what the pane renders. */
+export interface PickOptions {
+  /** Clip to the MPR slice planes (the cut-away), as the pane is drawing it. */
+  readonly clipToPlanes?: boolean;
+  /** Current axial/coronal/sagittal slice indices, needed for the cut-away planes. */
+  readonly sliceIndices?: readonly [number, number, number];
+  /** Transfer-function preset for a DVR pick. Defaults to {@link TransferFunctionPreset.CtBone}. */
+  readonly transferFunction?: TransferFunctionPreset;
+}
+
+/** Accumulated DVR opacity at which a pick locks onto the visible surface. */
+const DVR_PICK_OPACITY = 0.5;
 
 /**
  * Click-to-locate for the 3D pane: the CPU mirror of the raycast shader.
@@ -48,6 +73,7 @@ export function pickProjection(
   rect: PaneRect,
   cursorX: number,
   cursorY: number,
+  options: PickOptions = {},
 ): Pick | null {
   if (rect.width < 1 || rect.height < 1) return null;
 
@@ -75,8 +101,19 @@ export function pickProjection(
     basis.forward,
     slabThicknessMm,
   );
-  const tEntry = Math.max(box.tEntry, slabLo);
-  const tExit = Math.min(box.tExit, slabHi);
+  let tEntry = Math.max(box.tEntry, slabLo);
+  let tExit = Math.min(box.tExit, slabHi);
+  // Mirror the cut-away the pane renders so a pick lands on the visible surface,
+  // not on material the clip has hidden.
+  if (options.clipToPlanes && options.sliceIndices) {
+    [tEntry, tExit] = clipTRange(
+      viewClipHalfSpaces(volume, options.sliceIndices, rd),
+      ro,
+      rd,
+      tEntry,
+      tExit,
+    );
+  }
   if (!(tExit >= tEntry)) return null;
 
   const dims = volume.dims;
@@ -90,7 +127,12 @@ export function pickProjection(
   );
   const dt = span / steps;
 
-  const bestT = sampleDepth(volume, mode, ro, rd, tEntry, tExit, dt, steps);
+  // DVR locks onto the first composited surface (where opacity crosses a
+  // threshold); the projections pick the sample that sourced the displayed pixel.
+  const bestT = isDvr(mode)
+    ? dvrSurfaceDepth(volume, options.transferFunction, ro, rd, tEntry, dt, steps)
+    : sampleDepth(volume, mode, ro, rd, tEntry, tExit, dt, steps);
+  if (bestT === null) return null; // a DVR ray that never accumulated enough opacity
   const coord = clampUnit(add(ro, scale(rd, bestT)));
   return {
     voxel: [
@@ -100,6 +142,38 @@ export function pickProjection(
     ],
     patient: add(originWorld, scale(basis.forward, bestT)),
   };
+}
+
+/**
+ * Ray parameter `t` of the DVR "visible surface": march front-to-back through the
+ * transfer function (opacity-corrected to the step length, as the shader does) and
+ * return the depth at which the accumulated opacity first crosses
+ * {@link DVR_PICK_OPACITY}. Returns `null` when the whole ray stays too transparent
+ * — nothing solid was clicked — so the caller leaves the focus untouched.
+ */
+function dvrSurfaceDepth(
+  volume: Volume,
+  preset: TransferFunctionPreset | undefined,
+  ro: Vec3,
+  rd: Vec3,
+  tEntry: number,
+  dt: number,
+  steps: number,
+): number | null {
+  // sampleTransferFunction clamps to the domain, so a raw sample maps directly;
+  // the pick marches at the reference step (~1 voxel) so opacities pass through.
+  const tf = transferFunction(preset ?? TransferFunctionPreset.CtBone);
+  let composited: [number, number, number, number] = [0, 0, 0, 0];
+  for (let i = 0; i < steps; i++) {
+    const t = tEntry + (i + 0.5) * dt;
+    const s = sampleNearest(volume, clampUnit(add(ro, scale(rd, t))));
+    const opacity = sampleTransferFunction(tf, s)[3];
+    if (opacity > 0) {
+      composited = compositeOver(composited, [0, 0, 0], opacity);
+      if (composited[3] >= DVR_PICK_OPACITY) return t;
+    }
+  }
+  return null;
 }
 
 /** Ray parameter `t` of the sample that sources the projected pixel for `mode`. */

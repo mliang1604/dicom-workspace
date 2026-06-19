@@ -46,7 +46,10 @@
     }
   </span>
 
-  <label class="ctrl" title="3D pane projection: max (MIP), min (MinIP), or mean">
+  <label
+    class="ctrl"
+    title="3D pane mode: max (MIP), min (MinIP), mean, or direct volume rendering"
+  >
     3D
     <select
       [value]="projectionMode()"
@@ -59,18 +62,43 @@
     </select>
   </label>
 
-  <label class="ctrl" title="3D slab thickness (mm); full depth projects the whole volume">
-    Slab
-    <input
-      type="number"
-      step="1"
-      min="1"
-      [max]="slabMaxMm()"
-      [value]="slabThicknessMm()"
-      (input)="onSlabThicknessInput($event)"
-      [disabled]="!isReady()"
-    />
-  </label>
+  @if (isDvrMode()) {
+    <label class="ctrl" title="DVR transfer-function preset">
+      TF
+      <select
+        [value]="transferFunction()"
+        (change)="onTransferFunctionChange($event)"
+        [disabled]="!isReady()"
+      >
+        @for (tf of transferFunctions; track tf.preset) {
+          <option [value]="tf.preset">{{ tf.label }}</option>
+        }
+      </select>
+    </label>
+  } @else {
+    <label class="ctrl" title="3D slab thickness (mm); full depth projects the whole volume">
+      Slab
+      <input
+        type="number"
+        step="1"
+        min="1"
+        [max]="slabMaxMm()"
+        [value]="slabThicknessMm()"
+        (input)="onSlabThicknessInput($event)"
+        [disabled]="!isReady()"
+      />
+    </label>
+  }
+
+  <button
+    type="button"
+    (click)="toggleClipToPlanes()"
+    [disabled]="!isReady()"
+    [class.active]="clipToPlanes()"
+    title="Clip the 3D pane to the MPR slice planes for a cut-away view"
+  >
+    Cut-away ⌧ {{ clipToPlanes() ? 'on' : 'off' }}
+  </button>
 
   <label class="ctrl" title="Apply a window/level preset">
     Preset
@@ -132,7 +160,7 @@
       >
         <span class="pane-tag">
           @if (pane.kind === 'mip') {
-            3D MIP
+            3D {{ mode3dTag() }}
           } @else {
             {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
           }

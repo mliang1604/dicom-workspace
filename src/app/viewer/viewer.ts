@@ -15,11 +15,13 @@ import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/lay
 import {
   clampPan,
   defaultSlabThicknessMm,
+  isDvr,
   ProjectionMode,
   rezoomPan,
   SliceRenderer,
   type PaneView,
 } from '../../render/slice-renderer';
+import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
 import { slicePlaneCorners, volumeBounds } from '../../render/reslice';
 import {
   windowLevelDrag,
@@ -129,6 +131,14 @@ type Drag =
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
 
+/** Short 3D-pane tags, indexed by {@link ProjectionMode}, for the pane label. */
+const MODE_TAGS: Readonly<Record<ProjectionMode, string>> = {
+  [ProjectionMode.Max]: 'MIP',
+  [ProjectionMode.Min]: 'MinIP',
+  [ProjectionMode.Mean]: 'Average',
+  [ProjectionMode.Dvr]: 'DVR',
+};
+
 /** Order the main (top-left) pane cycles through when swapping. */
 const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
 
@@ -200,19 +210,35 @@ export class Viewer {
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
   /** Orbit/zoom state of the 3D MIP pane. */
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
-  /** Projection accumulated by the 3D pane (MIP / MinIP / Average). */
+  /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
   protected readonly projectionMode = signal<ProjectionMode>(ProjectionMode.Max);
+  /** Transfer-function preset used when the 3D pane is in DVR mode. */
+  protected readonly transferFunction = signal<TransferFunctionPreset>(
+    TransferFunctionPreset.CtBone,
+  );
+  /** When true, clip the 3D pane to the MPR slice planes for a cut-away view. */
+  protected readonly clipToPlanes = signal(false);
+  /** True when the 3D pane is in direct-volume-rendering mode (drives the UI). */
+  protected readonly isDvrMode = computed(() => isDvr(this.projectionMode()));
   /**
    * Thick-slab thickness (mm) for the 3D pane, centred on the volume along the
    * view direction. Defaults to the volume's full depth (whole-volume projection).
    */
   protected readonly slabThicknessMm = signal(0);
-  /** The projection-mode options offered in the toolbar, in display order. */
+  /** The 3D-mode options offered in the toolbar, in display order. */
   protected readonly projectionModes = [
     { value: ProjectionMode.Max, label: 'MIP (max)' },
     { value: ProjectionMode.Min, label: 'MinIP (min)' },
     { value: ProjectionMode.Mean, label: 'Average' },
+    { value: ProjectionMode.Dvr, label: 'DVR (volume)' },
   ] as const;
+  /** Transfer-function presets offered for DVR, in display order. */
+  protected readonly transferFunctions = TRANSFER_FUNCTION_PRESETS;
+  /** Short tag for the 3D pane's current mode (with the cut-away state appended). */
+  protected readonly mode3dTag = computed(() => {
+    const label = MODE_TAGS[this.projectionMode()];
+    return this.clipToPlanes() ? `${label} ✂` : label;
+  });
   /** The in-progress drag (pan or orbit), or null when no button is held. */
   private readonly drag = signal<Drag | null>(null);
   /**
@@ -440,6 +466,8 @@ export class Viewer {
       const pans = this.pans();
       const camera = this.camera3d();
       const projectionMode = this.projectionMode();
+      const transferFunction = this.transferFunction();
+      const clipToPlanes = this.clipToPlanes();
       const slabThicknessMm = this.slabThicknessMm();
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
@@ -457,6 +485,9 @@ export class Viewer {
               windowWidth,
               camera,
               projectionMode,
+              transferFunction,
+              clipToPlanes,
+              sliceIndices: indices,
               slabThicknessMm,
               interactive: mipInteractive,
               rect: scaleRect(pane.rect, dpr),
@@ -612,8 +643,13 @@ export class Viewer {
       placement.rect,
       event.clientX - bounds.left,
       event.clientY - bounds.top,
+      {
+        clipToPlanes: this.clipToPlanes(),
+        sliceIndices: this.sliceIndices(),
+        transferFunction: this.transferFunction(),
+      },
     );
-    if (!pick) return; // the ray missed the volume
+    if (!pick) return; // the ray missed the volume (or, for DVR, hit nothing solid)
     this.navigateToVoxel(volume, pick.voxel);
   }
 
@@ -881,14 +917,27 @@ export class Viewer {
     this.markMipSettling();
   }
 
-  /** Switch the 3D pane's projection mode (MIP / MinIP / Average). */
+  /** Switch the 3D pane's mode (MIP / MinIP / Average / DVR). */
   protected onProjectionModeChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
     const mode = Number(event.target.value) as ProjectionMode;
     this.projectionMode.set(mode);
-    // Reset the slab to the mode's default: full-volume for MIP, a moderate band
-    // for MinIP/Average (keeps the air margins out). Reversible across switches.
+    // Reset the slab to the mode's default: full-volume for MIP/DVR, a moderate
+    // band for MinIP/Average (keeps the air margins out). Reversible across switches.
     this.slabThicknessMm.set(Math.round(defaultSlabThicknessMm(mode, this.slabMaxMm())));
+    this.markMipSettling();
+  }
+
+  /** Choose the DVR transfer-function preset (CT Bone / Soft-tissue / Angio / Lung). */
+  protected onTransferFunctionChange(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    this.transferFunction.set(Number(event.target.value) as TransferFunctionPreset);
+    this.markMipSettling();
+  }
+
+  /** Toggle the cut-away that clips the 3D pane to the current MPR slice planes. */
+  protected toggleClipToPlanes(): void {
+    this.clipToPlanes.update((on) => !on);
     this.markMipSettling();
   }
 
@@ -941,8 +990,10 @@ export class Viewer {
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
-    // Reset the 3D projection to the default MIP over the whole volume, like the camera.
+    // Reset the 3D pane to the default MIP over the whole volume, like the camera.
     this.projectionMode.set(ProjectionMode.Max);
+    this.transferFunction.set(TransferFunctionPreset.CtBone);
+    this.clipToPlanes.set(false);
     this.slabThicknessMm.set(Math.round(2 * volumeBounds(result.volume).radius));
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),

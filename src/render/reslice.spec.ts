@@ -1,11 +1,17 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
+import { dot } from '../dicom/vec3';
 import {
+  clipTRange,
+  orientTowardRay,
   planeExtentMm,
   planeToTex,
   slabTRange,
+  sliceClipPlaneTex,
   sliceCountFor,
   slicePlaneCorners,
   texCoordAt,
+  viewClipHalfSpaces,
+  type HalfSpace,
   type VolumeBounds,
 } from './reslice';
 
@@ -145,5 +151,88 @@ describe('slicePlaneCorners', () => {
     const corners = slicePlaneCorners(volume, Orientation.Sagittal, 0);
 
     for (const corner of corners) expect(corner[0]).toBeCloseTo(0, 6); // all share x
+  });
+});
+
+describe('sliceClipPlaneTex', () => {
+  it('is the signed field slicePos(tex) − slicePos₀ for the axial slice', () => {
+    // Identity volume: axial slicePos maps straight to tex.z, so the plane is
+    // tex.z − slicePos₀ with slicePos₀ = (2 + 0.5) / 4 = 0.625.
+    const volume = makeVolume([4, 4, 4]);
+    const plane = sliceClipPlaneTex(volume, Orientation.Axial, 2);
+
+    expectVec(plane.normal, [0, 0, 1]);
+    expect(plane.offset).toBeCloseTo(-0.625, 6);
+    // Zero on the slice, positive on the +slicePos side, negative below it.
+    expect(dot(plane.normal, [0.5, 0.5, 0.625]) + plane.offset).toBeCloseTo(0, 6);
+    expect(dot(plane.normal, [0.5, 0.5, 0.8]) + plane.offset).toBeGreaterThan(0);
+    expect(dot(plane.normal, [0.5, 0.5, 0.4]) + plane.offset).toBeLessThan(0);
+  });
+
+  it('places the sagittal plane along the tex.x (patient +x) axis', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const plane = sliceClipPlaneTex(volume, Orientation.Sagittal, 1);
+    // slicePos₀ = (1 + 0.5) / 4 = 0.375 along +x.
+    expectVec(plane.normal, [1, 0, 0]);
+    expect(plane.offset).toBeCloseTo(-0.375, 6);
+  });
+});
+
+describe('orientTowardRay', () => {
+  const plane: HalfSpace = { normal: [0, 0, 1], offset: -0.5 };
+
+  it('leaves a plane whose normal already follows the ray', () => {
+    expect(orientTowardRay(plane, [0, 0, 1])).toBe(plane);
+  });
+
+  it('flips a plane so its kept side is the far (large-t) half of the ray', () => {
+    const flipped = orientTowardRay(plane, [0, 0, -1]);
+    expectVec(flipped.normal, [0, 0, -1]);
+    expect(flipped.offset).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('clipTRange', () => {
+  const ro: Vec3 = [0, 0, 0];
+  const rd: Vec3 = [0, 0, 1];
+
+  it('returns the interval unchanged with no half-spaces', () => {
+    expect(clipTRange([], ro, rd, 0, 1)).toEqual([0, 1]);
+  });
+
+  it('clamps the entry to a plane that keeps the far side', () => {
+    // Keep tex.z ≥ 0.5 → t ≥ 0.5 along this ray.
+    expect(clipTRange([{ normal: [0, 0, 1], offset: -0.5 }], ro, rd, 0, 1)).toEqual([0.5, 1]);
+  });
+
+  it('intersects two opposing half-spaces into the band between them', () => {
+    const planes: HalfSpace[] = [
+      { normal: [0, 0, 1], offset: -0.3 }, // tex.z ≥ 0.3
+      { normal: [0, 0, -1], offset: 0.7 }, // tex.z ≤ 0.7
+    ];
+    expect(clipTRange(planes, ro, rd, 0, 1)).toEqual([0.3, 0.7]);
+  });
+
+  it('collapses the interval when the ray runs parallel to and outside a plane', () => {
+    // Keep tex.x ≥ 0.5, but the ray sits at tex.x = 0 with no x component.
+    const [lo, hi] = clipTRange([{ normal: [1, 0, 0], offset: -0.5 }], ro, rd, 0, 1);
+    expect(lo).toBeGreaterThan(hi); // empty → the caller reads a fully clipped ray
+  });
+
+  it('leaves the interval untouched when parallel and inside a plane', () => {
+    // Keep tex.x ≥ −0.5; the ray at tex.x = 0 is inside it for all t.
+    expect(clipTRange([{ normal: [1, 0, 0], offset: 0.5 }], ro, rd, 0, 1)).toEqual([0, 1]);
+  });
+});
+
+describe('viewClipHalfSpaces', () => {
+  it('orients all three cut-planes to keep the far side of the view ray', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const rd: Vec3 = [0.2, -0.3, 1]; // an arbitrary texture-space view direction
+    const planes = viewClipHalfSpaces(volume, [2, 2, 2], rd);
+
+    expect(planes).toHaveLength(3);
+    // Every kept-side normal points downstream of the ray (kept half is large t).
+    for (const plane of planes) expect(dot(plane.normal, rd)).toBeGreaterThanOrEqual(0);
   });
 });

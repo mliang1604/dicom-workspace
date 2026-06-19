@@ -1,17 +1,23 @@
 /**
- * WGSL for the 3D projection pane. Each fragment builds an orthographic camera
- * ray (from the basis computed in `camera.ts`), converts it into the volume's
- * texture space with the `patientToTex` affine (built in `reslice.ts`),
- * intersects the unit box, clamps the marched segment to the thick-slab t-range,
- * then marches accumulating the configured projection: the maximum (MIP), the
- * minimum (MinIP), or the mean (Average) sample. The projected value is windowed
- * with the same DICOM linear transform (PS3.3 C.11.2.1.2) as the MPR slice
- * shader, so the two panes respond identically to the window/level controls.
+ * WGSL for the 3D pane. Each fragment builds an orthographic camera ray (from the
+ * basis computed in `camera.ts`), converts it into the volume's texture space with
+ * the `patientToTex` affine (built in `reslice.ts`), intersects the unit box,
+ * clamps the marched segment to the thick-slab t-range and — when the MPR cut-away
+ * is enabled — to the three slice-plane half-spaces, then renders the configured
+ * 3D mode:
+ *
+ *   - a **projection** (MIP / MinIP / Average): march accumulating the maximum,
+ *     the minimum, or the mean sample, then window it with the same DICOM linear
+ *     transform (PS3.3 C.11.2.1.2) as the MPR slice shader; or
+ *   - **direct volume rendering** (DVR): march front-to-back, map each sample
+ *     through a transfer-function LUT (`transfer-function.ts`), shade it with a
+ *     central-difference gradient + Lambert headlight (`dvr.ts`), and composite
+ *     with early-ray termination.
  *
  * Kept as a string constant for the same reason as `slice-shader.ts`: Angular's
- * esbuild builder has no `?raw` text loader. The CPU-side ray/box intersection
- * in `camera.ts` mirrors the slab test here for unit testing, and the slab
- * t-range / projection-mode codes are computed in `reslice.ts` / `slice-renderer.ts`.
+ * esbuild builder has no `?raw` text loader. The CPU-side ray/box intersection in
+ * `camera.ts`, the slab/clip t-ranges in `reslice.ts`, and the DVR/TF maths in
+ * `dvr.ts` / `transfer-function.ts` mirror this shader for unit testing.
  */
 // language=wgsl
 export const RAYCAST_SHADER = /* wgsl */ `
@@ -21,12 +27,17 @@ struct Params {
   axisU : vec4<f32>,          // half-width image-plane axis in .xyz, windowCenter in .w
   axisV : vec4<f32>,          // half-height image-plane axis in .xyz, windowWidth in .w
   forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz, voxels-per-t in .w
-  modeSlab : vec4<f32>,       // projection mode (0 max,1 min,2 mean) in .x, slab t-range [.y,.z]
+  modeSlab : vec4<f32>,       // mode (0 max,1 min,2 mean,3 DVR) .x, slab t-range [.y,.z], clip on .w
+  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), Lambert ambient .z
+  clipA : vec4<f32>,          // axial cut-plane: texture-space normal .xyz, offset .w
+  clipC : vec4<f32>,          // coronal cut-plane
+  clipS : vec4<f32>,          // sagittal cut-plane
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
 @group(0) @binding(1) var volSamp : sampler;
 @group(0) @binding(2) var<uniform> P : Params;
+@group(0) @binding(3) var tfTex : texture_1d<f32>;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -47,6 +58,68 @@ fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
   // uv in [0,1], with v = 0 at the top of the canvas.
   out.uv = vec2<f32>((xy.x + 1.0) * 0.5, (1.0 - xy.y) * 0.5);
   return out;
+}
+
+fn sampleVol(coord : vec3<f32>) -> f32 {
+  return textureSampleLevel(volTex, volSamp, clamp(coord, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).r;
+}
+
+// Narrow [range.x, range.y] to the kept side of one cut-plane half-space; an
+// empty result (x > y) signals a fully clipped ray. Mirrors clipTRange in reslice.ts.
+fn clipPlane(planeN : vec3<f32>, planeOff : f32, ro : vec3<f32>, rd : vec3<f32>, range : vec2<f32>) -> vec2<f32> {
+  let denom = dot(planeN, rd);
+  let value0 = dot(planeN, ro) + planeOff;
+  if (abs(denom) < 1e-12) {
+    if (value0 < 0.0) { return vec2<f32>(1.0, -1.0); }
+    return range;
+  }
+  let tCross = -value0 / denom;
+  var lo = range.x;
+  var hi = range.y;
+  if (denom > 0.0) { lo = max(lo, tCross); } else { hi = min(hi, tCross); }
+  return vec2<f32>(lo, hi);
+}
+
+// Direct volume rendering: front-to-back compositing through the transfer
+// function with gradient-shaded samples. Mirrors dvr.ts / transfer-function.ts.
+fn renderDvr(ro : vec3<f32>, rd : vec3<f32>, tEntry : f32, dt : f32, steps : u32) -> vec4<f32> {
+  let tfLo = P.tfDomain.x;
+  let tfHi = P.tfDomain.y;
+  let ambient = P.tfDomain.z;
+  let texel = 1.0 / vec3<f32>(textureDimensions(volTex));
+  let lightDir = -normalize(rd); // headlight from the orthographic camera
+  let stepVoxels = dt * P.forward.w; // march length in voxels, for opacity correction
+
+  var color = vec3<f32>(0.0);
+  var alpha = 0.0;
+  for (var i = 0u; i < steps; i = i + 1u) {
+    let t = tEntry + (f32(i) + 0.5) * dt;
+    let coord = clamp(ro + t * rd, vec3<f32>(0.0), vec3<f32>(1.0));
+    let s = sampleVol(coord);
+    let lutCoord = clamp((s - tfLo) / max(tfHi - tfLo, 1e-6), 0.0, 1.0);
+    let tf = textureSampleLevel(tfTex, volSamp, lutCoord, 0.0);
+    var a = clamp(tf.a, 0.0, 1.0);
+    if (a > 0.0) {
+      // Opacity correction so the image is invariant to the step length.
+      a = 1.0 - pow(1.0 - a, max(stepVoxels, 0.0));
+      // Central-difference gradient -> surface normal -> Lambert headlight.
+      let grad = vec3<f32>(
+        sampleVol(coord + vec3<f32>(texel.x, 0.0, 0.0)) - sampleVol(coord - vec3<f32>(texel.x, 0.0, 0.0)),
+        sampleVol(coord + vec3<f32>(0.0, texel.y, 0.0)) - sampleVol(coord - vec3<f32>(0.0, texel.y, 0.0)),
+        sampleVol(coord + vec3<f32>(0.0, 0.0, texel.z)) - sampleVol(coord - vec3<f32>(0.0, 0.0, texel.z)),
+      );
+      var shade = 1.0;
+      if (length(grad) > 1e-6) {
+        let n = normalize(-grad);
+        shade = ambient + (1.0 - ambient) * max(dot(n, lightDir), 0.0);
+      }
+      let w = (1.0 - alpha) * a;
+      color = color + tf.rgb * shade * w;
+      alpha = alpha + w;
+      if (alpha >= 0.99) { break; }
+    }
+  }
+  return vec4<f32>(color, 1.0);
 }
 
 @fragment
@@ -71,10 +144,23 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // [-inf, +inf] for a full-thickness slab, leaving the box traversal unchanged.
   let slabLo = P.modeSlab.y;
   let slabHi = P.modeSlab.z;
-  let tEntry = max(max(tlo.x, max(tlo.y, tlo.z)), max(0.0, slabLo));
-  let tExit = min(min(thi.x, min(thi.y, thi.z)), slabHi);
-  // NaN-safe miss test: a degenerate (0/0 -> NaN) range fails this and returns
-  // black instead of feeding NaN into sum/min, which would poison Average/MinIP.
+  var tEntry = max(max(tlo.x, max(tlo.y, tlo.z)), max(0.0, slabLo));
+  var tExit = min(min(thi.x, min(thi.y, thi.z)), slabHi);
+
+  // Clip to the three MPR cut-planes for the cut-away view, when enabled. Each
+  // half-space narrows the t-range to its kept (far) side; the intersection is
+  // the convex corner of the volume the projection / DVR then traverses.
+  if (P.modeSlab.w > 0.5) {
+    var range = vec2<f32>(tEntry, tExit);
+    range = clipPlane(P.clipA.xyz, P.clipA.w, ro, rd, range);
+    range = clipPlane(P.clipC.xyz, P.clipC.w, ro, rd, range);
+    range = clipPlane(P.clipS.xyz, P.clipS.w, ro, rd, range);
+    tEntry = range.x;
+    tExit = range.y;
+  }
+
+  // NaN-safe miss test: a degenerate (0/0 -> NaN) or fully clipped range fails
+  // this and returns black instead of feeding NaN into the accumulators.
   if (!(tExit >= tEntry)) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
@@ -89,24 +175,24 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let span = tExit - tEntry;
   let steps = clamp(u32(ceil(span * P.forward.w)), 1u, maxSteps);
   let dt = span / f32(steps);
+
+  let mode = u32(P.modeSlab.x + 0.5);
+  if (mode == 3u) {
+    return renderDvr(ro, rd, tEntry, dt, steps);
+  }
+
+  // Projection: accumulate max / min / mean unconditionally, select at the end.
   var maxv = -3.0e38;
   var minv = 3.0e38;
   var sum = 0.0;
   for (var i = 0u; i < steps; i = i + 1u) {
     let t = tEntry + (f32(i) + 0.5) * dt;
-    // Clamp into the unit cube so a coordinate nudged just past a face by
-    // floating-point slack can't sample outside and read a spurious value.
-    let coord = clamp(ro + t * rd, vec3<f32>(0.0), vec3<f32>(1.0));
-    let s = textureSampleLevel(volTex, volSamp, coord, 0.0).r;
+    let s = sampleVol(ro + t * rd);
     maxv = max(maxv, s);
     minv = min(minv, s);
     sum = sum + s;
   }
 
-  // Reduce the marched samples to the configured projection: max (MIP, default),
-  // min (MinIP), or mean (Average). The accumulators above run unconditionally so
-  // the branch is a cheap final selection rather than per-sample divergence.
-  let mode = u32(P.modeSlab.x + 0.5);
   var projected = maxv;
   if (mode == 1u) {
     projected = minv;
