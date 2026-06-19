@@ -3,6 +3,7 @@ import { type OrbitCamera } from './camera';
 import type { PaneRect } from './layout';
 import { pickProjection } from './pick';
 import { ProjectionMode } from './slice-renderer';
+import { TransferFunctionPreset } from './transfer-function';
 
 function makeVolume(dims: [number, number, number], geometry?: VolumeGeometry): Volume {
   const [x, y, z] = dims;
@@ -100,6 +101,71 @@ describe('pickProjection', () => {
     // The pane corner maps to a ray well outside the bounding box, so it misses.
     const volume = makeVolume([4, 4, 4]);
     expect(pickProjection(volume, LEVEL, ProjectionMode.Max, Infinity, PANE, 0, 0)).toBeNull();
+  });
+
+  it('locks a DVR pick onto the first opaque voxel along the ray', () => {
+    // CT Bone makes a ~1000 HU voxel opaque (a = 0.6 ≥ the 0.5 surface threshold).
+    const volume = makeVolume([4, 4, 4]);
+    setVoxel(volume, 2, 1, 2, 1000);
+
+    const pick = pickProjection(
+      volume,
+      LEVEL,
+      ProjectionMode.Dvr,
+      Infinity,
+      PANE,
+      CENTRE.x,
+      CENTRE.y,
+      {
+        transferFunction: TransferFunctionPreset.CtBone,
+      },
+    );
+
+    expect(pick).not.toBeNull();
+    expect(pick!.voxel).toEqual([2, 1, 2]);
+  });
+
+  it('returns null for a DVR ray that never accumulates enough opacity', () => {
+    // An all-air (0 HU) volume is fully transparent under CT Bone, so nothing is hit.
+    const volume = makeVolume([4, 4, 4]);
+    expect(
+      pickProjection(volume, LEVEL, ProjectionMode.Dvr, Infinity, PANE, CENTRE.x, CENTRE.y),
+    ).toBeNull();
+  });
+
+  it('hides material behind the cut-away clip planes', () => {
+    // Two bright voxels down the centre column; the cut-away keeps the far side of
+    // the coronal plane (slice 1), so the near voxel is clipped and the pick falls
+    // on the far one instead of the brighter near one.
+    const volume = makeVolume([4, 4, 4]);
+    setVoxel(volume, 2, 0, 2, 100); // near (anterior) — brightest
+    setVoxel(volume, 2, 2, 2, 50); // far (posterior) — behind the clip plane
+
+    const open = pickProjection(
+      volume,
+      LEVEL,
+      ProjectionMode.Max,
+      Infinity,
+      PANE,
+      CENTRE.x,
+      CENTRE.y,
+    );
+    const cut = pickProjection(
+      volume,
+      LEVEL,
+      ProjectionMode.Max,
+      Infinity,
+      PANE,
+      CENTRE.x,
+      CENTRE.y,
+      {
+        clipToPlanes: true,
+        sliceIndices: [1, 1, 1],
+      },
+    );
+
+    expect(open!.voxel).toEqual([2, 0, 2]); // brightest overall when unclipped
+    expect(cut!.voxel).toEqual([2, 2, 2]); // near voxel removed by the cut-away
   });
 
   it('confines the pick to the thick slab', () => {

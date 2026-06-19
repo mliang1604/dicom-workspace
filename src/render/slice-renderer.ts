@@ -4,18 +4,30 @@ import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import type { PaneRect, Vec2 } from './layout';
 import {
+  clipTRange,
   patientToTexMatrix,
   planeExtentMm,
   planeToTexMatrix,
   slabTRange,
   sliceCountFor,
+  viewClipHalfSpaces,
   volumeBounds,
+  type HalfSpace,
 } from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
+import { DVR_AMBIENT } from './dvr';
+import {
+  TF_LUT_SIZE,
+  TransferFunctionPreset,
+  transferFunction,
+  transferFunctionLut,
+} from './transfer-function';
 
 /**
- * How the 3D pane reduces the samples along each ray. The numeric values are the
+ * How the 3D pane turns the volume into a picture. The first three reduce each
+ * ray to a single windowed sample (a projection); {@link Dvr} composites a lit,
+ * coloured volume through a transfer function instead. The numeric values are the
  * codes the raycast shader switches on, kept in sync via {@link projectionModeCode}.
  */
 export enum ProjectionMode {
@@ -25,9 +37,16 @@ export enum ProjectionMode {
   Min = 1,
   /** Average (mean) of the samples along the ray. */
   Mean = 2,
+  /** Direct volume rendering — front-to-back transfer-function compositing. */
+  Dvr = 3,
 }
 
-/** Shader code for a projection mode; an exhaustive map kept beside the WGSL. */
+/** Whether a 3D mode is direct volume rendering (vs. a single-value projection). */
+export function isDvr(mode: ProjectionMode): boolean {
+  return mode === ProjectionMode.Dvr;
+}
+
+/** Shader code for a 3D mode; an exhaustive map kept beside the WGSL. */
 export function projectionModeCode(mode: ProjectionMode): number {
   switch (mode) {
     case ProjectionMode.Max:
@@ -36,6 +55,8 @@ export function projectionModeCode(mode: ProjectionMode): number {
       return 1;
     case ProjectionMode.Mean:
       return 2;
+    case ProjectionMode.Dvr:
+      return 3;
     default: {
       const exhaustive: never = mode;
       return exhaustive;
@@ -66,7 +87,10 @@ export function projectionWindow(
   sharedWidth: number,
 ): DisplayWindow {
   switch (mode) {
+    // MIP keeps the shared MPR window; DVR ignores the window entirely (it maps
+    // samples through the transfer function), so the shared one is a harmless default.
     case ProjectionMode.Max:
+    case ProjectionMode.Dvr:
       return { center: sharedCenter, width: sharedWidth };
     case ProjectionMode.Min:
     case ProjectionMode.Mean:
@@ -92,7 +116,10 @@ export function projectionWindow(
  */
 export function defaultSlabThicknessMm(mode: ProjectionMode, fullDepthMm: number): number {
   switch (mode) {
+    // MIP and DVR render the whole volume by default; the cut-away toggle, not a
+    // thin slab, is how DVR reveals the interior.
     case ProjectionMode.Max:
+    case ProjectionMode.Dvr:
       return fullDepthMm;
     case ProjectionMode.Min:
     case ProjectionMode.Mean:
@@ -140,6 +167,21 @@ export interface MipPaneView {
    */
   readonly slabThicknessMm?: number;
   /**
+   * Transfer-function preset for {@link ProjectionMode.Dvr}; ignored by the
+   * projection modes. Omitted defaults to {@link TransferFunctionPreset.CtBone}.
+   */
+  readonly transferFunction?: TransferFunctionPreset;
+  /**
+   * Clip the 3D pane to the current MPR slice planes for a cut-away view. Needs
+   * {@link sliceIndices}; applies to every mode (projection and DVR alike).
+   */
+  readonly clipToPlanes?: boolean;
+  /**
+   * Current axial/coronal/sagittal slice indices (in {@link Orientation} order),
+   * used to place the cut-away planes when {@link clipToPlanes} is set.
+   */
+  readonly sliceIndices?: readonly [number, number, number];
+  /**
    * Render at a reduced level of detail (fewer march samples) for a smoother
    * frame while the view is being manipulated. Omitted/false renders the
    * full-quality image, identical to the settled output.
@@ -155,9 +197,9 @@ export type PaneView = MprPaneView | MipPaneView;
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
 // slicePos,flipX (32). Already a multiple of the 16-byte uniform-struct stride.
 const PARAMS_SIZE = 96;
-// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab
-// (5 × vec4 = 80).
-const MIP_PARAMS_SIZE = 144;
+// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
+// tfDomain, clipA, clipC, clipS (9 × vec4 = 144).
+const MIP_PARAMS_SIZE = 208;
 const BYTES_PER_HALF = 2;
 /** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
 const MAX_MPR_PANES = 3;
@@ -170,6 +212,12 @@ const MATRIX_FLOATS = 16;
  * march cost; the settled frame renders at full quality.
  */
 const MIP_INTERACTIVE_LOD = 0.5;
+/** A no-op cut-away: zero-normal planes the shader ignores (clip flag off too). */
+const NO_CLIP: readonly [HalfSpace, HalfSpace, HalfSpace] = [
+  { normal: [0, 0, 0], offset: 0 },
+  { normal: [0, 0, 0], offset: 0 },
+  { normal: [0, 0, 0], offset: 0 },
+];
 
 interface PaneSlot {
   readonly buffer: GPUBuffer;
@@ -189,6 +237,10 @@ export class SliceRenderer {
   private readonly sampler: GPUSampler;
   private readonly slots: readonly PaneSlot[];
   private readonly mipSlot: PaneSlot;
+  /** 1-D RGBA LUT the DVR shader samples; contents swapped on a preset change. */
+  private readonly tfTexture: GPUTexture;
+  /** Preset currently baked into {@link tfTexture}, to skip redundant uploads. */
+  private tfPreset: TransferFunctionPreset | null = null;
 
   private volume: Volume | null = null;
   private texture: GPUTexture | null = null;
@@ -241,6 +293,30 @@ export class SliceRenderer {
       }),
       bindGroup: null,
     };
+
+    // The DVR transfer function lives in a small 1-D RGBA LUT, sampled with
+    // hardware interpolation; rebaked in place (no bind-group churn) on a preset
+    // change. Seeded with the default so the texture is always valid to bind.
+    this.tfTexture = this.device.createTexture({
+      dimension: '1d',
+      size: { width: TF_LUT_SIZE },
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.uploadTransferFunction(TransferFunctionPreset.CtBone);
+  }
+
+  /** Bake a transfer-function preset into the 1-D LUT texture, once per change. */
+  private uploadTransferFunction(preset: TransferFunctionPreset): void {
+    if (preset === this.tfPreset) return;
+    const lut = transferFunctionLut(transferFunction(preset), TF_LUT_SIZE);
+    this.device.queue.writeTexture(
+      { texture: this.tfTexture },
+      floatsToHalf(lut),
+      { bytesPerRow: TF_LUT_SIZE * 4 * BYTES_PER_HALF, rowsPerImage: 1 },
+      { width: TF_LUT_SIZE },
+    );
+    this.tfPreset = preset;
   }
 
   /** Number of slices available along the given orientation for the loaded volume. */
@@ -291,6 +367,7 @@ export class SliceRenderer {
         { binding: 0, resource: view },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.mipSlot.buffer } },
+        { binding: 3, resource: this.tfTexture.createView({ dimension: '1d' }) },
       ],
     });
 
@@ -379,9 +456,26 @@ export class SliceRenderer {
     const thickness = view.slabThicknessMm ?? Infinity;
     const [slabLo, slabHi] = slabTRange(volumeBounds(volume), basis.eye, basis.forward, thickness);
     const mode = view.projectionMode ?? ProjectionMode.Max;
-    // MIP keeps the shared MPR window; MinIP/Average auto-fit to the data range
-    // so they stay visible as the air fraction per ray slides with the orbit.
+    // MIP/DVR keep the shared MPR window (DVR ignores it); MinIP/Average auto-fit
+    // to the data range so they stay visible as the air fraction per ray slides.
     const window = projectionWindow(mode, volume, view.windowCenter, view.windowWidth);
+
+    // DVR: keep the LUT current and pass the preset's intensity domain.
+    const preset = view.transferFunction ?? TransferFunctionPreset.CtBone;
+    if (isDvr(mode)) this.uploadTransferFunction(preset);
+    const [tfLo, tfHi] = transferFunction(preset).domain;
+
+    // Cut-away: the three MPR slice planes as texture-space half-spaces oriented
+    // to keep the far side of the shared view ray (rd = patientToTex·forward).
+    const clipOn = !!view.clipToPlanes && !!view.sliceIndices;
+    const clip =
+      clipOn && view.sliceIndices
+        ? viewClipHalfSpaces(
+            volume,
+            view.sliceIndices,
+            texDirection(this.patientToTex, basis.forward),
+          )
+        : NO_CLIP;
 
     const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
     floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
@@ -396,6 +490,13 @@ export class SliceRenderer {
     floats[32] = projectionModeCode(mode);
     floats[33] = slabLo;
     floats[34] = slabHi;
+    floats[35] = clipOn ? 1 : 0;
+    floats[36] = tfLo;
+    floats[37] = tfHi;
+    floats[38] = DVR_AMBIENT;
+    packHalfSpace(floats, 40, clip[0]); // axial cut-plane
+    packHalfSpace(floats, 44, clip[1]); // coronal cut-plane
+    packHalfSpace(floats, 48, clip[2]); // sagittal cut-plane
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 
@@ -520,6 +621,30 @@ export function rezoomPan(
     x: (anchor.x - 0.5) * (1 - ratio) + pan.x * ratio,
     y: (anchor.y - 0.5) * (1 - ratio) + pan.y * ratio,
   };
+}
+
+/**
+ * Map a patient-space direction into texture space with the linear part of the
+ * column-major `patientToTex` affine (w = 0), matching the shader's
+ * `(patientToTex * vec4(forward, 0)).xyz`. Used to orient the cut-away planes
+ * along the same ray direction the shader marches.
+ */
+function texDirection(patientToTex: Float32Array, forward: Vec3): Vec3 {
+  const m = patientToTex;
+  const [fx, fy, fz] = forward;
+  return [
+    m[0] * fx + m[4] * fy + m[8] * fz,
+    m[1] * fx + m[5] * fy + m[9] * fz,
+    m[2] * fx + m[6] * fy + m[10] * fz,
+  ];
+}
+
+/** Pack a half-space into four floats at `offset`: normal.xyz then the constant. */
+function packHalfSpace(floats: Float32Array, offset: number, plane: HalfSpace): void {
+  floats[offset + 0] = plane.normal[0];
+  floats[offset + 1] = plane.normal[1];
+  floats[offset + 2] = plane.normal[2];
+  floats[offset + 3] = plane.offset;
 }
 
 /** Keep a rect within the [0, maxW] × [0, maxH] bounds of the canvas. */

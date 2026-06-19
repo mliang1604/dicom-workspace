@@ -4,6 +4,7 @@ import { patientToTexMatrix } from './reslice';
 import {
   clampPan,
   defaultSlabThicknessMm,
+  isDvr,
   mipStepScale,
   ProjectionMode,
   projectionModeCode,
@@ -106,15 +107,25 @@ describe('mipStepScale', () => {
 });
 
 describe('projectionModeCode', () => {
-  it('maps each projection mode to the shader code the WGSL switches on', () => {
+  it('maps each 3D mode to the shader code the WGSL switches on', () => {
     expect(projectionModeCode(ProjectionMode.Max)).toBe(0);
     expect(projectionModeCode(ProjectionMode.Min)).toBe(1);
     expect(projectionModeCode(ProjectionMode.Mean)).toBe(2);
+    expect(projectionModeCode(ProjectionMode.Dvr)).toBe(3);
   });
 
   it('defaults to MIP (max), the historical projection', () => {
     expect(ProjectionMode.Max).toBe(0);
     expect(projectionModeCode(ProjectionMode.Max)).toBe(0);
+  });
+});
+
+describe('isDvr', () => {
+  it('is true only for the direct-volume-rendering mode', () => {
+    expect(isDvr(ProjectionMode.Dvr)).toBe(true);
+    expect(isDvr(ProjectionMode.Max)).toBe(false);
+    expect(isDvr(ProjectionMode.Min)).toBe(false);
+    expect(isDvr(ProjectionMode.Mean)).toBe(false);
   });
 });
 
@@ -124,6 +135,13 @@ describe('projectionWindow', () => {
 
   it('keeps the shared MPR window for MIP so it looks unchanged', () => {
     expect(projectionWindow(ProjectionMode.Max, ct, 40, 400)).toEqual({
+      center: 40,
+      width: 400,
+    });
+  });
+
+  it('passes the shared window through for DVR (which ignores the window)', () => {
+    expect(projectionWindow(ProjectionMode.Dvr, ct, 40, 400)).toEqual({
       center: 40,
       width: 400,
     });
@@ -154,8 +172,9 @@ describe('projectionWindow', () => {
 });
 
 describe('defaultSlabThicknessMm', () => {
-  it('projects the whole volume for MIP', () => {
+  it('projects the whole volume for MIP and DVR', () => {
     expect(defaultSlabThicknessMm(ProjectionMode.Max, 240)).toBe(240);
+    expect(defaultSlabThicknessMm(ProjectionMode.Dvr, 240)).toBe(240);
   });
 
   it('uses a moderate band for MinIP/Average, capped to keep air margins out', () => {

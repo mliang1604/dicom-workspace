@@ -195,6 +195,109 @@ export function patientToTexMatrix(volume: Volume): Float32Array {
 }
 
 /**
+ * A clipping half-space in 3-D texture space: the set of points kept is
+ * `{ tex : dot(normal, tex) + offset ≥ 0 }`. The 3D pane intersects three of
+ * these — one per MPR slice plane — to clip every ray to a cut-away corner of
+ * the volume, mode-agnostically (it narrows the marched `t`-range for the
+ * projection modes and the DVR path alike).
+ */
+export interface HalfSpace {
+  /** Plane normal in texture space; the kept side is where the value is positive. */
+  readonly normal: Vec3;
+  /** Constant term, so `dot(normal, tex) + offset` is the signed plane distance. */
+  readonly offset: number;
+}
+
+/**
+ * The MPR slice plane for an orientation, expressed in texture space as the
+ * signed field `dot(normal, tex) + offset = slicePos(tex) − slicePos₀`: zero on
+ * the slice, positive on the `+slicePos` side (the through-plane direction the
+ * pane scrolls toward). `sliceIndex` selects the same slice the MPR pane shows,
+ * matching its voxel-centre position `(sliceIndex + 0.5) / count`. The caller
+ * orients the sign for the side it wants to keep (see {@link orientTowardRay}).
+ */
+export function sliceClipPlaneTex(
+  volume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+): HalfSpace {
+  const { dU, dV, dS, origin } = planeToTex(volume, orientation);
+  // slicePos(tex) = dot(r2, tex − origin) / det, from planeCoordsAt's inverse.
+  const r2 = cross(dU, dV);
+  const det = dot(dU, cross(dV, dS));
+  const inv = det !== 0 ? 1 / det : 0;
+  const count = sliceCountFor(volume, orientation);
+  const slicePos0 = count > 1 ? (sliceIndex + 0.5) / count : 0.5;
+  const normal = scale(r2, inv);
+  return { normal, offset: -(dot(normal, origin) + slicePos0) };
+}
+
+/**
+ * Flip a half-space, if needed, so its kept side is the one a ray reaches at
+ * larger `t` — i.e. the half deeper into the volume, away from an orthographic
+ * eye. Intersecting the three slice planes oriented this way keeps the far
+ * corner of the volume and removes the near octant facing the camera, the
+ * cut-away that exposes the three MPR cross-sections. `rd` is the ray direction
+ * in the same texture space as the plane.
+ */
+export function orientTowardRay(plane: HalfSpace, rd: Vec3): HalfSpace {
+  // value(t) = dot(normal, rd)·t + const; a positive slope keeps the far (large-t)
+  // half already, so only flip when the slope is negative.
+  if (dot(plane.normal, rd) < 0) return { normal: scale(plane.normal, -1), offset: -plane.offset };
+  return plane;
+}
+
+/**
+ * The three MPR slice planes as texture-space half-spaces oriented to keep the
+ * far side of a ray travelling in direction `rd` (texture space). `sliceIndices`
+ * are the current axial/coronal/sagittal indices, in {@link Orientation} order;
+ * `rd` is the shared orthographic direction mapped into texture space. Feeding
+ * the result to {@link clipTRange} yields the cut-away clip used by both the
+ * raycast shader and the CPU pick.
+ */
+export function viewClipHalfSpaces(
+  volume: Volume,
+  sliceIndices: readonly [number, number, number],
+  rd: Vec3,
+): [HalfSpace, HalfSpace, HalfSpace] {
+  return [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map((orientation) =>
+    orientTowardRay(sliceClipPlaneTex(volume, orientation, sliceIndices[orientation]), rd),
+  ) as [HalfSpace, HalfSpace, HalfSpace];
+}
+
+/**
+ * Narrow a ray's `[tEntry, tExit]` parameter interval to the intersection of the
+ * given half-spaces — the convex clip used for the 3D cut-away. Each half-space
+ * `dot(normal, tex) + offset ≥ 0` becomes a one-sided bound on `t` along
+ * `tex(t) = ro + t·rd`; a half-space the ray runs parallel to and outside of
+ * collapses the interval (returns `tEntry > tExit`), which the caller reads as a
+ * fully clipped ray. With no half-spaces the interval is returned unchanged.
+ */
+export function clipTRange(
+  halfSpaces: readonly HalfSpace[],
+  ro: Vec3,
+  rd: Vec3,
+  tEntry: number,
+  tExit: number,
+): [number, number] {
+  let lo = tEntry;
+  let hi = tExit;
+  for (const { normal, offset } of halfSpaces) {
+    const denom = dot(normal, rd);
+    const value0 = dot(normal, ro) + offset; // value at t = 0
+    if (Math.abs(denom) < 1e-12) {
+      // Parallel to this plane: kept wholesale, or clipped away wholesale.
+      if (value0 < 0) return [tEntry, tEntry - 1];
+      continue;
+    }
+    const tCross = -value0 / denom;
+    if (denom > 0) lo = Math.max(lo, tCross);
+    else hi = Math.min(hi, tCross);
+  }
+  return [lo, hi];
+}
+
+/**
  * The four patient-space (LPS, mm) corners of an orientation's cut plane at a
  * given slice index, in rectangle order so they form a closed quad outline.
  *
