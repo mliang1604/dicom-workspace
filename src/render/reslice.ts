@@ -194,6 +194,30 @@ export function patientToTexMatrix(volume: Volume): Float32Array {
   ]);
 }
 
+/**
+ * The four patient-space (LPS, mm) corners of an orientation's cut plane at a
+ * given slice index, in rectangle order so they form a closed quad outline.
+ *
+ * The 3D pane projects these to draw where each MPR pane slices the volume, the
+ * complement of {@link slabTRange}'s view-direction clip. The through-plane
+ * position matches the shader's voxel-centre sampling `(sliceIndex + 0.5) /
+ * count`, so the drawn rectangle sits exactly on the slice the MPR pane shows.
+ */
+export function slicePlaneCorners(
+  volume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+): readonly [Vec3, Vec3, Vec3, Vec3] {
+  const geom = resolveGeometry(volume);
+  const basis = planeBasis(orientation, patientBounds(geom, volume.dims));
+  const count = sliceCountFor(volume, orientation);
+  const slicePos = count > 1 ? (sliceIndex + 0.5) / count : 0.5;
+  const base = add(basis.origin, scale(basis.axisS, slicePos));
+  const corner = (u: number, v: number): Vec3 =>
+    add(add(base, scale(basis.axisU, u)), scale(basis.axisV, v));
+  return [corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)];
+}
+
 /** Physical width/height (mm) of an orientation's plane, for aspect-fit. */
 export function planeExtentMm(volume: Volume, orientation: Orientation): [number, number] {
   const { min, max } = patientBounds(resolveGeometry(volume), volume.dims);

@@ -4,6 +4,7 @@ import {
   planeToTex,
   slabTRange,
   sliceCountFor,
+  slicePlaneCorners,
   texCoordAt,
   type VolumeBounds,
 } from './reslice';
@@ -123,5 +124,26 @@ describe('slabTRange', () => {
   it('accounts for the eye offset so the slab tracks the actual view depth', () => {
     // Move the eye twice as far; depth0 = −40, so the centre (and slab) shift to t = 40.
     expect(slabTRange(bounds, [0, 0, -40], forward, 6)).toEqual([37, 43]);
+  });
+});
+
+describe('slicePlaneCorners', () => {
+  it('outlines the axial slice as a constant-z rectangle spanning the volume', () => {
+    const volume = makeVolume([4, 4, 4]); // patient box [-0.5, 3.5] per axis, 4 slices
+    // Slice 2 → slicePos (2 + 0.5) / 4 = 0.625 → z = -0.5 + 0.625·4 = 2.0.
+    const corners = slicePlaneCorners(volume, Orientation.Axial, 2);
+
+    expectVec(corners[0], [-0.5, -0.5, 2]);
+    expectVec(corners[1], [3.5, -0.5, 2]);
+    expectVec(corners[2], [3.5, 3.5, 2]);
+    expectVec(corners[3], [-0.5, 3.5, 2]);
+  });
+
+  it('walks the sagittal plane along patient +x with the slice index', () => {
+    const volume = makeVolume([4, 4, 4]);
+    // Sagittal slicePos walks +x; slice 0 → x = -0.5 + 0.125·4 = 0.0.
+    const corners = slicePlaneCorners(volume, Orientation.Sagittal, 0);
+
+    for (const corner of corners) expect(corner[0]).toBeCloseTo(0, 6); // all share x
   });
 });

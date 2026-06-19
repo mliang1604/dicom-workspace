@@ -20,15 +20,16 @@ import {
   SliceRenderer,
   type PaneView,
 } from '../../render/slice-renderer';
-import { volumeBounds } from '../../render/reslice';
+import { slicePlaneCorners, volumeBounds } from '../../render/reslice';
 import {
   windowLevelDrag,
   windowLevelSensitivity,
   windowPresets,
   type WindowPreset,
 } from '../../render/window-level';
-import type { OrbitCamera } from '../../render/camera';
+import { cameraBasis, projectToPane, type OrbitCamera } from '../../render/camera';
 import { axisMarkers } from '../../render/axis-indicator';
+import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
@@ -68,6 +69,22 @@ interface AxisOverlay {
   readonly center: number;
   /** The six axes, sorted far-to-near so near labels render on top. */
   readonly markers: readonly AxisOverlayMarker[];
+}
+
+/** One MPR cut-plane outline projected into the 3D pane. */
+interface SlicePlaneOverlay {
+  readonly orientation: Orientation;
+  /** SVG polygon `points` in 3D-pane-local CSS pixels (origin at the pane's top-left). */
+  readonly points: string;
+  /** Outline colour, matched to the pane's orientation. */
+  readonly color: string;
+}
+
+/** The three MPR cut-planes drawn inside the 3D pane to show where each slices. */
+interface SlicePlanesOverlay {
+  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  readonly planes: readonly SlicePlaneOverlay[];
 }
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
@@ -133,6 +150,12 @@ const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1 };
  * banner; wider gaps leave a visible reconstructed region.
  */
 const GAP_WARNING_RATIO = 2;
+
+/**
+ * Outline colour of each MPR cut-plane drawn in the 3D pane, indexed by the
+ * Orientation value — distinct hues so the three planes read apart at a glance.
+ */
+const SLICE_PLANE_COLORS: readonly [string, string, string] = ['#ff6b6b', '#5ee08a', '#6bb6ff'];
 
 /** Square size (CSS px) of the 3D pane's orientation indicator widget. */
 const AXIS_INDICATOR_SIZE = 72;
@@ -259,6 +282,34 @@ export class Viewer {
       result.push({ key: this.paneKey(pane), rect: pane.rect, x: point.x, y: point.y });
     }
     return result;
+  });
+
+  /**
+   * The three MPR cut-planes drawn inside the 3D pane: each orientation's slice
+   * rectangle ({@link slicePlaneCorners}) projected through the orbit camera with
+   * {@link projectToPane} — the forward map the 3D pick inverts — so the outlines
+   * track the MPR slice positions and rotate live with the orbit. A pure SVG
+   * overlay clipped to the pane, sharing the {@link crosshairsEnabled} toggle with
+   * the linked crosshairs. Recomputed only from the camera and slice indices.
+   */
+  protected readonly slicePlanes = computed<SlicePlanesOverlay | null>(() => {
+    const volume = this.volume();
+    if (!this.crosshairsEnabled() || !this.isReady() || !volume) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!mip) return null;
+
+    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
+    const indices = this.sliceIndices();
+    const planes = ORIENTATION_ORDER.map((orientation) => {
+      const points = slicePlaneCorners(volume, orientation, indices[orientation])
+        .map((corner) => {
+          const { u, v } = projectToPane(basis, corner);
+          return `${(u * mip.rect.width).toFixed(1)},${(v * mip.rect.height).toFixed(1)}`;
+        })
+        .join(' ');
+      return { orientation, points, color: SLICE_PLANE_COLORS[orientation] };
+    });
+    return { rect: mip.rect, planes };
   });
 
   /**
@@ -536,12 +587,44 @@ export class Viewer {
     );
     if (!sample) return; // clicked the letterbox margin or outside the volume
 
-    this.focusVoxel.set(sample.voxel);
+    this.navigateToVoxel(volume, sample.voxel);
+  }
+
+  /**
+   * Set the shared focus from a Shift+click on the 3D pane: ray-cast the clicked
+   * pixel to the location its projection came from (the brightest sample for MIP),
+   * then navigate every MPR pane there — the 3D view acting as a locator. Uses the
+   * same camera, projection mode and slab the pane is rendering, so the pick lands
+   * on the voxel shown under the cursor.
+   */
+  private setFocusFromMip(
+    placement: Extract<PanePlacement, { kind: 'mip' }>,
+    event: PointerEvent,
+  ): void {
+    const volume = this.volume();
+    if (!volume) return;
+    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+    const pick = pickProjection(
+      volume,
+      this.camera3d(),
+      this.projectionMode(),
+      this.slabThicknessMm(),
+      placement.rect,
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+    );
+    if (!pick) return; // the ray missed the volume
+    this.navigateToVoxel(volume, pick.voxel);
+  }
+
+  /** Make `voxel` the shared focus and scroll every orientation to its slice. */
+  private navigateToVoxel(volume: Volume, voxel: readonly [number, number, number]): void {
+    this.focusVoxel.set(voxel);
     this.crosshairsEnabled.set(true); // a fresh pick should always be visible
     this.sliceIndices.set([
-      focusSliceIndex(volume, Orientation.Axial, sample.voxel),
-      focusSliceIndex(volume, Orientation.Coronal, sample.voxel),
-      focusSliceIndex(volume, Orientation.Sagittal, sample.voxel),
+      focusSliceIndex(volume, Orientation.Axial, voxel),
+      focusSliceIndex(volume, Orientation.Coronal, voxel),
+      focusSliceIndex(volume, Orientation.Sagittal, voxel),
     ]);
   }
 
@@ -580,10 +663,12 @@ export class Viewer {
     event.preventDefault();
 
     // Shift+left-click sets the shared focus voxel and navigates every pane to it,
-    // instead of starting a pan — a modifier that never clashes with the plain
-    // left-drag pan or the right-drag W/L. Only meaningful over an MPR pane.
-    if (event.shiftKey && placement.kind === 'mpr') {
-      this.setFocus(placement, event);
+    // instead of starting a pan/orbit — a modifier that never clashes with the
+    // plain left-drag or the right-drag W/L. Over an MPR pane it probes the slice;
+    // over the 3D pane it ray-casts the projection to the location it came from.
+    if (event.shiftKey) {
+      if (placement.kind === 'mpr') this.setFocus(placement, event);
+      else this.setFocusFromMip(placement, event);
       return;
     }
 

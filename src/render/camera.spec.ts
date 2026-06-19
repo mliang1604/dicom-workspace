@@ -1,5 +1,12 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
-import { cameraBasis, eyeDirection, intersectUnitBox, type OrbitCamera } from './camera';
+import {
+  cameraBasis,
+  eyeDirection,
+  intersectUnitBox,
+  projectToPane,
+  type OrbitCamera,
+} from './camera';
+import { add, scale } from '../dicom/vec3';
 import { patientToTexMatrix, planeToTex, texCoordAt } from './reslice';
 
 function makeVolume(dims: [number, number, number], geometry?: VolumeGeometry): Volume {
@@ -79,6 +86,34 @@ describe('cameraBasis', () => {
 
     // The wider axis (U) is twice the height axis (V), so the fit stays square.
     expect(Math.hypot(...basis.axisU)).toBeCloseTo(Math.hypot(...basis.axisV) * 2, 6);
+  });
+});
+
+describe('projectToPane', () => {
+  it('inverts the shader ray construction back to pane-fraction uv', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const basis = cameraBasis(volume, LEVEL, 100, 100);
+
+    // Build the world point the shader would for ndc (0.3, −0.4), then project back.
+    const point = add(add(basis.eye, scale(basis.axisU, 0.3)), scale(basis.axisV, -0.4));
+    const projected = projectToPane(basis, point);
+
+    expect(projected.u).toBeCloseTo((0.3 + 1) / 2, 6); // ndc.x = u·2 − 1
+    expect(projected.v).toBeCloseTo((1 - -0.4) / 2, 6); // ndc.y = 1 − v·2
+  });
+
+  it('ignores the depth along forward when resolving uv', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const basis = cameraBasis(volume, LEVEL, 100, 100);
+
+    const onPlane = add(basis.eye, scale(basis.axisU, 0.25));
+    const pushedIn = add(onPlane, scale(basis.forward, 5)); // 5 mm deeper into the screen
+    const a = projectToPane(basis, onPlane);
+    const b = projectToPane(basis, pushedIn);
+
+    expect(b.u).toBeCloseTo(a.u, 6);
+    expect(b.v).toBeCloseTo(a.v, 6);
+    expect(b.depth - a.depth).toBeCloseTo(5, 6);
   });
 });
 

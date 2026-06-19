@@ -156,6 +156,19 @@ button.active {
   height: 100%;
 }
 
+/* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
+.slice-planes {
+  position: absolute;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.slice-plane {
+  fill: none;
+  stroke-width: 1.5;
+  opacity: 0.85;
+}
+
 /* Orientation indicator: patient axes drawn over the 3D pane's corner. */
 .axis-indicator {
   position: absolute;
