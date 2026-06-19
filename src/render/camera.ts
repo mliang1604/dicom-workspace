@@ -1,5 +1,5 @@
 import type { Vec3, Volume } from '../dicom/types';
-import { cross, length, normalize, scale } from '../dicom/vec3';
+import { cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
 import { volumeBounds } from './reslice';
 
 /**
@@ -108,6 +108,34 @@ export function cameraBasis(
     center[2] + eyeDir[2] * radius * 2,
   ];
   return { eye, forward, axisU: scale(right, halfW), axisV: scale(up, halfH) };
+}
+
+/** A patient point projected onto the 3D pane: pane-fraction uv plus view depth. */
+export interface PaneProjection {
+  /** Horizontal pane fraction in [0,1] (matches the shader's uv.x, 0 at the left). */
+  readonly u: number;
+  /** Vertical pane fraction in [0,1] (matches the shader's uv.y, 0 at the top). */
+  readonly v: number;
+  /** Signed depth along `forward` (mm): larger is deeper into the screen. */
+  readonly depth: number;
+}
+
+/**
+ * Project a patient-space point onto the 3D pane, the inverse of the per-fragment
+ * `originWorld = eye + ndc.x·axisU + ndc.y·axisV` the raycaster builds. Because
+ * the camera is orthographic and `axisU`/`axisV` are perpendicular to `forward`,
+ * the in-plane offset resolves directly onto those axes; `depth` is the component
+ * along `forward`, used to order overlapping overlays front-to-back. Lets the
+ * viewer draw the MPR cut-planes and the picked point as pane-space overlays
+ * without a GPU pass, exactly where the corresponding ray would have struck.
+ */
+export function projectToPane(basis: CameraBasis, point: Vec3): PaneProjection {
+  const rel = sub(point, basis.eye);
+  const uu = dot(basis.axisU, basis.axisU);
+  const vv = dot(basis.axisV, basis.axisV);
+  const ndcX = uu > 0 ? dot(rel, basis.axisU) / uu : 0;
+  const ndcY = vv > 0 ? dot(rel, basis.axisV) / vv : 0;
+  return { u: (ndcX + 1) / 2, v: (1 - ndcY) / 2, depth: dot(rel, basis.forward) };
 }
 
 /** Entry/exit parameters of a ray against the unit box; `hit` is false if it misses. */

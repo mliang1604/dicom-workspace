@@ -32,7 +32,7 @@
     (click)="toggleCrosshairs()"
     [disabled]="!isReady()"
     [class.active]="crosshairsEnabled()"
-    title="Show linked crosshairs at the Shift+clicked focus point (C)"
+    title="Show linked crosshairs and the 3D cut-planes at the Shift+clicked focus point (C)"
   >
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
   </button>
@@ -40,8 +40,8 @@
   <span class="spacer">
     @if (isReady()) {
       <span class="hint"
-        >Drag to pan · Shift+click to link views · right-drag for W/L · scroll to change slice ·
-        Ctrl+scroll to zoom · drag/scroll the 3D pane to orbit/zoom</span
+        >Drag to pan · Shift+click any pane to link views · right-drag for W/L · scroll to change
+        slice · Ctrl+scroll to zoom · drag/scroll the 3D pane to orbit/zoom</span
       >
     }
   </span>
@@ -156,6 +156,22 @@
       </div>
     }
   </div>
+
+  <!-- MPR cut-planes projected into the 3D pane, showing where each pane slices. -->
+  @if (slicePlanes(); as sp) {
+    <svg
+      class="slice-planes"
+      aria-hidden="true"
+      [style.left.px]="sp.rect.x"
+      [style.top.px]="sp.rect.y"
+      [attr.width]="sp.rect.width"
+      [attr.height]="sp.rect.height"
+    >
+      @for (plane of sp.planes; track plane.orientation) {
+        <polygon class="slice-plane" [attr.points]="plane.points" [style.stroke]="plane.color" />
+      }
+    </svg>
+  }
 
   <!-- Anatomical orientation indicator in the 3D pane corner; rotates with the orbit. -->
   @if (axisIndicator(); as axes) {
