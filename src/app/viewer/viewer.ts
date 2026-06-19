@@ -28,6 +28,7 @@ import {
   type WindowPreset,
 } from '../../render/window-level';
 import type { OrbitCamera } from '../../render/camera';
+import { axisMarkers } from '../../render/axis-indicator';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
@@ -44,6 +45,30 @@ type LoadState =
 type PanePlacement =
   | { readonly kind: 'mpr'; readonly orientation: Orientation; readonly rect: PaneRect }
   | { readonly kind: 'mip'; readonly rect: PaneRect };
+
+/** One projected patient axis, placed in the indicator widget's local pixels. */
+interface AxisOverlayMarker {
+  /** R, L, A, P, S, or I. */
+  readonly label: string;
+  /** Label centre in widget-local CSS pixels (origin at the widget's top-left). */
+  readonly x: number;
+  readonly y: number;
+  /** 0–1 opacity: axes pointing toward the viewer are bright, those behind fade. */
+  readonly opacity: number;
+}
+
+/** The orientation indicator overlaid in a corner of the 3D pane. */
+interface AxisOverlay {
+  /** Widget top-left in CSS pixels relative to the canvas. */
+  readonly left: number;
+  readonly top: number;
+  /** Square widget size in CSS pixels. */
+  readonly size: number;
+  /** Widget-local centre (the axis hub) in CSS pixels. */
+  readonly center: number;
+  /** The six axes, sorted far-to-near so near labels render on top. */
+  readonly markers: readonly AxisOverlayMarker[];
+}
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
 interface CrosshairOverlay {
@@ -108,6 +133,13 @@ const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1 };
  * banner; wider gaps leave a visible reconstructed region.
  */
 const GAP_WARNING_RATIO = 2;
+
+/** Square size (CSS px) of the 3D pane's orientation indicator widget. */
+const AXIS_INDICATOR_SIZE = 72;
+/** Length (CSS px) of each axis spoke from the indicator's hub to its label. */
+const AXIS_INDICATOR_RADIUS = 24;
+/** Inset (CSS px) of the indicator from the 3D pane's top-right corner. */
+const AXIS_INDICATOR_MARGIN = 12;
 
 /**
  * How long after the last wheel-zoom or window/level change the 3D MIP keeps
@@ -227,6 +259,39 @@ export class Viewer {
       result.push({ key: this.paneKey(pane), rect: pane.rect, x: point.x, y: point.y });
     }
     return result;
+  });
+
+  /**
+   * Anatomical orientation indicator for the 3D pane: the six patient axes
+   * projected through the orbit camera ({@link axisMarkers}) and placed in a
+   * small widget in the pane's top-right corner, so it rotates live with the
+   * orbit. It's a pure-CSS/SVG overlay — no extra GPU pass — keyed only off the
+   * camera angles, so panning or scrolling the MPR panes never touches it.
+   */
+  protected readonly axisIndicator = computed<AxisOverlay | null>(() => {
+    if (!this.isReady()) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!mip) return null;
+
+    const size = AXIS_INDICATOR_SIZE;
+    const center = size / 2;
+    const left = mip.rect.x + mip.rect.width - AXIS_INDICATOR_MARGIN - size;
+    const top = mip.rect.y + AXIS_INDICATOR_MARGIN;
+
+    const camera = this.camera3d();
+    const markers = axisMarkers(camera.azimuth, camera.elevation)
+      .map((axis) => ({
+        label: axis.label,
+        // Widget-local pixels: +x is screen-right, +y (up) flips to CSS down.
+        x: center + axis.x * AXIS_INDICATOR_RADIUS,
+        y: center - axis.y * AXIS_INDICATOR_RADIUS,
+        depth: axis.depth,
+        // Fade the away-facing axes; keep the near ones fully opaque.
+        opacity: 0.35 + 0.65 * ((axis.depth + 1) / 2),
+      }))
+      // Paint far axes first so the near labels (drawn last) sit on top.
+      .sort((a, b) => a.depth - b.depth);
+    return { left, top, size, center, markers };
   });
 
   protected readonly statusIsError = computed(

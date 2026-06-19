@@ -156,6 +156,35 @@ button.active {
   height: 100%;
 }
 
+/* Orientation indicator: patient axes drawn over the 3D pane's corner. */
+.axis-indicator {
+  position: absolute;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.axis-spoke {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.axis-hub {
+  fill: var(--accent);
+}
+
+.axis-text {
+  fill: var(--text);
+  font:
+    600 12px/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  text-anchor: middle;
+  dominant-baseline: central;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.7);
+  stroke-width: 3px;
+}
+
 /* Missing-slice interpolation warning, centred along the top of the viewport. */
 .warning {
   position: absolute;

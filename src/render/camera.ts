@@ -53,6 +53,31 @@ export function eyeDirection(azimuth: number, elevation: number): Vec3 {
   return [Math.sin(azimuth) * ce, -Math.cos(azimuth) * ce, Math.sin(elevation)];
 }
 
+/** The camera's orthonormal screen basis in patient space. */
+export interface ViewBasis {
+  /** Image-plane right: a patient direction mapping to screen +x. */
+  readonly right: Vec3;
+  /** Image-plane up: a patient direction mapping to screen +y (upward). */
+  readonly up: Vec3;
+  /** View direction into the screen (eye → volume), shared by every fragment. */
+  readonly forward: Vec3;
+}
+
+/**
+ * Orthonormal screen basis (right / up / forward) for the given orbit angles,
+ * with patient superior as the up reference. Falls back to a fixed right when
+ * looking straight up/down (forward ∥ superior). This is the pure orientation
+ * half of {@link cameraBasis} — no volume needed — so it can drive both the MIP
+ * raycast and the on-screen axis indicator from one definition.
+ */
+export function viewBasis(azimuth: number, elevation: number): ViewBasis {
+  const forward = scale(eyeDirection(azimuth, elevation), -1);
+  let right = cross(forward, SUPERIOR);
+  right = length(right) > 1e-6 ? normalize(right) : [1, 0, 0];
+  const up = normalize(cross(right, forward));
+  return { right, up, forward };
+}
+
 /**
  * Camera basis and orthographic image-plane axes for a pane of the given pixel
  * size. The orthographic extent fits the volume's bounding sphere at zoom 1 (so
@@ -66,14 +91,8 @@ export function cameraBasis(
   viewHeight: number,
 ): CameraBasis {
   const { center, radius } = volumeBounds(volume);
-  const eyeDir = eyeDirection(camera.azimuth, camera.elevation);
-  const forward = scale(eyeDir, -1);
-
-  // Right/up of the image plane, with superior as the up reference. Falls back
-  // to a fixed right when looking straight up/down (forward ∥ superior).
-  let right = cross(forward, SUPERIOR);
-  right = length(right) > 1e-6 ? normalize(right) : [1, 0, 0];
-  const up = normalize(cross(right, forward));
+  const { right, up, forward } = viewBasis(camera.azimuth, camera.elevation);
+  const eyeDir = scale(forward, -1);
 
   const zoom = camera.zoom > 0 ? camera.zoom : 1;
   const aspect = viewHeight > 0 ? viewWidth / viewHeight : 1;
