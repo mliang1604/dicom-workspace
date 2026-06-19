@@ -13,6 +13,7 @@ import {
 import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
 import { clampPan, rezoomPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
+import type { OrbitCamera } from '../../render/camera';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
@@ -25,10 +26,9 @@ type LoadState =
   | { readonly status: 'error'; readonly message: string };
 
 /** A pane's placement on screen, in CSS pixels, plus what it shows. */
-interface PanePlacement {
-  readonly orientation: Orientation;
-  readonly rect: PaneRect;
-}
+type PanePlacement =
+  | { readonly kind: 'mpr'; readonly orientation: Orientation; readonly rect: PaneRect }
+  | { readonly kind: 'mip'; readonly rect: PaneRect };
 
 /** A value per orientation, indexed by the orientation's numeric value. */
 type PerOrientation = readonly [number, number, number];
@@ -36,22 +36,32 @@ type PerOrientation = readonly [number, number, number];
 /** A pan offset per orientation, indexed by the orientation's numeric value. */
 type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
 
-/** A pane being dragged to pan, with the last pointer position in client pixels. */
-interface PanDrag {
-  readonly orientation: Orientation;
-  readonly lastX: number;
-  readonly lastY: number;
-}
+/** An in-progress drag: panning an MPR pane, or orbiting the 3D pane. */
+type Drag =
+  | {
+      readonly kind: 'pan';
+      readonly orientation: Orientation;
+      readonly lastX: number;
+      readonly lastY: number;
+    }
+  | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number };
 
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
 
-/** Order the main pane cycles through when swapping. */
+/** Order the main (top-left) pane cycles through when swapping. */
 const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
 
 const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
+
+/** Radians of orbit per pixel dragged over the 3D pane. */
+const ORBIT_SPEED = 0.01;
+/** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
+const MAX_ELEVATION = 1.45;
+/** Default 3D view: a slight three-quarter orbit, patient superior up. */
+const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1 };
 
 /**
  * Only warn about interpolation when the widest gap spans more than this
@@ -87,13 +97,16 @@ export class Viewer {
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
   /** Per-orientation pan offset in screen-uv units; drives shader + probe. */
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
-  /** The in-progress pan drag, or null when no button is held over a pane. */
-  private readonly panDrag = signal<PanDrag | null>(null);
-  protected readonly isPanning = computed(() => this.panDrag() !== null);
+  /** Orbit/zoom state of the 3D MIP pane. */
+  private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
+  /** The in-progress drag (pan or orbit), or null when no button is held. */
+  private readonly drag = signal<Drag | null>(null);
+  protected readonly isPanning = computed(() => this.drag() !== null);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   /** When true, the sagittal view is mirrored so anterior sits on the right. */
   protected readonly sagittalFlipped = signal(false);
-  protected readonly hoveredOrientation = signal<Orientation | null>(null);
+  /** Key of the hovered pane (see {@link paneKey}), or null when away. */
+  protected readonly hoveredKey = signal<string | null>(null);
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
   private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
   protected readonly windowCenter = signal(0);
@@ -152,7 +165,7 @@ export class Viewer {
     if (!cursor || !volume) return null;
 
     const pane = placementAt(this.panes(), cursor.x, cursor.y);
-    if (!pane) return null;
+    if (!pane || pane.kind !== 'mpr') return null; // no voxel probe over the 3D pane
 
     const sample = probeVoxel(
       volume,
@@ -182,21 +195,33 @@ export class Viewer {
       const indices = this.sliceIndices();
       const zooms = this.zooms();
       const pans = this.pans();
+      const camera = this.camera3d();
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
       const sagittalFlipped = this.sagittalFlipped();
       if (!renderer || !volume) return;
 
-      const views: PaneView[] = panes.map((pane) => ({
-        orientation: pane.orientation,
-        sliceIndex: indices[pane.orientation],
-        windowCenter,
-        windowWidth,
-        zoom: zooms[pane.orientation],
-        pan: pans[pane.orientation],
-        flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
-        rect: scaleRect(pane.rect, dpr),
-      }));
+      const views: PaneView[] = panes.map((pane) =>
+        pane.kind === 'mip'
+          ? {
+              kind: 'mip',
+              windowCenter,
+              windowWidth,
+              camera,
+              rect: scaleRect(pane.rect, dpr),
+            }
+          : {
+              kind: 'mpr',
+              orientation: pane.orientation,
+              sliceIndex: indices[pane.orientation],
+              windowCenter,
+              windowWidth,
+              zoom: zooms[pane.orientation],
+              pan: pans[pane.orientation],
+              flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
+              rect: scaleRect(pane.rect, dpr),
+            },
+      );
       renderer.renderPanes(views);
     });
   }
@@ -214,6 +239,11 @@ export class Viewer {
         return exhaustive;
       }
     }
+  }
+
+  /** Stable identity for a placement, used for `@for` tracking and hover state. */
+  protected paneKey(pane: PanePlacement): string {
+    return pane.kind === 'mip' ? 'mip' : `mpr-${pane.orientation}`;
   }
 
   protected paneSliceLabel(orientation: Orientation): string {
@@ -253,46 +283,71 @@ export class Viewer {
     if (files.length > 0) await this.loadFiles(files);
   }
 
-  /** Begin a click-drag pan of the pane under the pointer (primary button). */
+  /** Begin a click-drag over the pane under the pointer (primary button). */
   protected onPointerDown(event: PointerEvent): void {
     if (!this.isReady() || event.button !== 0) return;
-    const orientation = this.paneAtEvent(event);
-    if (orientation === null) return;
+    const placement = this.placementAtEvent(event);
+    if (!placement) return;
     event.preventDefault();
     // Capture so the drag keeps tracking even if the pointer leaves the canvas.
     this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
-    this.panDrag.set({ orientation, lastX: event.clientX, lastY: event.clientY });
+    // The 3D pane orbits; the MPR panes pan.
+    this.drag.set(
+      placement.kind === 'mip'
+        ? { kind: 'orbit', lastX: event.clientX, lastY: event.clientY }
+        : {
+            kind: 'pan',
+            orientation: placement.orientation,
+            lastX: event.clientX,
+            lastY: event.clientY,
+          },
+    );
   }
 
   protected onPointerMove(event: PointerEvent): void {
-    const drag = this.panDrag();
-    if (drag) this.dragPan(event, drag);
+    const drag = this.drag();
+    if (drag?.kind === 'pan') this.dragPan(event, drag);
+    else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
 
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
     const x = event.clientX - bounds.left;
     const y = event.clientY - bounds.top;
     this.cursor.set({ x, y });
-    this.hoveredOrientation.set(findPaneAt(this.panes(), x, y));
+    const hovered = placementAt(this.panes(), x, y);
+    this.hoveredKey.set(hovered ? this.paneKey(hovered) : null);
   }
 
   protected onPointerUp(event: PointerEvent): void {
-    if (!this.panDrag()) return;
+    if (!this.drag()) return;
     const canvas = this.canvasRef().nativeElement;
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    this.panDrag.set(null);
+    this.drag.set(null);
   }
 
   protected onPointerLeave(): void {
     this.cursor.set(null);
-    this.hoveredOrientation.set(null);
+    this.hoveredKey.set(null);
+  }
+
+  /** Accumulate a pointer move into the 3D camera's orbit angles. */
+  private dragOrbit(event: PointerEvent, drag: Extract<Drag, { kind: 'orbit' }>): void {
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
+    this.camera3d.update((cam) => ({
+      azimuth: cam.azimuth + dx * ORBIT_SPEED,
+      elevation: clamp(cam.elevation - dy * ORBIT_SPEED, -MAX_ELEVATION, MAX_ELEVATION),
+      zoom: cam.zoom,
+    }));
   }
 
   /** Accumulate a pointer move into the dragged pane's pan, clamped to bounds. */
-  private dragPan(event: PointerEvent, drag: PanDrag): void {
-    const next: PanDrag = { ...drag, lastX: event.clientX, lastY: event.clientY };
-    this.panDrag.set(next);
+  private dragPan(event: PointerEvent, drag: Extract<Drag, { kind: 'pan' }>): void {
+    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
 
-    const placement = this.panes().find((pane) => pane.orientation === drag.orientation);
+    const placement = this.panes().find(
+      (pane) => pane.kind === 'mpr' && pane.orientation === drag.orientation,
+    );
     const volume = this.volume();
     if (!placement || !volume || placement.rect.width < 1 || placement.rect.height < 1) return;
 
@@ -316,22 +371,37 @@ export class Viewer {
     });
   }
 
-  /** Wheel over a pane scrolls its slices; Ctrl+wheel zooms it. */
+  /**
+   * Wheel over an MPR pane scrolls its slices (Ctrl+wheel zooms it); wheel over
+   * the 3D pane zooms the orbit camera.
+   */
   protected onWheel(event: WheelEvent): void {
     if (!this.isReady()) return;
-    const orientation = this.paneAtEvent(event);
-    if (orientation === null) return;
+    const placement = this.placementAtEvent(event);
+    if (!placement) return;
 
     event.preventDefault();
-    if (event.ctrlKey) {
+    if (placement.kind === 'mip') {
+      this.zoomCamera(event.deltaY);
+    } else if (event.ctrlKey) {
       const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-      this.zoomPane(orientation, event.deltaY, {
+      this.zoomPane(placement.orientation, event.deltaY, {
         x: event.clientX - bounds.left,
         y: event.clientY - bounds.top,
       });
     } else {
-      this.scrollSlice(orientation, event.deltaY);
+      this.scrollSlice(placement.orientation, event.deltaY);
     }
+  }
+
+  /** Wheel over the 3D pane magnifies (scroll up) or shrinks the MIP. */
+  private zoomCamera(deltaY: number): void {
+    if (deltaY === 0) return;
+    const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
+    this.camera3d.update((cam) => ({
+      ...cam,
+      zoom: clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM),
+    }));
   }
 
   private scrollSlice(orientation: Orientation, deltaY: number): void {
@@ -354,7 +424,9 @@ export class Viewer {
     if (to === from) return;
     this.zooms.update((zooms) => withValue(zooms, orientation, to));
 
-    const placement = this.panes().find((pane) => pane.orientation === orientation);
+    const placement = this.panes().find(
+      (pane) => pane.kind === 'mpr' && pane.orientation === orientation,
+    );
     const volume = this.volume();
     if (!placement || !volume) return;
     // Pivot the zoom on the cursor, not the image centre: holding the plane point
@@ -387,10 +459,10 @@ export class Viewer {
     this.windowWidth.set(Math.max(1, intValue(event)));
   }
 
-  /** Orientation of the pane under a pointer event, or null if outside the panes. */
-  private paneAtEvent(event: MouseEvent): Orientation | null {
+  /** Placement of the pane under a pointer event, or null if outside the panes. */
+  private placementAtEvent(event: MouseEvent): PanePlacement | null {
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-    return findPaneAt(this.panes(), event.clientX - bounds.left, event.clientY - bounds.top);
+    return placementAt(this.panes(), event.clientX - bounds.left, event.clientY - bounds.top);
   }
 
   private async initGpu(): Promise<void> {
@@ -427,6 +499,7 @@ export class Viewer {
     this.sagittalFlipped.set(false);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
+    this.camera3d.set(DEFAULT_CAMERA);
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),
@@ -456,13 +529,18 @@ export class Viewer {
   }
 }
 
-/** Assign orientations to the main + two side panes for the current main view. */
+/**
+ * Lay out the four panes of the 2×2 grid: the three MPR orientations fill the
+ * top-left (the "main", cycled by swap), top-right and bottom-left cells, and the
+ * 3D MIP occupies the bottom-right cell.
+ */
 function placePanes(layout: ReturnType<typeof mprLayout>, main: Orientation): PanePlacement[] {
   const sides = ORIENTATION_ORDER.filter((orientation) => orientation !== main);
   return [
-    { orientation: main, rect: layout.main },
-    { orientation: sides[0], rect: layout.topRight },
-    { orientation: sides[1], rect: layout.bottomRight },
+    { kind: 'mpr', orientation: main, rect: layout.topLeft },
+    { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
+    { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft },
+    { kind: 'mip', rect: layout.bottomRight },
   ];
 }
 
@@ -475,11 +553,6 @@ function placementAt(panes: readonly PanePlacement[], x: number, y: number): Pan
     }
   }
   return null;
-}
-
-/** The orientation of the pane containing CSS-pixel point (x, y), or null. */
-function findPaneAt(panes: readonly PanePlacement[], x: number, y: number): Orientation | null {
-  return placementAt(panes, x, y)?.orientation ?? null;
 }
 
 /** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */

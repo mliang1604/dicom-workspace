@@ -29,7 +29,10 @@
 
   <span class="spacer">
     @if (isReady()) {
-      <span class="hint">Drag to pan · scroll to change slice · Ctrl+scroll to zoom</span>
+      <span class="hint"
+        >Drag to pan · scroll to change slice · Ctrl+scroll to zoom · drag/scroll the 3D pane to
+        orbit/zoom</span
+      >
     }
   </span>
 
@@ -71,17 +74,21 @@
   ></canvas>
 
   <div class="pane-overlay">
-    @for (pane of panes(); track pane.orientation) {
+    @for (pane of panes(); track paneKey(pane)) {
       <div
         class="pane"
-        [class.hovered]="pane.orientation === hoveredOrientation()"
+        [class.hovered]="paneKey(pane) === hoveredKey()"
         [style.left.px]="pane.rect.x"
         [style.top.px]="pane.rect.y"
         [style.width.px]="pane.rect.width"
         [style.height.px]="pane.rect.height"
       >
         <span class="pane-tag">
-          {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
+          @if (pane.kind === 'mip') {
+            3D MIP
+          } @else {
+            {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
+          }
         </span>
       </div>
     }

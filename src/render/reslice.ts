@@ -1,5 +1,5 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
-import { add, cross, dot, scale, sub } from '../dicom/vec3';
+import { add, cross, dot, length, scale, sub } from '../dicom/vec3';
 
 /**
  * Oblique multi-planar reslicing geometry.
@@ -85,6 +85,60 @@ export function planeToTexMatrix(volume: Volume, orientation: Orientation): Floa
     dV[0], dV[1], dV[2], 0,
     dS[0], dS[1], dS[2], 0,
     origin[0], origin[1], origin[2], 1,
+  ]);
+}
+
+/** The volume's patient-space (LPS) bounding box, plus its centre and radius. */
+export interface VolumeBounds {
+  /** Minimum corner of the axis-aligned box, in mm. */
+  readonly min: Vec3;
+  /** Maximum corner of the axis-aligned box, in mm. */
+  readonly max: Vec3;
+  /** Centre of the box, in mm — a natural orbit target for the 3D view. */
+  readonly center: Vec3;
+  /** Radius of the box's bounding sphere (half its diagonal), in mm. */
+  readonly radius: number;
+}
+
+/** Patient-space bounding box of a volume, with centre and bounding radius. */
+export function volumeBounds(volume: Volume): VolumeBounds {
+  const { min, max } = patientBounds(resolveGeometry(volume), volume.dims);
+  const center: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  const radius = 0.5 * length(sub(max, min));
+  return { min, max, center, radius };
+}
+
+/**
+ * Column-major 4×4 affine mapping a patient (LPS) point to 3D texture
+ * coordinates `[0,1]^3`, the inverse of the index→patient geometry composed with
+ * voxel-centre normalisation: `tex = (M⁻¹·(p − origin) + 0.5) / dims`. The 3D
+ * MIP raycaster uses it to march world-space rays through the texture, mirroring
+ * how {@link planeToTexMatrix} maps a plane into the same texture for the MPR
+ * panes.
+ */
+export function patientToTexMatrix(volume: Volume): Float32Array {
+  const geom = resolveGeometry(volume);
+  const [d0, d1, d2] = volume.dims;
+  // Rows of the inverse 3×3 (Cramer's rule), matching invMul above.
+  const r0 = cross(geom.jStep, geom.kStep);
+  const r1 = cross(geom.kStep, geom.iStep);
+  const r2 = cross(geom.iStep, geom.jStep);
+  const det = dot(geom.iStep, r0);
+  const inv = det !== 0 ? 1 / det : 0;
+  // a_c is the coefficient of the patient point for texture component c.
+  const a0 = scale(r0, inv / d0);
+  const a1 = scale(r1, inv / d1);
+  const a2 = scale(r2, inv / d2);
+  const b0 = 0.5 / d0 - dot(a0, geom.origin);
+  const b1 = 0.5 / d1 - dot(a1, geom.origin);
+  const b2 = 0.5 / d2 - dot(a2, geom.origin);
+  // tex = (M · vec4(p, 1)).xyz; columns are p.x, p.y, p.z, 1. Column-major.
+  // prettier-ignore
+  return new Float32Array([
+    a0[0], a1[0], a2[0], 0,
+    a0[1], a1[1], a2[1], 0,
+    a0[2], a1[2], a2[2], 0,
+    b0,    b1,    b2,    1,
   ]);
 }
 
