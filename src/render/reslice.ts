@@ -109,6 +109,31 @@ export function volumeBounds(volume: Volume): VolumeBounds {
 }
 
 /**
+ * View-direction parameter range `[tLo, tHi]` of a thick slab of `thicknessMm`,
+ * centred on the volume centre and perpendicular to the orthographic view, for
+ * the 3D raycaster. The camera is orthographic so every ray shares `forward` and
+ * the slab is two parallel clip planes; a world point at ray parameter `t` has
+ * view-depth `dot(eye − center, forward) + t` (since `forward` is unit and the
+ * image-plane axes are perpendicular to it), so the slab `|depth| ≤ thickness/2`
+ * is the t-interval returned here, the same parameter the shader marches in.
+ *
+ * A thickness covering the volume's full depth (`2·radius`, the diameter) yields
+ * `[−∞, +∞]`, which leaves the box traversal unclipped — the default, exactly
+ * reproducing the whole-volume projection.
+ */
+export function slabTRange(
+  bounds: VolumeBounds,
+  eye: Vec3,
+  forward: Vec3,
+  thicknessMm: number,
+): [number, number] {
+  if (!(thicknessMm < 2 * bounds.radius)) return [-Infinity, Infinity];
+  const depth0 = dot(sub(eye, bounds.center), forward);
+  const half = thicknessMm / 2;
+  return [-half - depth0, half - depth0];
+}
+
+/**
  * Column-major 4×4 affine mapping a patient (LPS) point to 3D texture
  * coordinates `[0,1]^3`, the inverse of the index→patient geometry composed with
  * voxel-centre normalisation: `tex = (M⁻¹·(p − origin) + 0.5) / dims`. The 3D

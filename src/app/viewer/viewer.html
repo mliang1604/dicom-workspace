@@ -36,6 +36,32 @@
     }
   </span>
 
+  <label class="ctrl" title="3D pane projection: max (MIP), min (MinIP), or mean">
+    3D
+    <select
+      [value]="projectionMode()"
+      (change)="onProjectionModeChange($event)"
+      [disabled]="!isReady()"
+    >
+      @for (mode of projectionModes; track mode.value) {
+        <option [value]="mode.value">{{ mode.label }}</option>
+      }
+    </select>
+  </label>
+
+  <label class="ctrl" title="3D slab thickness (mm); full depth projects the whole volume">
+    Slab
+    <input
+      type="number"
+      step="1"
+      min="1"
+      [max]="slabMaxMm()"
+      [value]="slabThicknessMm()"
+      (input)="onSlabThicknessInput($event)"
+      [disabled]="!isReady()"
+    />
+  </label>
+
   <label class="ctrl">
     WL
     <input

@@ -12,7 +12,14 @@ import {
 } from '@angular/core';
 import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
-import { clampPan, rezoomPan, SliceRenderer, type PaneView } from '../../render/slice-renderer';
+import {
+  clampPan,
+  ProjectionMode,
+  rezoomPan,
+  SliceRenderer,
+  type PaneView,
+} from '../../render/slice-renderer';
+import { volumeBounds } from '../../render/reslice';
 import type { OrbitCamera } from '../../render/camera';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
@@ -106,6 +113,19 @@ export class Viewer {
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
   /** Orbit/zoom state of the 3D MIP pane. */
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
+  /** Projection accumulated by the 3D pane (MIP / MinIP / Average). */
+  protected readonly projectionMode = signal<ProjectionMode>(ProjectionMode.Max);
+  /**
+   * Thick-slab thickness (mm) for the 3D pane, centred on the volume along the
+   * view direction. Defaults to the volume's full depth (whole-volume projection).
+   */
+  protected readonly slabThicknessMm = signal(0);
+  /** The projection-mode options offered in the toolbar, in display order. */
+  protected readonly projectionModes = [
+    { value: ProjectionMode.Max, label: 'MIP (max)' },
+    { value: ProjectionMode.Min, label: 'MinIP (min)' },
+    { value: ProjectionMode.Mean, label: 'Average' },
+  ] as const;
   /** The in-progress drag (pan or orbit), or null when no button is held. */
   private readonly drag = signal<Drag | null>(null);
   /**
@@ -170,6 +190,15 @@ export class Viewer {
     return state.status === 'ready' ? state.result.volume : null;
   });
 
+  /**
+   * The volume's full depth (mm): the upper bound and default for the slab
+   * thickness control, at which the slab covers the whole volume.
+   */
+  protected readonly slabMaxMm = computed(() => {
+    const volume = this.volume();
+    return volume ? Math.round(2 * volumeBounds(volume).radius) : 0;
+  });
+
   /** Live readout of the voxel under the cursor, or null when none is hovered. */
   protected readonly probeText = computed<string | null>(() => {
     if (!this.isReady()) return null;
@@ -220,6 +249,8 @@ export class Viewer {
       const zooms = this.zooms();
       const pans = this.pans();
       const camera = this.camera3d();
+      const projectionMode = this.projectionMode();
+      const slabThicknessMm = this.slabThicknessMm();
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
       const sagittalFlipped = this.sagittalFlipped();
@@ -235,6 +266,8 @@ export class Viewer {
               windowCenter,
               windowWidth,
               camera,
+              projectionMode,
+              slabThicknessMm,
               interactive: mipInteractive,
               rect: scaleRect(pane.rect, dpr),
             }
@@ -519,6 +552,20 @@ export class Viewer {
     this.markMipSettling();
   }
 
+  /** Switch the 3D pane's projection mode (MIP / MinIP / Average). */
+  protected onProjectionModeChange(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    this.projectionMode.set(Number(event.target.value) as ProjectionMode);
+    this.markMipSettling();
+  }
+
+  /** Set the 3D slab thickness (mm), clamped to [1, full volume depth]. */
+  protected onSlabThicknessInput(event: Event): void {
+    const max = this.slabMaxMm();
+    this.slabThicknessMm.set(clamp(intValue(event), 1, max > 0 ? max : 1));
+    this.markMipSettling();
+  }
+
   /** Placement of the pane under a pointer event, or null if outside the panes. */
   private placementAtEvent(event: MouseEvent): PanePlacement | null {
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
@@ -560,6 +607,9 @@ export class Viewer {
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
+    // Reset the 3D projection to the default MIP over the whole volume, like the camera.
+    this.projectionMode.set(ProjectionMode.Max);
+    this.slabThicknessMm.set(Math.round(2 * volumeBounds(result.volume).radius));
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),

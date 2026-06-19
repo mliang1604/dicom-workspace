@@ -1,7 +1,13 @@
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { Vec2 } from './layout';
 import { patientToTexMatrix } from './reslice';
-import { clampPan, mipStepScale, rezoomPan } from './slice-renderer';
+import {
+  clampPan,
+  mipStepScale,
+  ProjectionMode,
+  projectionModeCode,
+  rezoomPan,
+} from './slice-renderer';
 
 /** A minimal volume; only dims/spacing matter to the pan geometry. */
 function makeVolume(
@@ -94,6 +100,19 @@ describe('mipStepScale', () => {
     const spanMm = 4 * 2; // depth × spacing
 
     expect(Math.ceil(spanMm * mipStepScale(m, forward, volume.dims))).toBe(4);
+  });
+});
+
+describe('projectionModeCode', () => {
+  it('maps each projection mode to the shader code the WGSL switches on', () => {
+    expect(projectionModeCode(ProjectionMode.Max)).toBe(0);
+    expect(projectionModeCode(ProjectionMode.Min)).toBe(1);
+    expect(projectionModeCode(ProjectionMode.Mean)).toBe(2);
+  });
+
+  it('defaults to MIP (max), the historical projection', () => {
+    expect(ProjectionMode.Max).toBe(0);
+    expect(projectionModeCode(ProjectionMode.Max)).toBe(0);
   });
 });
 
