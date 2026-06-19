@@ -71,6 +71,13 @@ const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1 };
  */
 const GAP_WARNING_RATIO = 2;
 
+/**
+ * How long after the last wheel-zoom or window/level change the 3D MIP keeps
+ * rendering at reduced quality before snapping back to a full-quality frame.
+ * Orbit drags don't need this — pointer-up settles them directly.
+ */
+const MIP_SETTLE_MS = 200;
+
 @Component({
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -101,6 +108,12 @@ export class Viewer {
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
   /** The in-progress drag (pan or orbit), or null when no button is held. */
   private readonly drag = signal<Drag | null>(null);
+  /**
+   * True briefly after a wheel-zoom or window/level change so the MIP renders at
+   * reduced quality; cleared by a {@link MIP_SETTLE_MS} timeout for the final
+   * full-quality frame. Orbit interaction is read from {@link drag} directly.
+   */
+  private readonly mipSettling = signal(false);
   protected readonly isPanning = computed(() => this.drag() !== null);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   /** When true, the sagittal view is mirrored so anterior sits on the right. */
@@ -184,9 +197,20 @@ export class Viewer {
 
   private gpu: GpuContext | null = null;
 
+  /** Views computed by the render effect, awaiting the next animation frame. */
+  private pendingViews: PaneView[] | null = null;
+  /** Handle of the scheduled animation frame, or null when none is pending. */
+  private frameHandle: number | null = null;
+  /** Handle of the MIP settle timeout, or null when not settling. */
+  private settleHandle: ReturnType<typeof setTimeout> | null = null;
+
   constructor() {
     afterNextRender(() => void this.initGpu());
 
+    // The effect tracks every signal the frame depends on and computes the
+    // views, but defers the actual GPU submission to a single requestAnimationFrame
+    // (see scheduleFrame). Multiple signal changes within one frame — e.g. the
+    // stream of pointer moves during an orbit drag — collapse into one render.
     effect(() => {
       const renderer = this.renderer();
       const volume = this.volume();
@@ -199,15 +223,19 @@ export class Viewer {
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
       const sagittalFlipped = this.sagittalFlipped();
+      // The MIP renders at reduced quality while it's being orbited, zoomed, or
+      // window/levelled, then at full quality once interaction settles.
+      const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
       if (!renderer || !volume) return;
 
-      const views: PaneView[] = panes.map((pane) =>
+      this.pendingViews = panes.map((pane) =>
         pane.kind === 'mip'
           ? {
               kind: 'mip',
               windowCenter,
               windowWidth,
               camera,
+              interactive: mipInteractive,
               rect: scaleRect(pane.rect, dpr),
             }
           : {
@@ -222,8 +250,37 @@ export class Viewer {
               rect: scaleRect(pane.rect, dpr),
             },
       );
-      renderer.renderPanes(views);
+      this.scheduleFrame();
     });
+
+    this.destroyRef.onDestroy(() => {
+      if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
+      if (this.settleHandle !== null) clearTimeout(this.settleHandle);
+    });
+  }
+
+  /** Submit the latest computed views on the next frame, coalescing rapid updates. */
+  private scheduleFrame(): void {
+    if (this.frameHandle !== null) return;
+    this.frameHandle = requestAnimationFrame(() => {
+      this.frameHandle = null;
+      const renderer = this.renderer();
+      const views = this.pendingViews;
+      if (renderer && views) renderer.renderPanes(views);
+    });
+  }
+
+  /**
+   * Mark the MIP as actively changing (wheel-zoom or window/level), keeping it at
+   * reduced quality until {@link MIP_SETTLE_MS} of quiet, then a full-quality frame.
+   */
+  private markMipSettling(): void {
+    this.mipSettling.set(true);
+    if (this.settleHandle !== null) clearTimeout(this.settleHandle);
+    this.settleHandle = setTimeout(() => {
+      this.settleHandle = null;
+      this.mipSettling.set(false);
+    }, MIP_SETTLE_MS);
   }
 
   protected orientationName(orientation: Orientation): string {
@@ -402,6 +459,7 @@ export class Viewer {
       ...cam,
       zoom: clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM),
     }));
+    this.markMipSettling();
   }
 
   private scrollSlice(orientation: Orientation, deltaY: number): void {
@@ -453,10 +511,12 @@ export class Viewer {
 
   protected onWindowCenterInput(event: Event): void {
     this.windowCenter.set(intValue(event));
+    this.markMipSettling();
   }
 
   protected onWindowWidthInput(event: Event): void {
     this.windowWidth.set(Math.max(1, intValue(event)));
+    this.markMipSettling();
   }
 
   /** Placement of the pane under a pointer event, or null if outside the panes. */

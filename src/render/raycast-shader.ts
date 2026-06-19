@@ -15,10 +15,10 @@
 export const RAYCAST_SHADER = /* wgsl */ `
 struct Params {
   patientToTex : mat4x4<f32>, // patient (LPS) point -> texture coord [0,1]^3
-  eyeSteps : vec4<f32>,       // eye.xyz (patient mm), march step count in .w
+  eyeSteps : vec4<f32>,       // eye.xyz (patient mm), upper-bound step count in .w
   axisU : vec4<f32>,          // half-width image-plane axis in .xyz, windowCenter in .w
   axisV : vec4<f32>,          // half-height image-plane axis in .xyz, windowWidth in .w
-  forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz
+  forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz, voxels-per-t in .w
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -68,8 +68,16 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
-  let steps = max(u32(P.eyeSteps.w), 1u);
-  let dt = (tExit - tEntry) / f32(steps);
+  // Step roughly once per voxel along this ray's actual traversal: the span
+  // (tExit - tEntry) times the voxels-crossed-per-unit-t for the shared
+  // orthographic direction. Bounded above by the full-diagonal count so a
+  // grazing ray is cheap while no ray ever undersamples. At full quality this
+  // matches a one-sample-per-voxel march; the eyeSteps.w / forward.w pair is
+  // scaled down together for cheaper interactive (LOD) frames.
+  let maxSteps = max(u32(P.eyeSteps.w), 1u);
+  let span = tExit - tEntry;
+  let steps = clamp(u32(ceil(span * P.forward.w)), 1u, maxSteps);
+  let dt = span / f32(steps);
   var maxv = -3.0e38;
   for (var i = 0u; i < steps; i = i + 1u) {
     let t = tEntry + (f32(i) + 0.5) * dt;

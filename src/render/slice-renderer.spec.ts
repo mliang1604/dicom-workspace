@@ -1,6 +1,7 @@
-import { Orientation, type Volume } from '../dicom/types';
+import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { Vec2 } from './layout';
-import { clampPan, rezoomPan } from './slice-renderer';
+import { patientToTexMatrix } from './reslice';
+import { clampPan, mipStepScale, rezoomPan } from './slice-renderer';
 
 /** A minimal volume; only dims/spacing matter to the pan geometry. */
 function makeVolume(
@@ -58,6 +59,41 @@ describe('clampPan', () => {
       x: 0.25,
       y: 0.5,
     });
+  });
+});
+
+describe('mipStepScale', () => {
+  it('crosses one voxel per mm of travel for an isotropic 1 mm volume', () => {
+    const volume = makeVolume([4, 4, 4]); // 1 mm voxels
+    const m = patientToTexMatrix(volume);
+
+    // Each axis-aligned direction crosses exactly its axis's voxels per mm (= 1).
+    expect(mipStepScale(m, [1, 0, 0], volume.dims)).toBeCloseTo(1, 6);
+    expect(mipStepScale(m, [0, 1, 0], volume.dims)).toBeCloseTo(1, 6);
+    expect(mipStepScale(m, [0, 0, 1], volume.dims)).toBeCloseTo(1, 6);
+    // A unit diagonal direction also crosses 1 voxel per mm when isotropic.
+    const d = 1 / Math.sqrt(3);
+    expect(mipStepScale(m, [d, d, d], volume.dims)).toBeCloseTo(1, 6);
+  });
+
+  it('scales by the per-axis spacing for an anisotropic volume', () => {
+    // 2 mm slices along z: a z-ray crosses half a voxel per mm of travel.
+    const volume = makeVolume([4, 4, 4], [1, 1, 2]);
+    const m = patientToTexMatrix(volume);
+
+    expect(mipStepScale(m, [0, 0, 1], volume.dims)).toBeCloseTo(0.5, 6);
+    expect(mipStepScale(m, [1, 0, 0], volume.dims)).toBeCloseTo(1, 6);
+  });
+
+  it('times a full traversal span back to the voxel count along that axis', () => {
+    // The shader multiplies this scale by the ray's tExit−tEntry span. A z-ray
+    // through the whole 2 mm-spaced volume spans 8 mm and should resolve 4 voxels.
+    const volume = makeVolume([4, 4, 4], [1, 1, 2]);
+    const m = patientToTexMatrix(volume);
+    const forward: Vec3 = [0, 0, 1];
+    const spanMm = 4 * 2; // depth × spacing
+
+    expect(Math.ceil(spanMm * mipStepScale(m, forward, volume.dims))).toBe(4);
   });
 });
 
