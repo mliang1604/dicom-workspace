@@ -27,11 +27,21 @@
     Flip sagittal ⇄ <kbd>F</kbd> {{ sagittalFlipped() ? 'A▸' : '◂A' }}
   </button>
 
+  <button
+    type="button"
+    (click)="toggleCrosshairs()"
+    [disabled]="!isReady()"
+    [class.active]="crosshairsEnabled()"
+    title="Show linked crosshairs at the Shift+clicked focus point (C)"
+  >
+    Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
+  </button>
+
   <span class="spacer">
     @if (isReady()) {
       <span class="hint"
-        >Drag to pan · right-drag for W/L · scroll to change slice · Ctrl+scroll to zoom ·
-        drag/scroll the 3D pane to orbit/zoom</span
+        >Drag to pan · Shift+click to link views · right-drag for W/L · scroll to change slice ·
+        Ctrl+scroll to zoom · drag/scroll the 3D pane to orbit/zoom</span
       >
     }
   </span>
@@ -127,6 +137,22 @@
             {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
           }
         </span>
+      </div>
+    }
+  </div>
+
+  <!-- Linked crosshairs at the shared focus voxel, one per MPR pane. -->
+  <div class="pane-overlay">
+    @for (mark of crosshairs(); track mark.key) {
+      <div
+        class="crosshair"
+        [style.left.px]="mark.rect.x"
+        [style.top.px]="mark.rect.y"
+        [style.width.px]="mark.rect.width"
+        [style.height.px]="mark.rect.height"
+      >
+        <span class="crosshair-h" [style.top.px]="mark.y - mark.rect.y"></span>
+        <span class="crosshair-v" [style.left.px]="mark.x - mark.rect.x"></span>
       </div>
     }
   </div>

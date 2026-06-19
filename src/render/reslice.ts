@@ -74,6 +74,33 @@ export function texCoordAt(map: PlaneToTex, u: number, v: number, slicePos: numb
   return add(add(add(scale(map.dU, u), scale(map.dV, v)), scale(map.dS, slicePos)), map.origin);
 }
 
+/** A pane point recovered from a texture coordinate by inverting {@link texCoordAt}. */
+export interface PlaneCoords {
+  /** In-plane horizontal position (u, matching the shader's post-flip axis). */
+  readonly u: number;
+  /** In-plane vertical position (v, 0→1 top→bottom). */
+  readonly v: number;
+  /** Through-plane position (slicePos, 0→1). */
+  readonly slicePos: number;
+}
+
+/**
+ * Inverse of {@link texCoordAt}: solve `origin + u·dU + v·dV + slicePos·dS = coord`
+ * for the pane coordinates `(u, v, slicePos)`. Used to project a known voxel back
+ * onto each orientation's plane — the forward direction of the cursor probe — so
+ * the linked crosshair lands on the same pixel the probe would sample.
+ */
+export function planeCoordsAt(map: PlaneToTex, coord: Vec3): PlaneCoords {
+  // Invert the 3×3 [dU | dV | dS] via Cramer's rule, as in invMul above.
+  const rhs = sub(coord, map.origin);
+  const r0 = cross(map.dV, map.dS);
+  const r1 = cross(map.dS, map.dU);
+  const r2 = cross(map.dU, map.dV);
+  const det = dot(map.dU, r0);
+  const inv = det !== 0 ? 1 / det : 0;
+  return { u: dot(r0, rhs) * inv, v: dot(r1, rhs) * inv, slicePos: dot(r2, rhs) * inv };
+}
+
 /** Column-major 4×4 of {@link planeToTex} for upload to the shader uniform. */
 export function planeToTexMatrix(volume: Volume, orientation: Orientation): Float32Array {
   const { dU, dV, dS, origin } = planeToTex(volume, orientation);

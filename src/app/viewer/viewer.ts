@@ -29,6 +29,7 @@ import {
 } from '../../render/window-level';
 import type { OrbitCamera } from '../../render/camera';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
+import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 
@@ -43,6 +44,17 @@ type LoadState =
 type PanePlacement =
   | { readonly kind: 'mpr'; readonly orientation: Orientation; readonly rect: PaneRect }
   | { readonly kind: 'mip'; readonly rect: PaneRect };
+
+/** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
+interface CrosshairOverlay {
+  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
+  readonly key: string;
+  /** The pane's rectangle in CSS pixels. */
+  readonly rect: PaneRect;
+  /** Focus point in CSS pixels relative to the canvas. */
+  readonly x: number;
+  readonly y: number;
+}
 
 /** A value per orientation, indexed by the orientation's numeric value. */
 type PerOrientation = readonly [number, number, number];
@@ -112,6 +124,7 @@ const MIP_SETTLE_MS = 200;
   host: {
     '(window:keydown.x)': 'onSwapKey($event)',
     '(window:keydown.f)': 'onFlipKey($event)',
+    '(window:keydown.c)': 'onCrosshairKey($event)',
   },
 })
 export class Viewer {
@@ -157,6 +170,10 @@ export class Viewer {
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   /** When true, the sagittal view is mirrored so anterior sits on the right. */
   protected readonly sagittalFlipped = signal(false);
+  /** Shared focus voxel set by Shift+click, navigated to in every pane; null until set. */
+  private readonly focusVoxel = signal<readonly [number, number, number] | null>(null);
+  /** When true (default), draw the linked crosshair at the focus voxel in each MPR pane. */
+  protected readonly crosshairsEnabled = signal(true);
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
@@ -178,6 +195,38 @@ export class Viewer {
   protected readonly panes = computed<PanePlacement[]>(() => {
     const { width, height } = this.viewport();
     return placePanes(mprLayout(width, height), this.mainOrientation());
+  });
+
+  /**
+   * Linked crosshairs to overlay: the shared focus voxel projected into every MPR
+   * pane via {@link focusPanePoint} — the forward map the probe inverts — so each
+   * mark tracks pan, zoom, scroll and flip. A pane is dropped when the point falls
+   * outside its rect (panned/zoomed off-screen).
+   */
+  protected readonly crosshairs = computed<CrosshairOverlay[]>(() => {
+    const voxel = this.focusVoxel();
+    const volume = this.volume();
+    if (!this.crosshairsEnabled() || !voxel || !volume) return [];
+
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const flipped = this.sagittalFlipped();
+    const result: CrosshairOverlay[] = [];
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const point = focusPanePoint(
+        volume,
+        pane.orientation,
+        voxel,
+        zooms[pane.orientation],
+        pane.rect,
+        pane.orientation === Orientation.Sagittal && flipped,
+        pans[pane.orientation],
+      );
+      if (!point || !withinRect(pane.rect, point.x, point.y)) continue;
+      result.push({ key: this.paneKey(pane), rect: pane.rect, x: point.x, y: point.y });
+    }
+    return result;
   });
 
   protected readonly statusIsError = computed(
@@ -390,6 +439,47 @@ export class Viewer {
     this.toggleSagittalFlip();
   }
 
+  protected toggleCrosshairs(): void {
+    this.crosshairsEnabled.update((enabled) => !enabled);
+  }
+
+  protected onCrosshairKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
+    event.preventDefault();
+    this.toggleCrosshairs();
+  }
+
+  /**
+   * Set the shared focus voxel from a Shift+click on an MPR pane and scroll every
+   * orientation to the slice that contains it. The clicked pane keeps its slice
+   * (the voxel lies on it); the other two move to show the same anatomical point.
+   */
+  private setFocus(placement: Extract<PanePlacement, { kind: 'mpr' }>, event: PointerEvent): void {
+    const volume = this.volume();
+    if (!volume) return;
+    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+    const sample = probeVoxel(
+      volume,
+      placement.orientation,
+      this.sliceIndices()[placement.orientation],
+      this.zooms()[placement.orientation],
+      placement.rect,
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+      placement.orientation === Orientation.Sagittal && this.sagittalFlipped(),
+      this.pans()[placement.orientation],
+    );
+    if (!sample) return; // clicked the letterbox margin or outside the volume
+
+    this.focusVoxel.set(sample.voxel);
+    this.crosshairsEnabled.set(true); // a fresh pick should always be visible
+    this.sliceIndices.set([
+      focusSliceIndex(volume, Orientation.Axial, sample.voxel),
+      focusSliceIndex(volume, Orientation.Coronal, sample.voxel),
+      focusSliceIndex(volume, Orientation.Sagittal, sample.voxel),
+    ]);
+  }
+
   protected async onFilesSelected(event: Event): Promise<void> {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || !input.files) return;
@@ -423,6 +513,15 @@ export class Viewer {
 
     if (event.button !== 0) return;
     event.preventDefault();
+
+    // Shift+left-click sets the shared focus voxel and navigates every pane to it,
+    // instead of starting a pan — a modifier that never clashes with the plain
+    // left-drag pan or the right-drag W/L. Only meaningful over an MPR pane.
+    if (event.shiftKey && placement.kind === 'mpr') {
+      this.setFocus(placement, event);
+      return;
+    }
+
     // Capture so the drag keeps tracking even if the pointer leaves the canvas.
     this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
     // The 3D pane orbits; the MPR panes pan.
@@ -688,6 +787,7 @@ export class Viewer {
     this.windowWidth.set(Math.round(result.volume.windowWidth));
     this.mainOrientation.set(Orientation.Axial);
     this.sagittalFlipped.set(false);
+    this.focusVoxel.set(null);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
@@ -741,12 +841,14 @@ function placePanes(layout: ReturnType<typeof mprLayout>, main: Orientation): Pa
 /** The pane containing CSS-pixel point (x, y), or null. */
 function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {
   for (const pane of panes) {
-    const { x: rx, y: ry, width, height } = pane.rect;
-    if (x >= rx && x < rx + width && y >= ry && y < ry + height) {
-      return pane;
-    }
+    if (withinRect(pane.rect, x, y)) return pane;
   }
   return null;
+}
+
+/** Whether CSS-pixel point (x, y) lies within a rectangle. */
+function withinRect(rect: PaneRect, x: number, y: number): boolean {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
 }
 
 /** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */
