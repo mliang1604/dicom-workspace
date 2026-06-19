@@ -3,9 +3,11 @@ import type { Vec2 } from './layout';
 import { patientToTexMatrix } from './reslice';
 import {
   clampPan,
+  defaultSlabThicknessMm,
   mipStepScale,
   ProjectionMode,
   projectionModeCode,
+  projectionWindow,
   rezoomPan,
 } from './slice-renderer';
 
@@ -113,6 +115,61 @@ describe('projectionModeCode', () => {
   it('defaults to MIP (max), the historical projection', () => {
     expect(ProjectionMode.Max).toBe(0);
     expect(projectionModeCode(ProjectionMode.Max)).toBe(0);
+  });
+});
+
+describe('projectionWindow', () => {
+  // A CT-like volume whose air margins (≈ −1000 HU) drag the min/mean low.
+  const ct: Volume = { ...makeVolume([4, 4, 4]), min: -1000, max: 3000 };
+
+  it('keeps the shared MPR window for MIP so it looks unchanged', () => {
+    expect(projectionWindow(ProjectionMode.Max, ct, 40, 400)).toEqual({
+      center: 40,
+      width: 400,
+    });
+  });
+
+  it('fits MinIP to the full data range so it stays visible at every angle', () => {
+    // center = (min+max)/2, width = max−min — independent of the shared window.
+    expect(projectionWindow(ProjectionMode.Min, ct, 40, 400)).toEqual({
+      center: 1000,
+      width: 4000,
+    });
+  });
+
+  it('fits Average to the full data range as well', () => {
+    expect(projectionWindow(ProjectionMode.Mean, ct, 40, 400)).toEqual({
+      center: 1000,
+      width: 4000,
+    });
+  });
+
+  it('floors the auto-fit width at 1 for a flat (constant) volume', () => {
+    const flat: Volume = { ...makeVolume([4, 4, 4]), min: 7, max: 7 };
+    expect(projectionWindow(ProjectionMode.Mean, flat, 0, 1)).toEqual({
+      center: 7,
+      width: 1,
+    });
+  });
+});
+
+describe('defaultSlabThicknessMm', () => {
+  it('projects the whole volume for MIP', () => {
+    expect(defaultSlabThicknessMm(ProjectionMode.Max, 240)).toBe(240);
+  });
+
+  it('uses a moderate band for MinIP/Average, capped to keep air margins out', () => {
+    // ⅓ of a 240 mm depth is 80 mm, capped to the 50 mm ceiling.
+    expect(defaultSlabThicknessMm(ProjectionMode.Min, 240)).toBe(50);
+    expect(defaultSlabThicknessMm(ProjectionMode.Mean, 240)).toBe(50);
+  });
+
+  it('uses ⅓ of the depth when that is below the cap', () => {
+    expect(defaultSlabThicknessMm(ProjectionMode.Mean, 90)).toBe(30);
+  });
+
+  it('never exceeds the full depth for a thin volume', () => {
+    expect(defaultSlabThicknessMm(ProjectionMode.Min, 6)).toBe(2);
   });
 });
 

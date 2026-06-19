@@ -60,7 +60,9 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let rd = (P.patientToTex * vec4<f32>(P.forward.xyz, 0.0)).xyz;
 
   // Slab intersection with the unit box; division by zero yields +/-inf, which
-  // min/max handle correctly (a ray parallel to and outside a slab misses).
+  // min/max handle correctly (a ray parallel to and outside a slab misses). An
+  // axis-aligned ray grazing a box face is the 0/0 -> NaN case, caught by the
+  // NaN-safe miss test below so it can't poison the accumulators.
   let t0 = (vec3<f32>(0.0) - ro) / rd;
   let t1 = (vec3<f32>(1.0) - ro) / rd;
   let tlo = min(t0, t1);
@@ -71,7 +73,9 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let slabHi = P.modeSlab.z;
   let tEntry = max(max(tlo.x, max(tlo.y, tlo.z)), max(0.0, slabLo));
   let tExit = min(min(thi.x, min(thi.y, thi.z)), slabHi);
-  if (tExit < tEntry) {
+  // NaN-safe miss test: a degenerate (0/0 -> NaN) range fails this and returns
+  // black instead of feeding NaN into sum/min, which would poison Average/MinIP.
+  if (!(tExit >= tEntry)) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
@@ -90,7 +94,9 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   var sum = 0.0;
   for (var i = 0u; i < steps; i = i + 1u) {
     let t = tEntry + (f32(i) + 0.5) * dt;
-    let coord = ro + t * rd;
+    // Clamp into the unit cube so a coordinate nudged just past a face by
+    // floating-point slack can't sample outside and read a spurious value.
+    let coord = clamp(ro + t * rd, vec3<f32>(0.0), vec3<f32>(1.0));
     let s = textureSampleLevel(volTex, volSamp, coord, 0.0).r;
     maxv = max(maxv, s);
     minv = min(minv, s);

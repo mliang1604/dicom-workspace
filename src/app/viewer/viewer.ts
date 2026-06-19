@@ -14,6 +14,7 @@ import { initWebGpu, type GpuContext } from '../../render/device';
 import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
 import {
   clampPan,
+  defaultSlabThicknessMm,
   ProjectionMode,
   rezoomPan,
   SliceRenderer,
@@ -555,7 +556,11 @@ export class Viewer {
   /** Switch the 3D pane's projection mode (MIP / MinIP / Average). */
   protected onProjectionModeChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
-    this.projectionMode.set(Number(event.target.value) as ProjectionMode);
+    const mode = Number(event.target.value) as ProjectionMode;
+    this.projectionMode.set(mode);
+    // Reset the slab to the mode's default: full-volume for MIP, a moderate band
+    // for MinIP/Average (keeps the air margins out). Reversible across switches.
+    this.slabThicknessMm.set(Math.round(defaultSlabThicknessMm(mode, this.slabMaxMm())));
     this.markMipSettling();
   }
 
