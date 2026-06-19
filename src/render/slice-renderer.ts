@@ -1,12 +1,15 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
 import { Orientation, type Volume } from '../dicom/types';
+import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import type { PaneRect, Vec2 } from './layout';
-import { planeExtentMm, planeToTexMatrix, sliceCountFor } from './reslice';
+import { patientToTexMatrix, planeExtentMm, planeToTexMatrix, sliceCountFor } from './reslice';
+import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
 
-/** One pane to draw: an orientation/slice of the volume into a viewport rect. */
-export interface PaneView {
+/** One MPR pane: an orientation/slice of the volume drawn into a viewport rect. */
+export interface MprPaneView {
+  readonly kind: 'mpr';
   readonly orientation: Orientation;
   /** Index of the slice along the orientation's axis. */
   readonly sliceIndex: number;
@@ -22,11 +25,28 @@ export interface PaneView {
   readonly rect: PaneRect;
 }
 
+/** The 3D MIP pane: an orbit camera projecting the volume into a viewport rect. */
+export interface MipPaneView {
+  readonly kind: 'mip';
+  readonly windowCenter: number;
+  readonly windowWidth: number;
+  /** Orbit camera state (azimuth/elevation/zoom). */
+  readonly camera: OrbitCamera;
+  /** Destination rectangle in device pixels, origin top-left. */
+  readonly rect: PaneRect;
+}
+
+/** A pane to draw: an MPR slice or the 3D MIP, discriminated by `kind`. */
+export type PaneView = MprPaneView | MipPaneView;
+
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
 // slicePos,flipX (32). Already a multiple of the 16-byte uniform-struct stride.
 const PARAMS_SIZE = 96;
+// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward (4 × vec4 = 64).
+const MIP_PARAMS_SIZE = 128;
 const BYTES_PER_HALF = 2;
-const MAX_PANES = 3;
+/** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
+const MAX_MPR_PANES = 3;
 const ORIGIN: Vec2 = { x: 0, y: 0 };
 /** Float offset of the per-frame params that follow the 4×4 reslice matrix. */
 const MATRIX_FLOATS = 16;
@@ -45,13 +65,19 @@ export class SliceRenderer {
   private readonly device: GPUDevice;
   private readonly gpu: GpuContext;
   private readonly pipeline: GPURenderPipeline;
+  private readonly mipPipeline: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly slots: readonly PaneSlot[];
+  private readonly mipSlot: PaneSlot;
 
   private volume: Volume | null = null;
   private texture: GPUTexture | null = null;
   /** Per-orientation plane→texture matrices, indexed by Orientation value. */
   private matrices: readonly Float32Array[] = [];
+  /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
+  private patientToTex: Float32Array = new Float32Array(16);
+  /** March step count for the MIP, scaled to the volume's voxel diagonal. */
+  private mipSteps = 1;
 
   constructor(gpu: GpuContext) {
     this.gpu = gpu;
@@ -65,6 +91,14 @@ export class SliceRenderer {
       primitive: { topology: 'triangle-list' },
     });
 
+    const mipModule = this.device.createShaderModule({ code: RAYCAST_SHADER });
+    this.mipPipeline = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: mipModule, entryPoint: 'vs' },
+      fragment: { module: mipModule, entryPoint: 'fs', targets: [{ format: gpu.format }] },
+      primitive: { topology: 'triangle-list' },
+    });
+
     this.sampler = this.device.createSampler({
       magFilter: 'linear',
       minFilter: 'linear',
@@ -73,13 +107,20 @@ export class SliceRenderer {
       addressModeW: 'clamp-to-edge',
     });
 
-    this.slots = Array.from({ length: MAX_PANES }, () => ({
+    this.slots = Array.from({ length: MAX_MPR_PANES }, () => ({
       buffer: this.device.createBuffer({
         size: PARAMS_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       }),
       bindGroup: null,
     }));
+    this.mipSlot = {
+      buffer: this.device.createBuffer({
+        size: MIP_PARAMS_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }),
+      bindGroup: null,
+    };
   }
 
   /** Number of slices available along the given orientation for the loaded volume. */
@@ -124,6 +165,14 @@ export class SliceRenderer {
         ],
       });
     }
+    this.mipSlot.bindGroup = this.device.createBindGroup({
+      layout: this.mipPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: view },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.mipSlot.buffer } },
+      ],
+    });
 
     this.volume = volume;
     this.texture = texture;
@@ -132,22 +181,38 @@ export class SliceRenderer {
     this.matrices = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map(
       (orientation) => planeToTexMatrix(volume, orientation),
     );
+    // The patient→texture affine and march count likewise depend only on the
+    // geometry; cache them for the MIP raycaster. Step the ray roughly once per
+    // voxel along the box diagonal so detail isn't skipped.
+    this.patientToTex = patientToTexMatrix(volume);
+    this.mipSteps = Math.ceil(Math.hypot(width, height, depth));
   }
 
-  /** Draw the given panes into their viewports on the canvas. */
+  /** Draw the given panes (MPR slices and/or the 3D MIP) into their viewports. */
   renderPanes(panes: readonly PaneView[]): void {
     const volume = this.volume;
     if (!volume) return;
 
     const canvas = this.gpu.canvas;
-    const draws: { readonly rect: PaneRect; readonly bindGroup: GPUBindGroup }[] = [];
-    for (let i = 0; i < panes.length && i < this.slots.length; i++) {
-      const slot = this.slots[i];
-      if (!slot.bindGroup) continue;
-      const rect = clampRect(panes[i].rect, canvas.width, canvas.height);
+    const draws: {
+      readonly rect: PaneRect;
+      readonly bindGroup: GPUBindGroup;
+      readonly pipeline: GPURenderPipeline;
+    }[] = [];
+    let mprIndex = 0;
+    for (const pane of panes) {
+      const rect = clampRect(pane.rect, canvas.width, canvas.height);
       if (rect.width < 1 || rect.height < 1) continue;
-      this.writeParams(slot.buffer, panes[i], rect, volume);
-      draws.push({ rect, bindGroup: slot.bindGroup });
+      if (pane.kind === 'mip') {
+        if (!this.mipSlot.bindGroup) continue;
+        this.writeMipParams(this.mipSlot.buffer, pane, rect, volume);
+        draws.push({ rect, bindGroup: this.mipSlot.bindGroup, pipeline: this.mipPipeline });
+        continue;
+      }
+      const slot = this.slots[mprIndex++];
+      if (!slot || !slot.bindGroup) continue;
+      this.writeParams(slot.buffer, pane, rect, volume);
+      draws.push({ rect, bindGroup: slot.bindGroup, pipeline: this.pipeline });
     }
 
     const encoder = this.device.createCommandEncoder();
@@ -161,9 +226,9 @@ export class SliceRenderer {
         },
       ],
     });
-    pass.setPipeline(this.pipeline);
     for (const draw of draws) {
       const { x, y, width, height } = draw.rect;
+      pass.setPipeline(draw.pipeline);
       pass.setViewport(x, y, width, height, 0, 1);
       pass.setScissorRect(x, y, width, height);
       pass.setBindGroup(0, draw.bindGroup);
@@ -173,7 +238,27 @@ export class SliceRenderer {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  private writeParams(buffer: GPUBuffer, view: PaneView, rect: PaneRect, volume: Volume): void {
+  /** Pack the MIP camera basis and window into the raycast uniform buffer. */
+  private writeMipParams(
+    buffer: GPUBuffer,
+    view: MipPaneView,
+    rect: PaneRect,
+    volume: Volume,
+  ): void {
+    const basis: CameraBasis = cameraBasis(volume, view.camera, rect.width, rect.height);
+    const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
+    floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
+    floats.set(basis.eye, 16);
+    floats[19] = this.mipSteps;
+    floats.set(basis.axisU, 20);
+    floats[23] = view.windowCenter;
+    floats.set(basis.axisV, 24);
+    floats[27] = view.windowWidth;
+    floats.set(basis.forward, 28);
+    this.device.queue.writeBuffer(buffer, 0, floats);
+  }
+
+  private writeParams(buffer: GPUBuffer, view: MprPaneView, rect: PaneRect, volume: Volume): void {
     const count = sliceCountFor(volume, view.orientation);
     // Sample the centre of the voxel so the first/last slices aren't clamped away.
     const slicePos = count > 1 ? (view.sliceIndex + 0.5) / count : 0.5;
