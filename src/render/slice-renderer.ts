@@ -43,6 +43,67 @@ export function projectionModeCode(mode: ProjectionMode): number {
   }
 }
 
+/** A display window expressed as a DICOM centre/width pair. */
+export interface DisplayWindow {
+  readonly center: number;
+  readonly width: number;
+}
+
+/**
+ * Effective window/level for the 3D projection pane, chosen by projection mode.
+ *
+ * MIP (Max) latches onto the brightest sample at every angle, so it keeps the
+ * shared MPR window and looks exactly as it does today. MinIP (Min) and Average
+ * (Mean) instead track the volume's air-filled margins, whose contribution to
+ * the per-ray min/mean slides with the orbit angle; reusing the bright MPR
+ * window clamps them to black at some angles. Fitting the window to the volume's
+ * full data range keeps those projections visible from every direction.
+ */
+export function projectionWindow(
+  mode: ProjectionMode,
+  volume: Volume,
+  sharedCenter: number,
+  sharedWidth: number,
+): DisplayWindow {
+  switch (mode) {
+    case ProjectionMode.Max:
+      return { center: sharedCenter, width: sharedWidth };
+    case ProjectionMode.Min:
+    case ProjectionMode.Mean:
+      return {
+        center: (volume.min + volume.max) / 2,
+        width: Math.max(1, volume.max - volume.min),
+      };
+    default: {
+      const exhaustive: never = mode;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Default slab thickness (mm) for a projection mode, given the volume's full
+ * depth (`fullDepthMm`, the slab thickness at which the whole volume projects).
+ *
+ * MIP keeps the full-volume default so it is unchanged. MinIP and Average are
+ * used with a thinner slab so the air margins around the anatomy stay out of the
+ * min/mean; a moderate band of ~⅓ of the depth (capped to keep it moderate, and
+ * clamped into the volume) is a sensible starting point the user can adjust.
+ */
+export function defaultSlabThicknessMm(mode: ProjectionMode, fullDepthMm: number): number {
+  switch (mode) {
+    case ProjectionMode.Max:
+      return fullDepthMm;
+    case ProjectionMode.Min:
+    case ProjectionMode.Mean:
+      return Math.min(fullDepthMm, Math.max(1, Math.min(fullDepthMm / 3, 50)));
+    default: {
+      const exhaustive: never = mode;
+      return exhaustive;
+    }
+  }
+}
+
 /** One MPR pane: an orientation/slice of the volume drawn into a viewport rect. */
 export interface MprPaneView {
   readonly kind: 'mpr';
@@ -317,19 +378,22 @@ export class SliceRenderer {
     // t-range along the ray; full thickness yields ±∞, leaving the march unclipped.
     const thickness = view.slabThicknessMm ?? Infinity;
     const [slabLo, slabHi] = slabTRange(volumeBounds(volume), basis.eye, basis.forward, thickness);
-    const mode = projectionModeCode(view.projectionMode ?? ProjectionMode.Max);
+    const mode = view.projectionMode ?? ProjectionMode.Max;
+    // MIP keeps the shared MPR window; MinIP/Average auto-fit to the data range
+    // so they stay visible as the air fraction per ray slides with the orbit.
+    const window = projectionWindow(mode, volume, view.windowCenter, view.windowWidth);
 
     const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
     floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
     floats.set(basis.eye, 16);
     floats[19] = maxSteps;
     floats.set(basis.axisU, 20);
-    floats[23] = view.windowCenter;
+    floats[23] = window.center;
     floats.set(basis.axisV, 24);
-    floats[27] = view.windowWidth;
+    floats[27] = window.width;
     floats.set(basis.forward, 28);
     floats[31] = stepScale;
-    floats[32] = mode;
+    floats[32] = projectionModeCode(mode);
     floats[33] = slabLo;
     floats[34] = slabHi;
     this.device.queue.writeBuffer(buffer, 0, floats);
