@@ -1,4 +1,4 @@
-import { parseFile, UnsupportedDicomError } from './loader';
+import { parseFile, parseFileAsync, UnsupportedDicomError } from './loader';
 
 // --- Minimal Explicit-VR-Little-Endian DICOM P10 writer --------------------
 //
@@ -264,6 +264,28 @@ function rleCt(): ArrayBuffer {
   return dicomFile(body, RLE_LOSSLESS);
 }
 
+/**
+ * A 4×2 8-bit grayscale CT with samples [10..80], JPEG-LS (lossless) encoded by
+ * CharLS, encapsulated. Exercises the async wasm-decode path end to end.
+ */
+function jpegLsCt(): ArrayBuffer {
+  // Single CharLS JPEG-LS frame; padded to an even length for the DICOM item.
+  const frame = Uint8Array.from([
+    255, 216, 255, 247, 0, 11, 8, 0, 2, 0, 4, 1, 1, 17, 0, 255, 218, 0, 8, 1, 1, 0, 0, 0, 0, 7, 14,
+    72, 112, 0, 0, 128, 133, 2, 0, 255, 217, 0,
+  ]);
+  const body = concat([
+    element(0x0008, 0x0060, 'CS', text('CT')), // Modality
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0010, 'US', u16le(2)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(4)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(8)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    encapsulatedPixelData([frame]),
+  ]);
+  return dicomFile(body, '1.2.840.10008.1.2.4.80');
+}
+
 // --- Tests ------------------------------------------------------------------
 
 describe('parseFile — single frame', () => {
@@ -344,6 +366,31 @@ describe('parseFile — RLE compressed', () => {
     expect(s.columns).toBe(2);
     // No rescale tags -> slope 1, intercept 0: pixels equal the decoded samples.
     expect(Array.from(s.pixels)).toEqual([0x0102, 0x0304, 0x0506, 0x0708]);
+  });
+});
+
+describe('parseFileAsync — wasm-decoded compression', () => {
+  it('decodes a JPEG-LS encapsulated image through the wasm codec', async () => {
+    const slices = await parseFileAsync('jls.dcm', jpegLsCt());
+
+    expect(slices).toHaveLength(1);
+    const s = slices[0];
+    expect(s.rows).toBe(2);
+    expect(s.columns).toBe(4);
+    expect(Array.from(s.pixels)).toEqual([10, 20, 30, 40, 50, 60, 70, 80]);
+  });
+
+  it('still reads uncompressed and RLE through the same entry point', async () => {
+    expect(Array.from((await parseFileAsync('ct.dcm', singleFrameCt()))[0].pixels)).toEqual([
+      -1023, -1022, -1021, -1020,
+    ]);
+    expect(Array.from((await parseFileAsync('rle.dcm', rleCt()))[0].pixels)).toEqual([
+      0x0102, 0x0304, 0x0506, 0x0708,
+    ]);
+  });
+
+  it('sync parseFile throws for a wasm-only transfer syntax', () => {
+    expect(() => parseFile('jls.dcm', jpegLsCt())).toThrow(UnsupportedDicomError);
   });
 });
 

@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { parseFile } from '../dicom/loader';
+import { parseFileAsync } from '../dicom/loader';
 import { buildVolume } from '../dicom/volume';
 import { groupSeries, largestSeries, type Series } from '../dicom/series';
 import type { Slice, Volume } from '../dicom/types';
@@ -33,7 +33,7 @@ export class VolumeLoader {
     const slices: Slice[] = [];
     for (const file of files) {
       const buffer = await file.arrayBuffer();
-      slices.push(...parseFile(file.name, buffer));
+      slices.push(...(await parseFileAsync(file.name, buffer)));
     }
 
     const series = groupSeries(slices);
