@@ -95,7 +95,6 @@ import {
   modalityUnit,
   Orientation,
   type MissingSlices,
-  type Roi,
   type StructureSet,
   type Vec3,
   type Volume,
@@ -188,8 +187,10 @@ interface ContourShape {
   readonly points: string;
   /** Whether to close the loop: a coplanar `CLOSED_PLANAR` contour (a `<polygon>`). */
   readonly closed: boolean;
-  /** Stroke colour, the ROI's display colour as a CSS `rgb()`. */
+  /** Stroke colour, the ROI's (possibly overridden) display colour as a CSS colour. */
   readonly color: string;
+  /** Draw opacity in `[0, 1]`, from the ROI's opacity control. */
+  readonly opacity: number;
 }
 
 /** All visible ROI contours projected onto one MPR pane, for one SVG overlay. */
@@ -210,14 +211,22 @@ interface Contour3dOverlay {
   readonly shapes: readonly ContourShape[];
 }
 
-/** One ROI listed in the structures legend, with its visibility toggle. */
-interface RoiLegendEntry {
-  /** Stable key, unique across structure sets (see {@link Viewer.roiKey}). */
+/** One ROI listed in the structures panel, with its display controls. */
+export interface RoiLegendEntry {
+  /** Stable key, unique across structure sets (see {@link roiKeyOf}). */
   readonly key: string;
+  /** Index of the structure set this ROI belongs to. */
+  readonly setIndex: number;
   /** ROI Name, or a fallback when the RTSTRUCT left it blank. */
   readonly name: string;
-  /** Display colour as a CSS `rgb()` for the swatch. */
+  /** Interpreted type (ORGAN/PTV/GTV…) as a short upper-case badge, or '' when none. */
+  readonly type: string;
+  /** Effective display colour (ROI colour or the user's override) as a CSS colour. */
   readonly color: string;
+  /** The effective colour as `#rrggbb`, for the colour `<input>`. */
+  readonly colorHex: string;
+  /** Effective draw opacity as a whole percent `[0, 100]`, for the opacity slider. */
+  readonly opacityPercent: number;
   /** Whether the ROI's contours are currently drawn. */
   readonly visible: boolean;
 }
@@ -732,11 +741,29 @@ export class Viewer {
     () => this.measurements().length > 0 || this.pending() !== null,
   );
   /**
-   * Keys of ROIs whose contours are hidden (see {@link roiKey}). Empty by default,
+   * Keys of ROIs whose contours are hidden (see {@link roiKeyOf}). Empty by default,
    * so a freshly loaded structure set shows every ROI; the structures legend
    * toggles entries in and out. Reset on each load (stale keys never match).
    */
   private readonly hiddenRois = signal<ReadonlySet<string>>(new Set());
+  /**
+   * Per-ROI colour overrides keyed by {@link roiKeyOf}, as `#rrggbb`. An ROI
+   * absent from the map keeps its RTSTRUCT display colour; the structures panel's
+   * colour picker writes an entry here. Reset on each load.
+   */
+  private readonly roiColorOverrides = signal<ReadonlyMap<string, string>>(new Map());
+  /**
+   * Per-ROI draw opacity in `[0, 1]` keyed by {@link roiKeyOf}. An ROI absent from
+   * the map draws fully opaque (1); the structures panel's opacity slider writes
+   * here. Reset on each load.
+   */
+  private readonly roiOpacities = signal<ReadonlyMap<string, number>>(new Map());
+  /**
+   * Which structure set the panel and overlays show: an index into
+   * {@link structureSets}, or -1 for all of them. Only meaningful when more than
+   * one structure set annotates the series; reset to "all" on each load.
+   */
+  protected readonly selectedSetIndex = signal<number>(-1);
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
   /** True while files are being dragged over the viewport, for the drop overlay. */
@@ -1007,11 +1034,17 @@ export class Viewer {
 
     const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
     const hidden = this.hiddenRois();
+    const overrides = this.roiColorOverrides();
+    const opacities = this.roiOpacities();
+    const selectedSet = this.selectedSetIndex();
     const shapes: ContourShape[] = [];
     sets.forEach((ss, setIndex) => {
+      if (!setIsShown(selectedSet, setIndex)) return;
       for (const roi of ss.rois) {
-        if (hidden.has(this.roiKey(setIndex, roi))) continue;
-        const color = rgbColor(roi.color);
+        const key = roiKeyOf(setIndex, roi.number);
+        if (hidden.has(key)) continue;
+        const color = overrides.get(key) ?? rgbColor(roi.color);
+        const opacity = opacities.get(key) ?? 1;
         for (let ci = 0; ci < roi.contours.length; ci++) {
           const contour = roi.contours[ci];
           if (contour.points.length < 2) continue; // a single POINT can't form a polyline
@@ -1020,7 +1053,7 @@ export class Viewer {
           const points = projectPolyline(basis, contour.points, mip.rect.width, mip.rect.height)
             .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
             .join(' ');
-          shapes.push({ key: `${setIndex}:${roi.number}:${ci}`, points, closed, color });
+          shapes.push({ key: `${setIndex}:${roi.number}:${ci}`, points, closed, color, opacity });
         }
       }
     });
@@ -1247,30 +1280,54 @@ export class Viewer {
     return state.status === 'ready' ? state.result.structureSets : [];
   });
 
-  /** Whether any structure set annotates the displayed series (gates the legend). */
+  /** Whether any structure set annotates the displayed series (gates the panel). */
   protected readonly hasStructures = computed(() => this.structureSets().length > 0);
 
   /**
-   * The ROIs of every structure set on the displayed series, flattened for the
-   * legend: each with a stable key, name, swatch colour, and current visibility.
-   * Recomputed only from the structure sets and the hidden-ROI set.
+   * Options for the structure-set selector: an "All structure sets" entry plus one
+   * per set (labelled by its Structure Set Label, falling back to the file name).
+   * Only surfaced when more than one set is associated (see {@link hasManyStructureSets}).
    */
-  protected readonly roiLegend = computed<RoiLegendEntry[]>(() => {
-    const hidden = this.hiddenRois();
-    const entries: RoiLegendEntry[] = [];
-    this.structureSets().forEach((ss, setIndex) => {
-      for (const roi of ss.rois) {
-        if (roi.contours.length === 0) continue; // nothing to draw or toggle
-        const key = this.roiKey(setIndex, roi);
-        entries.push({
-          key,
-          name: roi.name || `ROI ${roi.number}`,
-          color: rgbColor(roi.color),
-          visible: !hidden.has(key),
-        });
-      }
-    });
-    return entries;
+  protected readonly structureSetChoices = computed<{ value: number; label: string }[]>(() => {
+    const sets = this.structureSets();
+    return [
+      { value: -1, label: 'All structure sets' },
+      ...sets.map((ss, index) => ({
+        value: index,
+        label: ss.label || ss.name || `Structure set ${index + 1}`,
+      })),
+    ];
+  });
+
+  /** Whether more than one structure set is associated, gating the set selector. */
+  protected readonly hasManyStructureSets = computed(() => this.structureSets().length > 1);
+
+  /**
+   * The ROIs of the shown structure set(s) flattened for the panel: each with a
+   * stable key, name, interpreted type, effective colour, opacity and visibility.
+   * Filtered by the {@link selectedSetIndex} selector. Recomputed from the
+   * structure sets and the visibility / colour / opacity / selection state.
+   */
+  protected readonly roiLegend = computed<RoiLegendEntry[]>(() =>
+    buildRoiLegend(
+      this.structureSets(),
+      this.hiddenRois(),
+      this.roiColorOverrides(),
+      this.roiOpacities(),
+      this.selectedSetIndex(),
+    ),
+  );
+
+  /** Whether every listed ROI is visible: drives the master toggle's checked state. */
+  protected readonly allRoisVisible = computed(() => this.roiLegend().every((e) => e.visible));
+
+  /**
+   * Whether the listed ROIs are a mix of shown and hidden, for the master toggle's
+   * indeterminate state. False when they are uniformly all-on or all-off.
+   */
+  protected readonly someRoisHidden = computed(() => {
+    const entries = this.roiLegend();
+    return entries.some((e) => e.visible) && entries.some((e) => !e.visible);
   });
 
   /**
@@ -1295,6 +1352,9 @@ export class Viewer {
     const flipped = this.sagittalFlipped();
     const indices = this.sliceIndices();
     const hidden = this.hiddenRois();
+    const overrides = this.roiColorOverrides();
+    const opacities = this.roiOpacities();
+    const selectedSet = this.selectedSetIndex();
 
     const result: ContourPaneOverlay[] = [];
     for (const pane of this.panes()) {
@@ -1310,9 +1370,12 @@ export class Viewer {
 
       const shapes: ContourShape[] = [];
       sets.forEach((ss, setIndex) => {
+        if (!setIsShown(selectedSet, setIndex)) return;
         for (const roi of ss.rois) {
-          if (hidden.has(this.roiKey(setIndex, roi))) continue;
-          const color = rgbColor(roi.color);
+          const key = roiKeyOf(setIndex, roi.number);
+          if (hidden.has(key)) continue;
+          const color = overrides.get(key) ?? rgbColor(roi.color);
+          const opacity = opacities.get(key) ?? 1;
           for (let ci = 0; ci < roi.contours.length; ci++) {
             const contour = roi.contours[ci];
             const closed =
@@ -1339,6 +1402,7 @@ export class Viewer {
                 points: pixels.join(' '),
                 closed: polyline.closed,
                 color,
+                opacity,
               });
             }
           }
@@ -1622,22 +1686,47 @@ export class Viewer {
     return pane.kind === 'mip' ? 'mip' : `mpr-${pane.orientation}`;
   }
 
-  /**
-   * Stable identity for an ROI across the loaded structure sets, used by the
-   * legend and the contour overlay to share one visibility state. Qualified by
-   * the structure set's index so equal ROI Numbers in two sets don't collide.
-   */
-  protected roiKey(setIndex: number, roi: Roi): string {
-    return `${setIndex}:${roi.number}`;
-  }
-
-  /** Show or hide one ROI's contours, from the structures legend checkbox. */
+  /** Show or hide one ROI's contours, from the structures panel checkbox. */
   protected toggleRoi(key: string): void {
     this.hiddenRois.update((hidden) => {
       const next = new Set(hidden);
       if (!next.delete(key)) next.add(key);
       return next;
     });
+  }
+
+  /**
+   * Show or hide every currently-listed ROI at once, from the master toggle. The
+   * listed ROIs are the panel's current set-filtered view, so this never touches
+   * ROIs hidden behind the structure-set selector.
+   */
+  protected setAllRoisVisible(visible: boolean): void {
+    const keys = this.roiLegend().map((e) => e.key);
+    this.hiddenRois.update((hidden) => {
+      const next = new Set(hidden);
+      for (const key of keys) {
+        if (visible) next.delete(key);
+        else next.add(key);
+      }
+      return next;
+    });
+  }
+
+  /** Override one ROI's contour colour from the panel's colour picker. */
+  protected onRoiColor(key: string, event: Event): void {
+    const hex = (event.target as HTMLInputElement).value;
+    this.roiColorOverrides.update((map) => new Map(map).set(key, hex));
+  }
+
+  /** Set one ROI's contour opacity (whole percent) from the panel's slider. */
+  protected onRoiOpacity(key: string, event: Event): void {
+    const percent = Number((event.target as HTMLInputElement).value);
+    this.roiOpacities.update((map) => new Map(map).set(key, clamp(percent, 0, 100) / 100));
+  }
+
+  /** Switch which structure set the panel and overlays show (-1 for all). */
+  protected onStructureSetChange(event: Event): void {
+    this.selectedSetIndex.set(Number((event.target as HTMLSelectElement).value));
   }
 
   protected paneSliceLabel(orientation: Orientation): string {
@@ -2975,6 +3064,9 @@ export class Viewer {
     this.pending.set(null);
     this.measureDrag.set(null);
     this.hiddenRois.set(new Set()); // a fresh structure set starts fully visible
+    this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
+    this.roiOpacities.set(new Map()); // …fully opaque
+    this.selectedSetIndex.set(-1); // showing every associated structure set
     // Per-volume view state is per-session: always reset to volume-derived defaults.
     this.invert.set(false);
     this.zooms.set([1, 1, 1]);
@@ -3165,6 +3257,68 @@ function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): 
 function rgbColor(color: readonly [number, number, number] | null): string {
   if (!color) return 'rgb(200, 200, 200)';
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+/**
+ * Stable identity for an ROI across the loaded structure sets, used by the panel
+ * and the contour overlays to share one visibility / colour / opacity state.
+ * Qualified by the structure set's index so equal ROI Numbers in two sets don't
+ * collide.
+ */
+export function roiKeyOf(setIndex: number, roiNumber: number): string {
+  return `${setIndex}:${roiNumber}`;
+}
+
+/** Whether a structure set is shown given the panel's selector (-1 means all). */
+function setIsShown(selectedSetIndex: number, setIndex: number): boolean {
+  return selectedSetIndex < 0 || selectedSetIndex === setIndex;
+}
+
+/**
+ * An ROI's effective colour as `#rrggbb` for the colour `<input>`: the user's
+ * override when set, else the RTSTRUCT display colour (0–255), else a neutral grey.
+ */
+function roiColorHex(color: readonly [number, number, number] | null, override?: string): string {
+  if (override) return override;
+  if (!color) return '#c8c8c8';
+  return rgbToHex([color[0] / 255, color[1] / 255, color[2] / 255]);
+}
+
+/**
+ * Flatten the structure sets into {@link RoiLegendEntry} rows for the structures
+ * panel. ROIs with no contours are skipped (nothing to draw or toggle), and the
+ * rows are filtered to the selected structure set (or all of them when
+ * `selectedSetIndex` is negative). Each row resolves the effective colour and
+ * opacity from the override maps so the panel and the overlays stay in lockstep.
+ * Pure, so it can be unit-tested without the component.
+ */
+export function buildRoiLegend(
+  structureSets: readonly StructureSet[],
+  hidden: ReadonlySet<string>,
+  colorOverrides: ReadonlyMap<string, string>,
+  opacities: ReadonlyMap<string, number>,
+  selectedSetIndex: number,
+): RoiLegendEntry[] {
+  const entries: RoiLegendEntry[] = [];
+  structureSets.forEach((ss, setIndex) => {
+    if (!setIsShown(selectedSetIndex, setIndex)) return;
+    for (const roi of ss.rois) {
+      if (roi.contours.length === 0) continue; // nothing to draw or toggle
+      const key = roiKeyOf(setIndex, roi.number);
+      const override = colorOverrides.get(key);
+      entries.push({
+        key,
+        setIndex,
+        name: roi.name || `ROI ${roi.number}`,
+        type: roi.interpretedType ? roi.interpretedType.toUpperCase() : '',
+        color: override ?? rgbColor(roi.color),
+        colorHex: roiColorHex(roi.color, override),
+        opacityPercent: Math.round((opacities.get(key) ?? 1) * 100),
+        visible: !hidden.has(key),
+      });
+    }
+  });
+  return entries;
 }
 
 /** Immutably replace the element at `index` of a readonly array. */

@@ -232,23 +232,74 @@
         class="tool-group"
         role="group"
         aria-label="Structure set ROIs"
-        title="Show or hide each RTSTRUCT region of interest"
+        title="Show, hide, recolour and fade each RTSTRUCT region of interest"
         open
       >
         <summary class="tool-group-label">Structures</summary>
-        <div class="tool-group-body roi-legend">
-          @for (roi of roiLegend(); track roi.key) {
-            <label class="roi-item" [title]="roi.name">
-              <input
-                type="checkbox"
-                [checked]="roi.visible"
-                (change)="toggleRoi(roi.key)"
-                [attr.aria-label]="roi.name"
-              />
-              <span class="roi-swatch" [style.background]="roi.color"></span>
-              <span class="roi-name">{{ roi.name }}</span>
+        <div class="tool-group-body roi-panel">
+          @if (hasManyStructureSets()) {
+            <label class="ctrl roi-set-select" title="Which structure set to show">
+              Set
+              <select
+                [value]="selectedSetIndex()"
+                (change)="onStructureSetChange($event)"
+                aria-label="Structure set"
+              >
+                @for (choice of structureSetChoices(); track choice.value) {
+                  <option [value]="choice.value">{{ choice.label }}</option>
+                }
+              </select>
             </label>
           }
+
+          <label class="roi-item roi-all" title="Show or hide every listed structure">
+            <input
+              type="checkbox"
+              [checked]="allRoisVisible()"
+              [indeterminate]="someRoisHidden()"
+              (change)="setAllRoisVisible($any($event.target).checked)"
+              aria-label="Toggle all structures"
+            />
+            <span class="roi-name">All structures</span>
+          </label>
+
+          <div class="roi-legend">
+            @for (roi of roiLegend(); track roi.key) {
+              <div class="roi-item">
+                <input
+                  type="checkbox"
+                  [checked]="roi.visible"
+                  (change)="toggleRoi(roi.key)"
+                  [attr.aria-label]="'Show ' + roi.name"
+                />
+                <input
+                  type="color"
+                  class="roi-color"
+                  [value]="roi.colorHex"
+                  (input)="onRoiColor(roi.key, $event)"
+                  [attr.aria-label]="roi.name + ' colour'"
+                  [title]="roi.name + ' colour'"
+                />
+                <span class="roi-name" [title]="roi.name">{{ roi.name }}</span>
+                @if (roi.type) {
+                  <span class="roi-type" [title]="'Interpreted type: ' + roi.type">{{
+                    roi.type
+                  }}</span>
+                }
+                <input
+                  type="range"
+                  class="roi-opacity"
+                  min="0"
+                  max="100"
+                  step="5"
+                  [value]="roi.opacityPercent"
+                  (input)="onRoiOpacity(roi.key, $event)"
+                  [attr.aria-label]="roi.name + ' opacity'"
+                  [title]="roi.name + ' opacity: ' + roi.opacityPercent + '%'"
+                />
+              </div>
+            }
+          </div>
         </div>
       </details>
     }
@@ -464,9 +515,19 @@
       >
         @for (shape of overlay.shapes; track shape.key) {
           @if (shape.closed) {
-            <polygon class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+            <polygon
+              class="contour"
+              [attr.points]="shape.points"
+              [style.stroke]="shape.color"
+              [style.opacity]="shape.opacity"
+            />
           } @else {
-            <polyline class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+            <polyline
+              class="contour"
+              [attr.points]="shape.points"
+              [style.stroke]="shape.color"
+              [style.opacity]="shape.opacity"
+            />
           }
         }
       </svg>
@@ -576,9 +637,19 @@
       >
         @for (shape of c3.shapes; track shape.key) {
           @if (shape.closed) {
-            <polygon class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+            <polygon
+              class="contour"
+              [attr.points]="shape.points"
+              [style.stroke]="shape.color"
+              [style.opacity]="shape.opacity"
+            />
           } @else {
-            <polyline class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+            <polyline
+              class="contour"
+              [attr.points]="shape.points"
+              [style.stroke]="shape.color"
+              [style.opacity]="shape.opacity"
+            />
           }
         }
       </svg>
