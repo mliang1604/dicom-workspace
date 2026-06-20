@@ -81,4 +81,48 @@ describe('scaleRect', () => {
       height: 8,
     });
   });
+
+  it('is the identity for integer rects at factor 1', () => {
+    const rect = { x: 7, y: 11, width: 13, height: 17 };
+    expect(scaleRect(rect, 1)).toEqual(rect);
+  });
+
+  it('snaps adjacent panes to a shared edge at a fractional factor', () => {
+    // Two columns split by a 6px gap at a 1.5x DPR: the left pane's right edge
+    // and the right pane's left edge must land on the same device pixel.
+    const left = { x: 0, y: 0, width: 133, height: 100 };
+    const right = { x: 139, y: 0, width: 133, height: 100 };
+    const dpr = 1.5;
+
+    const sl = scaleRect(left, dpr);
+    const sr = scaleRect(right, dpr);
+    // No overlap and no seam: the gap is exactly round(139*dpr) - round(133*dpr).
+    expect(sl.x + sl.width).toBe(Math.round(133 * dpr));
+    expect(sr.x).toBe(Math.round(139 * dpr));
+  });
+
+  it('scales a full-viewport pane to exactly round(size * factor)', () => {
+    // The single-pane / far-edge case must match the canvas backing store, which
+    // is sized with the same rounding — so there is no 1px strip or clamp.
+    for (const [size, dpr] of [
+      [801, 1.25],
+      [1366, 1.5],
+      [999, 1.75],
+    ] as const) {
+      const scaled = scaleRect({ x: 0, y: 0, width: size, height: size }, dpr);
+      expect(scaled.width).toBe(Math.round(size * dpr));
+      expect(scaled.height).toBe(Math.round(size * dpr));
+    }
+  });
+
+  it('tiles a two-column split with no overlap at a fractional factor', () => {
+    // The right pane's right edge equals the scaled total width (no overshoot).
+    const total = 1000;
+    const { topLeft, topRight } = mprLayout(total, 200);
+    const dpr = 1.25;
+    const l = scaleRect(topLeft, dpr);
+    const r = scaleRect(topRight, dpr);
+    expect(r.x).toBeGreaterThanOrEqual(l.x + l.width); // no overlap
+    expect(r.x + r.width).toBe(Math.round(total * dpr)); // reaches the far edge exactly
+  });
 });

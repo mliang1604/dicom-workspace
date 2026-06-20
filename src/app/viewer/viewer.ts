@@ -1240,6 +1240,8 @@ export class Viewer {
   private settleHandle: ReturnType<typeof setTimeout> | null = null;
   /** Handle of the cine playback interval, or null when paused. */
   private cineHandle: ReturnType<typeof setInterval> | null = null;
+  /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
+  private resizeHandle: number | null = null;
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -1298,6 +1300,7 @@ export class Viewer {
 
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
+      if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.cineHandle !== null) clearInterval(this.cineHandle);
     });
@@ -2746,7 +2749,15 @@ export class Viewer {
   }
 
   private observeResize(canvas: HTMLCanvasElement): void {
-    const observer = new ResizeObserver(() => this.syncViewport(canvas));
+    // Coalesce the burst of notifications during a drag-resize into one sync per
+    // frame, so the canvas isn't repeatedly resized (and re-rendered) mid-layout.
+    const observer = new ResizeObserver(() => {
+      if (this.resizeHandle !== null) return;
+      this.resizeHandle = requestAnimationFrame(() => {
+        this.resizeHandle = null;
+        this.syncViewport(canvas);
+      });
+    });
     observer.observe(canvas);
     this.destroyRef.onDestroy(() => observer.disconnect());
     this.syncViewport(canvas);
@@ -2756,13 +2767,18 @@ export class Viewer {
     const dpr = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    const deviceWidth = Math.max(1, Math.floor(width * dpr));
-    const deviceHeight = Math.max(1, Math.floor(height * dpr));
+    // Round (not floor) to match scaleRect's edge rounding, so the panes tile
+    // the backing store exactly with no 1px strip or clamp at the far edges.
+    const deviceWidth = Math.max(1, Math.round(width * dpr));
+    const deviceHeight = Math.max(1, Math.round(height * dpr));
     if (canvas.width !== deviceWidth || canvas.height !== deviceHeight) {
       canvas.width = deviceWidth;
       canvas.height = deviceHeight;
     }
-    this.viewport.set({ width, height, dpr });
+    const current = this.viewport();
+    if (current.width !== width || current.height !== height || current.dpr !== dpr) {
+      this.viewport.set({ width, height, dpr });
+    }
   }
 }
 
