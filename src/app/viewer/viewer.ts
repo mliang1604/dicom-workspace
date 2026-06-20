@@ -42,9 +42,13 @@ import {
 } from '../../render/transfer-function';
 import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
 import {
+  clipLineToUnitSquare,
+  NO_OBLIQUE,
   planeExtentMm,
+  referenceLine,
   slicePlaneCorners,
   volumeBounds,
+  type ObliqueRotation,
   type PatientPlane,
 } from '../../render/reslice';
 import {
@@ -275,6 +279,43 @@ type PerOrientation = readonly [number, number, number];
 /** A pan offset per orientation, indexed by the orientation's numeric value. */
 type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
 
+/** An oblique tilt per orientation, indexed by the orientation's numeric value. */
+type PerOrientationOblique = readonly [ObliqueRotation, ObliqueRotation, ObliqueRotation];
+
+/** A reference line drawn over an MPR pane where another plane crosses it. */
+interface ReferenceLineOverlay {
+  /** Key of the `into` pane it's drawn on (see {@link Viewer.paneKey}). */
+  readonly key: string;
+  /** The pane's rectangle in CSS pixels; the overlay is clipped to it. */
+  readonly rect: PaneRect;
+  /** Endpoints of the line in CSS pixels relative to the canvas. */
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+  /** Colour of the crossing plane, matching its 3D cut-plane outline. */
+  readonly color: string;
+}
+
+/** The oblique rotation gizmo drawn over one MPR pane: a ring and a draggable knob. */
+interface ObliqueGizmo {
+  /** Key of the pane it controls (see {@link Viewer.paneKey}). */
+  readonly key: string;
+  readonly orientation: Orientation;
+  /** The pane's rectangle in CSS pixels; the overlay is positioned to it. */
+  readonly rect: PaneRect;
+  /** Ring centre in pane-local CSS pixels (the orthogonal "home"). */
+  readonly cx: number;
+  readonly cy: number;
+  /** Ring radius in CSS pixels: the largest tilt the knob reaches. */
+  readonly radius: number;
+  /** Knob centre in pane-local CSS pixels, encoding the current tilt. */
+  readonly knobX: number;
+  readonly knobY: number;
+  /** Whether the pane is currently tilted (drawn emphasised when so). */
+  readonly active: boolean;
+}
+
 /**
  * An in-progress drag: panning an MPR pane, orbiting the 3D pane, or adjusting
  * the shared window/level. The window/level drag remembers the window it began
@@ -308,10 +349,28 @@ type Drag =
       readonly startWidth: number;
       readonly startX: number;
       readonly startY: number;
+    }
+  | {
+      readonly kind: 'oblique';
+      /** Which MPR pane's plane is being tilted. */
+      readonly orientation: Orientation;
+      /** Pointer position and tilt angles when the drag began. */
+      readonly startX: number;
+      readonly startY: number;
+      readonly startTiltU: number;
+      readonly startTiltV: number;
     };
 
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
+
+const NO_OBLIQUES: PerOrientationOblique = [NO_OBLIQUE, NO_OBLIQUE, NO_OBLIQUE];
+/** Largest oblique tilt (radians) the rotation knob reaches at the ring's edge. */
+const MAX_OBLIQUE_RAD = Math.PI / 3; // 60°
+/** Radius (CSS px) of the oblique rotation ring; maps px offset → tilt angle. */
+const OBLIQUE_RING_RADIUS = 56;
+/** CSS pixels the knob travels per radian of tilt. */
+const OBLIQUE_PX_PER_RAD = OBLIQUE_RING_RADIUS / MAX_OBLIQUE_RAD;
 
 /** Short 3D-pane tags, indexed by {@link ProjectionMode}, for the pane label. */
 const MODE_TAGS: Readonly<Record<ProjectionMode, string>> = {
@@ -422,6 +481,17 @@ export class Viewer {
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
   /** Per-orientation pan offset in screen-uv units; drives shader + probe. */
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
+  /**
+   * Per-orientation oblique tilt; {@link NO_OBLIQUE} (the default) reslices the
+   * orthogonal anatomical plane, a non-zero tilt an arbitrary oblique plane. Set
+   * by the rotation knob and read by the reslice, probe, crosshair and reference
+   * lines so every pane and overlay shares one tilt.
+   */
+  private readonly obliques = signal<PerOrientationOblique>(NO_OBLIQUES);
+  /** Whether any MPR pane is currently tilted off its orthogonal default. */
+  protected readonly hasOblique = computed(() =>
+    this.obliques().some((r) => r.tiltU !== 0 || r.tiltV !== 0),
+  );
   /** Orbit/zoom state of the 3D MIP pane. */
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
   /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
@@ -573,6 +643,7 @@ export class Viewer {
     { keys: 'Scroll', label: 'Change slice (MPR) · zoom (3D)' },
     { keys: 'Ctrl+Scroll', label: 'Zoom an MPR pane about the cursor' },
     { keys: 'Shift+Click', label: 'Link every pane to the clicked point' },
+    { keys: 'Knob drag', label: 'Tilt an MPR pane to an oblique plane (double-click resets)' },
     { keys: 'Right-drag', label: 'Adjust window / level' },
   ] as const;
   /** True while cine playback is auto-advancing slices through a pane. */
@@ -693,6 +764,7 @@ export class Viewer {
 
     const zooms = this.zooms();
     const pans = this.pans();
+    const obliques = this.obliques();
     const flipped = this.sagittalFlipped();
     const result: CrosshairOverlay[] = [];
     for (const pane of this.panes()) {
@@ -705,9 +777,123 @@ export class Viewer {
         pane.rect,
         pane.orientation === Orientation.Sagittal && flipped,
         pans[pane.orientation],
+        obliques[pane.orientation],
       );
       if (!point || !withinRect(pane.rect, point.x, point.y)) continue;
       result.push({ key: this.paneKey(pane), rect: pane.rect, x: point.x, y: point.y });
+    }
+    return result;
+  });
+
+  /**
+   * Cross-pane reference lines: for each MPR pane, where every *other* MPR pane's
+   * (possibly oblique) plane crosses it, via {@link referenceLine} →
+   * {@link clipLineToUnitSquare} → {@link planePointToPane}. The lines tilt live
+   * as a plane is made oblique, so they show the oblique angle on the panes that
+   * stay orthogonal. Shares the {@link crosshairsEnabled} toggle with the linked
+   * crosshairs and is coloured to match each plane's 3D cut-plane outline.
+   */
+  protected readonly referenceLines = computed<ReferenceLineOverlay[]>(() => {
+    const volume = this.volume();
+    if (!this.crosshairsEnabled() || !volume) return [];
+
+    const indices = this.sliceIndices();
+    const obliques = this.obliques();
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const flipped = this.sagittalFlipped();
+    const mprPanes = this.panes().filter((pane) => pane.kind === 'mpr');
+    const result: ReferenceLineOverlay[] = [];
+    for (const into of mprPanes) {
+      if (into.kind !== 'mpr') continue;
+      const intoFlip = into.orientation === Orientation.Sagittal && flipped;
+      for (const other of mprPanes) {
+        if (other.kind !== 'mpr' || other.orientation === into.orientation) continue;
+        const line = referenceLine(
+          volume,
+          {
+            orientation: into.orientation,
+            sliceIndex: indices[into.orientation],
+            rotation: obliques[into.orientation],
+          },
+          {
+            orientation: other.orientation,
+            sliceIndex: indices[other.orientation],
+            rotation: obliques[other.orientation],
+          },
+        );
+        if (!line) continue;
+        const ends = clipLineToUnitSquare(line);
+        if (!ends) continue;
+        const a = planePointToPane(
+          volume,
+          into.orientation,
+          ends[0],
+          zooms[into.orientation],
+          into.rect,
+          intoFlip,
+          pans[into.orientation],
+        );
+        const b = planePointToPane(
+          volume,
+          into.orientation,
+          ends[1],
+          zooms[into.orientation],
+          into.rect,
+          intoFlip,
+          pans[into.orientation],
+        );
+        if (!a || !b) continue;
+        result.push({
+          key: `${into.orientation}-${other.orientation}`,
+          rect: into.rect,
+          x1: a.x,
+          y1: a.y,
+          x2: b.x,
+          y2: b.y,
+          color: SLICE_PLANE_COLORS[other.orientation],
+        });
+      }
+    }
+    return result;
+  });
+
+  /**
+   * The oblique rotation gizmo for each MPR pane that is hovered or already
+   * tilted: a ring centred on the pane and a draggable knob whose offset from the
+   * centre encodes the plane's tilt ({@link OBLIQUE_PX_PER_RAD}). Dragging the
+   * knob ({@link onObliqueHandleDown}) yaws/pitches the plane; the reference lines
+   * on the other panes follow. The orthogonal home is the ring centre, so a knob
+   * at rest there means no tilt.
+   */
+  protected readonly obliqueGizmos = computed<ObliqueGizmo[]>(() => {
+    if (!this.crosshairsEnabled() || !this.isReady()) return [];
+    const hovered = this.hoveredKey();
+    const obliques = this.obliques();
+    const result: ObliqueGizmo[] = [];
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const key = this.paneKey(pane);
+      const tilt = obliques[pane.orientation];
+      const active = tilt.tiltU !== 0 || tilt.tiltV !== 0;
+      // Show the knob only where it's discoverable (hovered pane) or already in use.
+      if (key !== hovered && !active) continue;
+      const cx = pane.rect.width / 2;
+      const cy = pane.rect.height / 2;
+      const radius = Math.min(OBLIQUE_RING_RADIUS, Math.min(cx, cy) - 4);
+      if (radius < 8) continue;
+      const px = OBLIQUE_PX_PER_RAD;
+      result.push({
+        key,
+        orientation: pane.orientation,
+        rect: pane.rect,
+        cx,
+        cy,
+        radius,
+        knobX: cx + clampPx(tilt.tiltV * px, radius),
+        knobY: cy + clampPx(tilt.tiltU * px, radius),
+        active,
+      });
     }
     return result;
   });
@@ -875,9 +1061,18 @@ export class Viewer {
     const stats = new Map<number, readonly string[]>();
     if (!volume) return stats;
     const unit = modalityUnit(volume.modality);
+    const obliques = this.obliques();
     for (const m of this.measurements()) {
       if ((m.tool !== 'ellipse' && m.tool !== 'rectangle') || m.points.length < 2) continue;
-      const res = roiStats(volume, m.orientation, m.sliceIndex, m.tool, m.points[0], m.points[1]);
+      const res = roiStats(
+        volume,
+        m.orientation,
+        m.sliceIndex,
+        m.tool,
+        m.points[0],
+        m.points[1],
+        obliques[m.orientation],
+      );
       stats.set(m.id, roiLines(res.areaMm2, res.stats, unit));
     }
     return stats;
@@ -1022,6 +1217,7 @@ export class Viewer {
       cursor.y,
       pane.orientation === Orientation.Sagittal && this.sagittalFlipped(),
       this.pans()[pane.orientation],
+      this.obliques()[pane.orientation],
     );
     if (!sample) return null;
     return formatProbe(this.orientationName(pane.orientation), sample, volume);
@@ -1098,6 +1294,7 @@ export class Viewer {
     const indices = this.sliceIndices();
     const zooms = this.zooms();
     const pans = this.pans();
+    const obliques = this.obliques();
     const camera = this.camera3d();
     const projectionMode = this.projectionMode();
     const transferFunction = this.transferFunction();
@@ -1140,6 +1337,7 @@ export class Viewer {
             windowWidth,
             zoom: zooms[pane.orientation],
             pan: pans[pane.orientation],
+            rotation: obliques[pane.orientation],
             flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
             invert,
             rect: scaleRect(pane.rect, dpr),
@@ -1290,6 +1488,7 @@ export class Viewer {
   protected resetView(): void {
     this.fitView();
     this.invert.set(false);
+    this.resetOblique();
     const volume = this.volume();
     if (!volume) return;
     this.windowCenter.set(Math.round(volume.windowCenter));
@@ -1554,6 +1753,7 @@ export class Viewer {
       event.clientY - bounds.top,
       placement.orientation === Orientation.Sagittal && this.sagittalFlipped(),
       this.pans()[placement.orientation],
+      this.obliques()[placement.orientation],
     );
     if (!sample) return; // clicked the letterbox margin or outside the volume
 
@@ -1597,10 +1797,11 @@ export class Viewer {
   private navigateToVoxel(volume: Volume, voxel: readonly [number, number, number]): void {
     this.focusVoxel.set(voxel);
     this.crosshairsEnabled.set(true); // a fresh pick should always be visible
+    const obliques = this.obliques();
     this.sliceIndices.set([
-      focusSliceIndex(volume, Orientation.Axial, voxel),
-      focusSliceIndex(volume, Orientation.Coronal, voxel),
-      focusSliceIndex(volume, Orientation.Sagittal, voxel),
+      focusSliceIndex(volume, Orientation.Axial, voxel, obliques[Orientation.Axial]),
+      focusSliceIndex(volume, Orientation.Coronal, voxel, obliques[Orientation.Coronal]),
+      focusSliceIndex(volume, Orientation.Sagittal, voxel, obliques[Orientation.Sagittal]),
     ]);
   }
 
@@ -2373,6 +2574,61 @@ export class Viewer {
     this.drag.set(null);
   }
 
+  /** Begin dragging an MPR pane's oblique knob to tilt its reslice plane. */
+  protected onObliqueHandleDown(event: PointerEvent, orientation: Orientation): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation(); // don't start a pan under the knob
+    const target = event.target as Element;
+    target.setPointerCapture?.(event.pointerId);
+    const tilt = this.obliques()[orientation];
+    this.drag.set({
+      kind: 'oblique',
+      orientation,
+      startX: event.clientX,
+      startY: event.clientY,
+      startTiltU: tilt.tiltU,
+      startTiltV: tilt.tiltV,
+    });
+  }
+
+  /** Tilt the plane to follow the knob: horizontal yaws (tiltV), vertical pitches (tiltU). */
+  protected onObliqueHandleMove(event: PointerEvent): void {
+    const drag = this.drag();
+    if (drag?.kind !== 'oblique') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const tiltV = clamp(
+      drag.startTiltV + (event.clientX - drag.startX) / OBLIQUE_PX_PER_RAD,
+      -MAX_OBLIQUE_RAD,
+      MAX_OBLIQUE_RAD,
+    );
+    const tiltU = clamp(
+      drag.startTiltU + (event.clientY - drag.startY) / OBLIQUE_PX_PER_RAD,
+      -MAX_OBLIQUE_RAD,
+      MAX_OBLIQUE_RAD,
+    );
+    this.obliques.update((obliques) => withValue(obliques, drag.orientation, { tiltU, tiltV }));
+  }
+
+  /** End an oblique knob drag. */
+  protected onObliqueHandleUp(event: PointerEvent): void {
+    if (this.drag()?.kind !== 'oblique') return;
+    event.stopPropagation();
+    const target = event.target as Element;
+    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    this.drag.set(null);
+  }
+
+  /** Double-click a knob (or the toolbar button) to restore the orthogonal plane. */
+  protected resetOblique(orientation?: Orientation): void {
+    if (orientation === undefined) {
+      this.obliques.set(NO_OBLIQUES);
+      return;
+    }
+    this.obliques.update((obliques) => withValue(obliques, orientation, NO_OBLIQUE));
+  }
+
   /** Set the 3D slab thickness (mm), clamped to [1, full volume depth]. */
   protected onSlabThicknessInput(event: Event): void {
     const max = this.slabMaxMm();
@@ -2440,6 +2696,7 @@ export class Viewer {
     this.invert.set(false);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
+    this.obliques.set(NO_OBLIQUES);
     this.camera3d.set(DEFAULT_CAMERA);
     this.transferFunction.set(transferFunction(TransferFunctionPreset.CtBone));
     this.tfSelected.set(null);
@@ -2678,6 +2935,11 @@ function intValue(event: Event): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+/** Clamp a pixel offset to a symmetric ±`max` range (the oblique knob's reach). */
+function clampPx(value: number, max: number): number {
+  return Math.min(max, Math.max(-max, value));
 }
 
 /** A linear RGB triple in [0, 1] as a `#rrggbb` hex string for an `<input type=color>`. */

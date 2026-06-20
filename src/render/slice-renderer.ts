@@ -12,9 +12,11 @@ import {
   planeToTexMatrix,
   slabTRange,
   sliceCountFor,
+  isOblique,
   viewClipHalfSpaces,
   volumeBounds,
   type HalfSpace,
+  type ObliqueRotation,
   type PatientPlane,
 } from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
@@ -154,6 +156,12 @@ export interface MprPaneView {
   readonly zoom: number;
   /** Pan offset in screen-uv (pane-fraction) units; defaults to no shift. */
   readonly pan?: Vec2;
+  /**
+   * Oblique tilt of the slice plane off its anatomical default. Omitted (or
+   * {@link NO_OBLIQUE}) keeps the orthogonal plane; a non-zero tilt reslices the
+   * pane along an arbitrary oblique/double-oblique plane.
+   */
+  readonly rotation?: ObliqueRotation;
   /** Mirror the in-plane horizontal axis (e.g. flip the sagittal view L/R). */
   readonly flipX?: boolean;
   /** Invert the windowed grayscale (white ⇄ black); omitted/false renders normally. */
@@ -563,10 +571,16 @@ export class SliceRenderer {
     const zoom = view.zoom > 0 ? view.zoom : 1;
     const pan = view.pan ?? ORIGIN;
 
+    // The orthogonal reslice matrix is cached per orientation; an oblique pane
+    // needs a fresh matrix built from its live tilt (cheap, only while tilted).
+    const matrix = isOblique(view.rotation)
+      ? planeToTexMatrix(volume, view.orientation, view.rotation)
+      : this.matrices[view.orientation];
+
     const params = new ArrayBuffer(PARAMS_SIZE);
     const floats = new Float32Array(params);
     const uints = new Uint32Array(params);
-    floats.set(this.matrices[view.orientation], 0); // planeToTex, floats 0..15
+    floats.set(matrix, 0); // planeToTex, floats 0..15
     floats[MATRIX_FLOATS + 0] = scaleX / zoom;
     floats[MATRIX_FLOATS + 1] = scaleY / zoom;
     floats[MATRIX_FLOATS + 2] = pan.x;

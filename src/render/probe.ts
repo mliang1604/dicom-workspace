@@ -1,6 +1,6 @@
 import { Orientation, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
-import { planeToTex, sliceCountFor, texCoordAt } from './reslice';
+import { planeToTex, sliceCountFor, texCoordAt, type ObliqueRotation } from './reslice';
 import { aspectScale } from './slice-renderer';
 
 /** A voxel sampled under the cursor: its volume index and value. */
@@ -29,6 +29,7 @@ export interface VoxelProbe {
  * @param cursorY Cursor Y relative to the canvas, same units as `rect`.
  * @param flipX   Mirror the in-plane horizontal axis, matching the shader.
  * @param pan     Pane pan offset in screen-uv units, matching the shader.
+ * @param rotation Oblique tilt of the plane, matching the shader's reslice.
  */
 export function probeVoxel(
   volume: Volume,
@@ -40,6 +41,7 @@ export function probeVoxel(
   cursorY: number,
   flipX = false,
   pan: Vec2 = { x: 0, y: 0 },
+  rotation?: ObliqueRotation,
 ): VoxelProbe | null {
   if (rect.width < 1 || rect.height < 1) return null;
 
@@ -61,7 +63,7 @@ export function probeVoxel(
 
   const count = sliceCountFor(volume, orientation);
   const slicePos = count > 1 ? (sliceIndex + 0.5) / count : 0.5;
-  const coord = texCoordAt(planeToTex(volume, orientation), px, planeY, slicePos);
+  const coord = texCoordAt(planeToTex(volume, orientation, rotation), px, planeY, slicePos);
   if (coord.some((c) => c < 0 || c > 1)) return null; // outside the volume
 
   const [dimX, dimY, dimZ] = volume.dims;

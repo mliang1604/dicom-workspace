@@ -1,6 +1,6 @@
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
-import { planeCoordsAt, planeToTex, sliceCountFor } from './reslice';
+import { planeCoordsAt, planeToTex, sliceCountFor, type ObliqueRotation } from './reslice';
 import { aspectScale } from './slice-renderer';
 
 /**
@@ -36,8 +36,12 @@ export function focusSliceIndex(
   volume: Volume,
   orientation: Orientation,
   voxel: readonly [number, number, number],
+  rotation?: ObliqueRotation,
 ): number {
-  const { slicePos } = planeCoordsAt(planeToTex(volume, orientation), voxelTexCoord(volume, voxel));
+  const { slicePos } = planeCoordsAt(
+    planeToTex(volume, orientation, rotation),
+    voxelTexCoord(volume, voxel),
+  );
   const count = sliceCountFor(volume, orientation);
   return clampIndex(Math.round(slicePos * count - 0.5), count);
 }
@@ -57,11 +61,12 @@ export function focusPanePoint(
   rect: PaneRect,
   flipX = false,
   pan: Vec2 = { x: 0, y: 0 },
+  rotation?: ObliqueRotation,
 ): PanePoint | null {
   if (rect.width < 1 || rect.height < 1) return null;
 
   const { u: px, v: planeY } = planeCoordsAt(
-    planeToTex(volume, orientation),
+    planeToTex(volume, orientation, rotation),
     voxelTexCoord(volume, voxel),
   );
   // planeCoordsAt yields the shader's post-flip horizontal axis; undo the mirror.
