@@ -237,14 +237,24 @@ const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sa
 const CONTOUR_DECIMATE_UV = 0.0015;
 /** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
 const SURFACE_ALPHA = 0.4;
+/** Quantised shading levels per ROI, so fill strings are precomputed not per-triangle. */
+const SURFACE_SHADE_LEVELS = 16;
 
-/** One ROI's 3D surface mesh: triangles in patient mm, coloured by the ROI. */
+/**
+ * One ROI's 3D surface mesh, flattened for fast per-frame drawing: triangle
+ * vertex positions (9 floats each) and precomputed face normals (3 floats each)
+ * in patient mm. Built once per structure set; projected/shaded each orbit frame.
+ */
 interface RoiSurfaceMesh {
   readonly setIndex: number;
   readonly roiNumber: number;
   /** ROI display colour as [r, g, b] in 0–255, for shading. */
   readonly baseColor: readonly [number, number, number];
-  readonly triangles: readonly Triangle[];
+  /** Triangle vertices, 9 floats (3 × xyz) per triangle. */
+  readonly positions: Float32Array;
+  /** Unit face normals, 3 floats per triangle. */
+  readonly normals: Float32Array;
+  readonly count: number;
 }
 
 /** One ROI listed in the structures panel, with its display controls. */
@@ -1072,7 +1082,7 @@ export class Viewer {
         const triangles = loftContours(loops);
         if (triangles.length) {
           const baseColor = roi.color ?? ([200, 200, 200] as const);
-          meshes.push({ setIndex, roiNumber: roi.number, baseColor, triangles });
+          meshes.push(flattenMesh(setIndex, roi.number, baseColor, triangles));
         }
       }
     });
@@ -1609,6 +1619,14 @@ export class Viewer {
   private resizeHandle: number | null = null;
   /** Handle of the coalesced 3D-surface redraw frame, or null when none is pending. */
   private surfaceHandle: number | null = null;
+  /** Reusable per-frame scratch for {@link drawSurfaces}, grown as needed (no per-frame alloc). */
+  private surfBuf: {
+    coords: Float32Array; // 6 per triangle: x0,y0,x1,y1,x2,y2
+    depth: Float32Array;
+    fill: Int32Array; // index into the per-frame fill-string table
+    order: Int32Array;
+    cap: number;
+  } | null = null;
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -1730,54 +1748,112 @@ export class Viewer {
     const opacities = this.roiOpacities();
     const selectedSet = this.selectedSetIndex();
 
-    interface Face {
-      readonly depth: number;
-      readonly x0: number;
-      readonly y0: number;
-      readonly x1: number;
-      readonly y1: number;
-      readonly x2: number;
-      readonly y2: number;
-      readonly fill: string;
-    }
-    const faces: Face[] = [];
+    // Visible meshes + a precomputed fill-string table (one set of shade levels
+    // per ROI), so no rgba string is built per triangle.
+    const visible: { mesh: RoiSurfaceMesh; fillBase: number }[] = [];
+    const fills: string[] = [];
+    let total = 0;
     for (const mesh of this.surfaceMeshes()) {
       if (!setIsShown(selectedSet, mesh.setIndex)) continue;
       const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
       if (hidden.has(key)) continue;
-      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
       const alpha = (opacities.get(key) ?? 1) * SURFACE_ALPHA;
       if (alpha <= 0) continue;
+      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
+      const fillBase = fills.length;
+      for (let k = 0; k < SURFACE_SHADE_LEVELS; k++) {
+        const shade = 0.45 + (0.55 * k) / (SURFACE_SHADE_LEVELS - 1);
+        fills.push(`rgba(${(r * shade) | 0},${(g * shade) | 0},${(b * shade) | 0},${alpha})`);
+      }
+      visible.push({ mesh, fillBase });
+      total += mesh.count;
+    }
+    if (total === 0) return;
 
-      for (const tri of mesh.triangles) {
-        const p0 = projectToPane(basis, tri[0]);
-        const p1 = projectToPane(basis, tri[1]);
-        const p2 = projectToPane(basis, tri[2]);
-        const normal = normalize(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])));
-        const shade = 0.45 + 0.55 * Math.abs(dot(normal, light));
-        faces.push({
-          depth: (p0.depth + p1.depth + p2.depth) / 3,
-          x0: p0.u * w,
-          y0: p0.v * h,
-          x1: p1.u * w,
-          y1: p1.v * h,
-          x2: p2.u * w,
-          y2: p2.v * h,
-          fill: `rgba(${Math.round(r * shade)},${Math.round(g * shade)},${Math.round(b * shade)},${alpha})`,
-        });
+    // Project + shade every triangle into reusable typed-array scratch (no
+    // per-triangle object/string allocation), inlining the orthographic project.
+    const buf = this.ensureSurfaceBuffer(total);
+    const { coords, depth, fill, order } = buf;
+    const ex = basis.eye[0];
+    const ey = basis.eye[1];
+    const ez = basis.eye[2];
+    const ux = basis.axisU[0];
+    const uy = basis.axisU[1];
+    const uz = basis.axisU[2];
+    const vx = basis.axisV[0];
+    const vy = basis.axisV[1];
+    const vz = basis.axisV[2];
+    const fx = basis.forward[0];
+    const fy = basis.forward[1];
+    const fz = basis.forward[2];
+    const uu = ux * ux + uy * uy + uz * uz;
+    const vv = vx * vx + vy * vy + vz * vz;
+    const lx = light[0];
+    const ly = light[1];
+    const lz = light[2];
+    const maxLevel = SURFACE_SHADE_LEVELS - 1;
+
+    let t = 0;
+    for (const { mesh, fillBase } of visible) {
+      const pos = mesh.positions;
+      const nrm = mesh.normals;
+      for (let i = 0; i < mesh.count; i++) {
+        const p = i * 9;
+        let depthSum = 0;
+        const c6 = t * 6;
+        for (let vtx = 0; vtx < 3; vtx++) {
+          const o = p + vtx * 3;
+          const rx = pos[o] - ex;
+          const ry = pos[o + 1] - ey;
+          const rz = pos[o + 2] - ez;
+          const ndcX = (rx * ux + ry * uy + rz * uz) / uu;
+          const ndcY = (rx * vx + ry * vy + rz * vz) / vv;
+          coords[c6 + vtx * 2] = (ndcX + 1) * 0.5 * w;
+          coords[c6 + vtx * 2 + 1] = (1 - ndcY) * 0.5 * h;
+          depthSum += rx * fx + ry * fy + rz * fz;
+        }
+        depth[t] = depthSum;
+        const n = i * 3;
+        const facing = Math.abs(nrm[n] * lx + nrm[n + 1] * ly + nrm[n + 2] * lz);
+        fill[t] = fillBase + Math.round(facing * maxLevel);
+        order[t] = t;
+        t++;
       }
     }
 
-    faces.sort((a, b) => b.depth - a.depth); // far first (painter's algorithm)
-    for (const f of faces) {
+    // Painter's algorithm: draw far triangles first.
+    const ord = order.subarray(0, total);
+    ord.sort((a, b) => depth[b] - depth[a]);
+    let currentFill = -1;
+    for (let i = 0; i < total; i++) {
+      const idx = ord[i];
+      const c6 = idx * 6;
+      if (fill[idx] !== currentFill) {
+        currentFill = fill[idx];
+        ctx.fillStyle = fills[currentFill];
+      }
       ctx.beginPath();
-      ctx.moveTo(f.x0, f.y0);
-      ctx.lineTo(f.x1, f.y1);
-      ctx.lineTo(f.x2, f.y2);
+      ctx.moveTo(coords[c6], coords[c6 + 1]);
+      ctx.lineTo(coords[c6 + 2], coords[c6 + 3]);
+      ctx.lineTo(coords[c6 + 4], coords[c6 + 5]);
       ctx.closePath();
-      ctx.fillStyle = f.fill;
       ctx.fill();
     }
+  }
+
+  /** Grow (and cache) the {@link drawSurfaces} scratch to hold `n` triangles. */
+  private ensureSurfaceBuffer(n: number): NonNullable<typeof this.surfBuf> {
+    if (!this.surfBuf || this.surfBuf.cap < n) {
+      const cap = Math.max(n, (this.surfBuf?.cap ?? 0) * 2, 4096);
+      this.surfBuf = {
+        coords: new Float32Array(cap * 6),
+        depth: new Float32Array(cap),
+        fill: new Int32Array(cap),
+        order: new Int32Array(cap),
+        cap,
+      };
+    }
+    return this.surfBuf;
   }
 
   /**
@@ -3462,6 +3538,36 @@ function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): 
 function rgbColor(color: readonly [number, number, number] | null): string {
   if (!color) return 'rgb(200, 200, 200)';
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+/** Flatten lofted triangles into typed-array positions + precomputed face normals. */
+function flattenMesh(
+  setIndex: number,
+  roiNumber: number,
+  baseColor: readonly [number, number, number],
+  triangles: readonly Triangle[],
+): RoiSurfaceMesh {
+  const count = triangles.length;
+  const positions = new Float32Array(count * 9);
+  const normals = new Float32Array(count * 3);
+  for (let t = 0; t < count; t++) {
+    const [a, b, c] = triangles[t];
+    const o = t * 9;
+    positions[o] = a[0];
+    positions[o + 1] = a[1];
+    positions[o + 2] = a[2];
+    positions[o + 3] = b[0];
+    positions[o + 4] = b[1];
+    positions[o + 5] = b[2];
+    positions[o + 6] = c[0];
+    positions[o + 7] = c[1];
+    positions[o + 8] = c[2];
+    const nrm = normalize(cross(sub(b, a), sub(c, a)));
+    normals[t * 3] = nrm[0];
+    normals[t * 3 + 1] = nrm[1];
+    normals[t * 3 + 2] = nrm[2];
+  }
+  return { setIndex, roiNumber, baseColor, positions, normals, count };
 }
 
 /** Parse a `#rrggbb` colour-input value into [r, g, b] (0–255), or null. */

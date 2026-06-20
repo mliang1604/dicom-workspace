@@ -108,8 +108,8 @@ function cap(loop: readonly Vec3[]): Triangle[] {
  */
 export function loftContours(
   loops: readonly (readonly Vec3[])[],
-  samples = 24,
-  maxLoops = 60,
+  samples = 16,
+  maxLoops = 40,
 ): Triangle[] {
   const placed: PlacedLoop[] = loops
     .filter((p) => p.length >= 3)

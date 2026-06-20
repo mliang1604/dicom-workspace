@@ -124,7 +124,7 @@ kbd {
 
 .tool-rail {
   flex: 0 0 auto;
-  width: 248px;
+  width: 372px;
   display: flex;
   flex-direction: column;
   gap: 8px;

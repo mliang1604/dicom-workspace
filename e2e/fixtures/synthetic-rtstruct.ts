@@ -100,26 +100,38 @@ interface RoiSpec {
  * with deliberately long names to exercise the structure-list layout. Circles
  * span z ∈ [2, count-3] within the 32×32 CT volume.
  */
-export function syntheticRtStruct(count = 12): SyntheticFile {
+export function syntheticRtStruct(count = 12, roiCount = 2): SyntheticFile {
   const zs: number[] = [];
   for (let z = 2; z <= count - 3; z++) zs.push(z);
 
-  const rois: RoiSpec[] = [
-    {
-      number: 1,
-      name: 'Gross Tumour Volume (GTV-1)',
-      type: 'GTV',
-      color: [255, 80, 80],
-      contours: zs.map((z) => circleContour(16, 16, 8, z)),
-    },
-    {
-      number: 2,
-      name: 'Planning Target Volume PTV-70',
-      type: 'PTV',
-      color: [80, 200, 120],
-      contours: zs.map((z) => circleContour(13, 18, 4, z)),
-    },
+  const named: { name: string; type: string; color: readonly [number, number, number] }[] = [
+    { name: 'Gross Tumour Volume (GTV-1)', type: 'GTV', color: [255, 80, 80] },
+    { name: 'Planning Target Volume PTV-70', type: 'PTV', color: [80, 200, 120] },
   ];
+  const rois: RoiSpec[] = Array.from({ length: roiCount }, (_, i) => {
+    const meta = named[i] ?? {
+      name: `Organ At Risk OAR-${i + 1}`,
+      type: 'ORGAN',
+      color: [120 + ((i * 37) % 135), 90 + ((i * 53) % 165), 150 + ((i * 29) % 105)] as const,
+    };
+    // Spread extra ROIs around the volume so they form distinct shells.
+    const cx = 16 + 6 * Math.cos((i / roiCount) * 2 * Math.PI);
+    const cy = 16 + 6 * Math.sin((i / roiCount) * 2 * Math.PI);
+    return {
+      number: i + 1,
+      name: meta.name,
+      type: meta.type,
+      color: meta.color,
+      contours: zs.map((z) =>
+        circleContour(
+          i < 2 ? (i === 0 ? 16 : 13) : cx,
+          i < 2 ? (i === 0 ? 16 : 18) : cy,
+          i === 0 ? 8 : 4,
+          z,
+        ),
+      ),
+    };
+  });
 
   const body = concat([
     element(0x0008, 0x0016, 'UI', uid(RTSTRUCT_SOP_CLASS)), // SOPClassUID
