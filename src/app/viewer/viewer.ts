@@ -43,6 +43,7 @@ import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
+import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
@@ -280,6 +281,19 @@ export class Viewer {
   protected readonly isReady = computed(
     () => this.load().status === 'ready' && this.renderer() !== null,
   );
+
+  /** Series found in the loaded files, for the picker. Empty until a load succeeds. */
+  protected readonly seriesList = computed<readonly Series[]>(() => {
+    const state = this.load();
+    return state.status === 'ready' ? state.result.series : [];
+  });
+  /** UID of the series currently displayed; '' when nothing is loaded. */
+  protected readonly selectedSeriesUid = computed(() => {
+    const state = this.load();
+    return state.status === 'ready' ? state.result.selectedUid : '';
+  });
+  /** Only show the picker when a folder held more than one series. */
+  protected readonly hasMultipleSeries = computed(() => this.seriesList().length > 1);
 
   /** The selected viewport layout; defaults to the classic 3-pane MPR (1+2) view. */
   protected readonly layoutMode = signal<LayoutMode>(LayoutMode.TriMpr);
@@ -703,6 +717,21 @@ export class Viewer {
       focusSliceIndex(volume, Orientation.Coronal, voxel),
       focusSliceIndex(volume, Orientation.Sagittal, voxel),
     ]);
+  }
+
+  /** Switch the displayed series, rebuilding its volume from the parsed slices. */
+  protected onSeriesChange(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const state = this.load();
+    if (state.status !== 'ready' || event.target.value === state.result.selectedUid) return;
+    this.applyVolume(this.loader.selectSeries(state.result, event.target.value));
+  }
+
+  /** Picker label: description (or a fallback) · modality · slice count. */
+  protected seriesLabel(series: Series): string {
+    const name = series.description || series.modality || `Series ${series.seriesNumber ?? '?'}`;
+    const modality = series.modality ? ` · ${series.modality}` : '';
+    return `${name}${modality} · ${series.imageCount} img`;
   }
 
   protected async onFilesSelected(event: Event): Promise<void> {

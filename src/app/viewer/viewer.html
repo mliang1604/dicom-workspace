@@ -14,6 +14,17 @@
   <button type="button" (click)="filesInput.click()">Open files…</button>
   <input #filesInput type="file" multiple hidden (change)="onFilesSelected($event)" />
 
+  @if (hasMultipleSeries()) {
+    <label class="ctrl" title="Choose which series in the folder to view">
+      Series
+      <select [value]="selectedSeriesUid()" (change)="onSeriesChange($event)">
+        @for (series of seriesList(); track series.uid) {
+          <option [value]="series.uid">{{ seriesLabel(series) }}</option>
+        }
+      </select>
+    </label>
+  }
+
   <button
     type="button"
     (click)="cycleLayout()"

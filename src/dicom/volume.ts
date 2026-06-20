@@ -17,8 +17,8 @@ export function buildVolume(slices: Slice[]): Volume {
   for (const s of slices) {
     if (s.rows !== rows || s.columns !== columns) {
       throw new VolumeBuildError(
-        `Slices have inconsistent dimensions (${s.columns}×${s.rows} vs ${columns}×${rows}). ` +
-          `Multiple series in one folder are not supported yet.`,
+        `Slices have inconsistent dimensions (${s.columns}×${s.rows} vs ${columns}×${rows}) ` +
+          `within one series.`,
       );
     }
   }
