@@ -20,6 +20,7 @@ struct Params {
   windowWidth : f32,
   slicePos : f32,           // normalized position along the slicing axis, 0..1
   flipX : u32,              // non-zero mirrors the in-plane horizontal axis
+  invert : u32,             // non-zero inverts the windowed gray (display inversion)
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -71,6 +72,7 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // DICOM windowing (PS3.3 C.11.2.1.2 linear form).
   let lo = P.windowCenter - 0.5 - (P.windowWidth - 1.0) * 0.5;
   let g = clamp((raw - lo) / max(P.windowWidth - 1.0, 1.0), 0.0, 1.0);
-  return vec4<f32>(g, g, g, 1.0);
+  let shade = select(g, 1.0 - g, P.invert != 0u);
+  return vec4<f32>(shade, shade, shade, 1.0);
 }
 `;

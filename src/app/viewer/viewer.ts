@@ -24,6 +24,7 @@ import {
   clampPan,
   defaultSlabThicknessMm,
   isDvr,
+  oneToOneZoom,
   ProjectionMode,
   rezoomPan,
   SliceRenderer,
@@ -333,6 +334,10 @@ const MIP_SETTLE_MS = 200;
     '(window:keydown.l)': 'onLayoutKey($event)',
     '(window:keydown.i)': 'onInfoKey($event)',
     '(window:keydown.escape)': 'onEscapeKey($event)',
+    // The viewport controls and the help overlay key off characters (digits, '?')
+    // that Angular's per-key bindings don't parse cleanly, so route them through
+    // one handler that reads event.key itself.
+    '(window:keydown)': 'onShortcutKey($event)',
   },
 })
 export class Viewer {
@@ -402,6 +407,34 @@ export class Viewer {
   private readonly focusVoxel = signal<readonly [number, number, number] | null>(null);
   /** When true (default), draw the linked crosshair at the focus voxel in each MPR pane. */
   protected readonly crosshairsEnabled = signal(true);
+  /**
+   * When true, invert the displayed grayscale (white ⇄ black) after windowing.
+   * A user-facing toggle, separate from the MONOCHROME1 sense already folded into
+   * the volume at load — this flips whatever is shown, in every pane.
+   */
+  protected readonly invert = signal(false);
+  /** Whether the keyboard-shortcut help overlay is open. */
+  protected readonly helpOpen = signal(false);
+  /** The shortcuts listed in the help overlay, in display order. */
+  protected readonly shortcuts = [
+    { keys: 'X', label: 'Swap the main view to the next orientation' },
+    { keys: 'F', label: 'Flip the sagittal view left/right' },
+    { keys: 'L', label: 'Cycle the viewport layout' },
+    { keys: 'C', label: 'Toggle linked crosshairs & 3D cut-planes' },
+    { keys: 'P', label: 'Play / pause cine through the hovered pane' },
+    { keys: 'I', label: 'Toggle the metadata / tag inspector' },
+    { keys: '0', label: 'Zoom every pane to fit' },
+    { keys: '1', label: 'Native voxel scale (1:1)' },
+    { keys: 'R', label: 'Reset zoom, pan & window/level' },
+    { keys: 'V', label: 'Invert the grayscale' },
+    { keys: '?', label: 'Toggle this shortcuts help' },
+    { keys: 'Esc', label: 'Cancel a measurement / close overlays' },
+    { keys: 'Drag', label: 'Pan an MPR pane · orbit the 3D pane' },
+    { keys: 'Scroll', label: 'Change slice (MPR) · zoom (3D)' },
+    { keys: 'Ctrl+Scroll', label: 'Zoom an MPR pane about the cursor' },
+    { keys: 'Shift+Click', label: 'Link every pane to the clicked point' },
+    { keys: 'Right-drag', label: 'Adjust window / level' },
+  ] as const;
   /** True while cine playback is auto-advancing slices through a pane. */
   protected readonly cinePlaying = signal(false);
   /** Cine playback speed in frames per second. */
@@ -843,6 +876,7 @@ export class Viewer {
       const windowCenter = this.windowCenter();
       const windowWidth = this.windowWidth();
       const sagittalFlipped = this.sagittalFlipped();
+      const invert = this.invert();
       // The MIP renders at reduced quality while it's being orbited, zoomed, or
       // window/levelled, then at full quality once interaction settles.
       const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
@@ -861,6 +895,7 @@ export class Viewer {
               sliceIndices: indices,
               slabThicknessMm,
               interactive: mipInteractive,
+              invert,
               rect: scaleRect(pane.rect, dpr),
             }
           : {
@@ -872,6 +907,7 @@ export class Viewer {
               zoom: zooms[pane.orientation],
               pan: pans[pane.orientation],
               flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
+              invert,
               rect: scaleRect(pane.rect, dpr),
             },
       );
@@ -999,6 +1035,109 @@ export class Viewer {
     if (event.target instanceof HTMLInputElement || !this.isReady()) return;
     event.preventDefault();
     this.toggleCrosshairs();
+  }
+
+  /**
+   * Zoom-to-fit every MPR pane: the letterbox fit (zoom 1) with no pan. Applied
+   * across all orientations at once so the panes stay consistent.
+   */
+  protected fitView(): void {
+    this.zooms.set([1, 1, 1]);
+    this.pans.set(NO_PANS);
+  }
+
+  /**
+   * Show each MPR pane at native voxel scale (1:1): one resampled output voxel
+   * per device pixel, centred (pan reset). Computed per orientation from its
+   * current pane size, clamped to the zoom range, so every shown pane lands on
+   * the same physical scale.
+   */
+  protected oneToOne(): void {
+    const volume = this.volume();
+    if (!volume) return;
+    const { dpr } = this.viewport();
+    let zooms = this.zooms();
+    let pans = this.pans();
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const rect = scaleRect(pane.rect, dpr);
+      if (rect.width < 1 || rect.height < 1) continue;
+      const zoom = clamp(
+        oneToOneZoom(volume, pane.orientation, rect.width, rect.height),
+        MIN_ZOOM,
+        MAX_ZOOM,
+      );
+      zooms = withValue(zooms, pane.orientation, zoom);
+      pans = withValue(pans, pane.orientation, NO_PAN);
+    }
+    this.zooms.set(zooms);
+    this.pans.set(pans);
+  }
+
+  /**
+   * Reset the view to its defaults: fit every pane (zoom/pan), clear the grayscale
+   * inversion, and restore the window/level to the volume's own suggested window.
+   */
+  protected resetView(): void {
+    this.fitView();
+    this.invert.set(false);
+    const volume = this.volume();
+    if (!volume) return;
+    this.windowCenter.set(Math.round(volume.windowCenter));
+    this.windowWidth.set(Math.max(1, Math.round(volume.windowWidth)));
+    this.markMipSettling();
+  }
+
+  /** Toggle the display grayscale inversion (white ⇄ black) across every pane. */
+  protected toggleInvert(): void {
+    this.invert.update((on) => !on);
+    this.markMipSettling();
+  }
+
+  /** Open/close the keyboard-shortcut help overlay. */
+  protected toggleHelp(): void {
+    this.helpOpen.update((open) => !open);
+  }
+
+  /**
+   * Viewport-control and help shortcuts that key off raw characters: fit (0),
+   * native 1:1 (1), reset (R), invert (V), and the help overlay (?). Routed
+   * through one handler because Angular's per-key host bindings don't parse the
+   * digit and '?' keys cleanly. Ignored while typing in a field.
+   */
+  protected onShortcutKey(event: KeyboardEvent): void {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+      return;
+    }
+    if (event.key === '?') {
+      if (!this.isReady()) return;
+      event.preventDefault();
+      this.toggleHelp();
+      return;
+    }
+    if (!this.isReady()) return;
+    switch (event.key) {
+      case 'r':
+      case 'R':
+        event.preventDefault();
+        this.resetView();
+        break;
+      case 'v':
+      case 'V':
+        event.preventDefault();
+        this.toggleInvert();
+        break;
+      case '0':
+        if (!this.hasMprPane()) return;
+        event.preventDefault();
+        this.fitView();
+        break;
+      case '1':
+        if (!this.hasMprPane()) return;
+        event.preventDefault();
+        this.oneToOne();
+        break;
+    }
   }
 
   /**
@@ -1169,6 +1308,10 @@ export class Viewer {
   /** Escape cancels an in-progress measurement, then deactivates the tool. */
   protected onEscapeKey(event: Event): void {
     if (event.target instanceof HTMLInputElement) return;
+    if (this.helpOpen()) {
+      this.helpOpen.set(false);
+      return;
+    }
     if (this.pending()) {
       this.pending.set(null);
       return;
@@ -1835,6 +1978,7 @@ export class Viewer {
     this.pending.set(null);
     this.measureDrag.set(null);
     // Per-volume view state is per-session: always reset to volume-derived defaults.
+    this.invert.set(false);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);

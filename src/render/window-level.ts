@@ -63,6 +63,28 @@ export function windowLevelSensitivity(min: number, max: number): number {
 }
 
 /**
+ * Map a raw sample to a 0..1 gray level through the DICOM linear window (PS3.3
+ * C.11.2.1.2), the CPU mirror of the windowing WGSL in `slice-shader.ts` and
+ * `raycast-shader.ts`, exposed so the math can be unit-tested. `width` is floored
+ * at 1 so a degenerate window doesn't divide by zero.
+ */
+export function windowGray(raw: number, center: number, width: number): number {
+  const lo = center - 0.5 - (width - 1) * 0.5;
+  const g = (raw - lo) / Math.max(width - 1, 1);
+  return g < 0 ? 0 : g > 1 ? 1 : g;
+}
+
+/**
+ * Invert a 0..1 gray level for the optional display-inversion toggle (white ⇄
+ * black). Independent of the MONOCHROME1 sense, which is baked into the volume at
+ * load; this is a user-facing flip applied after windowing, matching the shaders'
+ * `select(g, 1 - g, invert)`. Involutive: inverting twice is the identity.
+ */
+export function invertGray(g: number): number {
+  return 1 - g;
+}
+
+/**
  * Map a click-drag from a starting window to a new one: horizontal movement
  * shifts the centre (drag right raises it), vertical movement changes the width
  * (drag up widens, drag down narrows — screen-y grows downward, hence `-dy`).

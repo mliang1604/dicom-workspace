@@ -77,6 +77,42 @@
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
   </button>
 
+  <span class="view-controls" title="Viewport controls">
+    <button
+      type="button"
+      (click)="fitView()"
+      [disabled]="!isReady() || !hasMprPane()"
+      title="Zoom every pane to fit (0)"
+    >
+      Fit ⤢ <kbd>0</kbd>
+    </button>
+    <button
+      type="button"
+      (click)="oneToOne()"
+      [disabled]="!isReady() || !hasMprPane()"
+      title="Show panes at native voxel scale, 1:1 (1)"
+    >
+      1:1 <kbd>1</kbd>
+    </button>
+    <button
+      type="button"
+      (click)="resetView()"
+      [disabled]="!isReady()"
+      title="Reset zoom, pan and window/level to defaults (R)"
+    >
+      Reset ↺ <kbd>R</kbd>
+    </button>
+    <button
+      type="button"
+      (click)="toggleInvert()"
+      [disabled]="!isReady()"
+      [class.active]="invert()"
+      title="Invert the displayed grayscale (V)"
+    >
+      Invert ◐ <kbd>V</kbd> {{ invert() ? 'on' : 'off' }}
+    </button>
+  </span>
+
   <span class="cine" title="Cine: auto-scroll through the hovered or main pane's slices">
     <button
       type="button"
@@ -130,6 +166,16 @@
     title="Show DICOM metadata and a searchable raw-tag inspector (I)"
   >
     Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
+  </button>
+
+  <button
+    type="button"
+    (click)="toggleHelp()"
+    [disabled]="!isReady()"
+    [class.active]="helpOpen()"
+    title="Show the keyboard & mouse shortcut overlay (?)"
+  >
+    Help <kbd>?</kbd>
   </button>
 
   <span class="spacer">
@@ -463,6 +509,42 @@
         </section>
       </div>
     </aside>
+  }
+
+  <!-- Keyboard & mouse shortcut help. A centred modal overlay; click outside or ✕/Esc to close. -->
+  @if (helpOpen()) {
+    <div
+      class="help-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Keyboard and mouse shortcuts"
+      (click)="toggleHelp()"
+    >
+      <aside class="help-panel" (click)="$event.stopPropagation()">
+        <header class="info-header">
+          <strong>Keyboard &amp; mouse shortcuts</strong>
+          <button
+            type="button"
+            class="info-close"
+            (click)="toggleHelp()"
+            title="Close (?)"
+            aria-label="Close shortcuts help"
+          >
+            ✕
+          </button>
+        </header>
+        <dl class="info-body">
+          @for (shortcut of shortcuts; track shortcut.label) {
+            <div class="info-row">
+              <dt>
+                <kbd>{{ shortcut.keys }}</kbd>
+              </dt>
+              <dd>{{ shortcut.label }}</dd>
+            </div>
+          }
+        </dl>
+      </aside>
+    </div>
   }
 
   @if (isReady() && interpolationWarning(); as warning) {
