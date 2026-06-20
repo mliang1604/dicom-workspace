@@ -119,3 +119,60 @@ test('renders translucent ROI surfaces in the 3D pane', async ({ page }) => {
     )
     .toBeGreaterThan(0.01);
 });
+
+// Middle-drag (and Alt+left-drag) pans the 3D camera, so you can recentre after
+// a cursor-anchored zoom. Needs WebGPU (measures the rendered surface overlay).
+test('middle-drag pans the 3D view', async ({ page }) => {
+  await page.addInitScript((key) => {
+    try {
+      localStorage.setItem(key, 'true');
+    } catch {
+      /* ignore */
+    }
+  }, DISCLAIMER_KEY);
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.goto('/');
+
+  if (!(await hasWebGpu(page))) {
+    test.skip(true, 'WebGPU unavailable; the 3D pane needs a live render.');
+    return;
+  }
+
+  await page
+    .locator('input[type="file"][multiple]:not([webkitdirectory])')
+    .first()
+    .setInputFiles([...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
+  await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
+
+  await page.locator('body').click();
+  await page.keyboard.press('l');
+  await page.keyboard.press('l'); // 3D-only
+  await expect(page.locator('canvas.surface-3d')).toBeVisible({ timeout: 10_000 });
+
+  const centroidX = () =>
+    page.evaluate(() => {
+      const s = document.querySelector('.surface-3d') as HTMLCanvasElement;
+      const d = s.getContext('2d')!.getImageData(0, 0, s.width, s.height).data;
+      let sx = 0;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] > 4) {
+          sx += (i / 4) % s.width;
+          n++;
+        }
+      }
+      return n ? sx / n : 0;
+    });
+
+  await page.waitForTimeout(300);
+  const before = await centroidX();
+  const box = (await page.locator('canvas').first().boundingBox())!;
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: 'middle' });
+  await page.mouse.move(cx + 140, cy, { steps: 8 });
+  await page.mouse.up({ button: 'middle' });
+
+  await expect.poll(centroidX, { timeout: 5_000 }).toBeGreaterThan(before + 60);
+});

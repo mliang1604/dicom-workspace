@@ -106,7 +106,7 @@ import {
   type Vec3,
   type Volume,
 } from '../../dicom/types';
-import { add, cross, dot, normalize, scale, sub } from '../../dicom/vec3';
+import { add, cross, dot, length, normalize, scale, sub } from '../../dicom/vec3';
 import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
@@ -437,6 +437,7 @@ type Drag =
       readonly lastY: number;
     }
   | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
+  | { readonly kind: 'cameraPan'; readonly lastX: number; readonly lastY: number }
   | {
       readonly kind: 'clipPlane';
       /** Cut-plane offset (mm) when the drag began. */
@@ -753,6 +754,7 @@ export class Viewer {
     { keys: '?', label: 'Toggle this shortcuts help' },
     { keys: 'Esc', label: 'Cancel a measurement / close overlays' },
     { keys: 'Drag', label: 'Pan an MPR pane · orbit the 3D pane' },
+    { keys: 'Middle-drag / Alt+drag', label: 'Pan the 3D pane (and MPR panes)' },
     { keys: 'Scroll', label: 'Change slice (MPR) · zoom (3D)' },
     { keys: 'Ctrl+Scroll', label: 'Zoom an MPR pane about the cursor' },
     { keys: 'Shift+Click', label: 'Link every pane to the clicked point' },
@@ -2801,6 +2803,26 @@ export class Viewer {
       return;
     }
 
+    // Pan gesture — middle-button drag, or Alt+left-drag for trackpads. Over the
+    // 3D pane it slides the orthographic camera (panX/panY), so you can recentre
+    // after a cursor-anchored zoom without losing the orbit; over an MPR pane it
+    // pans that view like a left-drag.
+    if (event.button === 1 || (event.button === 0 && event.altKey)) {
+      event.preventDefault();
+      this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
+      this.drag.set(
+        placement.kind === 'mip'
+          ? { kind: 'cameraPan', lastX: event.clientX, lastY: event.clientY }
+          : {
+              kind: 'pan',
+              orientation: placement.orientation,
+              lastX: event.clientX,
+              lastY: event.clientY,
+            },
+      );
+      return;
+    }
+
     if (event.button !== 0) return;
     event.preventDefault();
 
@@ -2845,6 +2867,7 @@ export class Viewer {
     const drag = this.drag();
     if (drag?.kind === 'pan') this.dragPan(event, drag);
     else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
+    else if (drag?.kind === 'cameraPan') this.dragCameraPan(event, drag);
     else if (drag?.kind === 'windowLevel') this.dragWindow(event, drag);
 
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
@@ -2883,6 +2906,29 @@ export class Viewer {
       ...cam,
       azimuth: cam.azimuth + dx * ORBIT_SPEED,
       elevation: clamp(cam.elevation - dy * ORBIT_SPEED, -MAX_ELEVATION, MAX_ELEVATION),
+    }));
+  }
+
+  /**
+   * Slide the orthographic 3D camera by a pointer move (panX/panY in patient mm).
+   * Maps screen pixels to mm via the image-plane half-extents so the volume
+   * tracks the cursor 1:1, letting you recentre after a cursor-anchored zoom.
+   */
+  private dragCameraPan(event: PointerEvent, drag: Extract<Drag, { kind: 'cameraPan' }>): void {
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
+
+    const volume = this.volume();
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!volume || !mip || mip.rect.width < 1 || mip.rect.height < 1) return;
+    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
+    const mmPerPxX = (2 * length(basis.axisU)) / mip.rect.width;
+    const mmPerPxY = (2 * length(basis.axisV)) / mip.rect.height;
+    this.camera3d.update((cam) => ({
+      ...cam,
+      panX: cam.panX - dx * mmPerPxX,
+      panY: cam.panY + dy * mmPerPxY,
     }));
   }
 
