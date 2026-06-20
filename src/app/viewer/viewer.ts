@@ -91,9 +91,11 @@ import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import {
-  contourPlaneResult,
+  classifyContour,
   crossSectionOutline,
   decimate,
+  projectContour,
+  type ContourCoords,
   type ContourPolyline,
   type CrossSectionRow,
 } from '../../render/contours';
@@ -218,6 +220,18 @@ interface RoiPlaneShapes {
   /** Loops and the cross-section outline, in plane `(u, v)` coordinates. */
   readonly polylines: readonly ContourPolyline[];
 }
+
+/** One ROI's contours projected into a pane's plane frame — slice-independent (cached). */
+interface RoiContourCoords {
+  readonly setIndex: number;
+  readonly roiNumber: number;
+  /** The ROI's display colour as a CSS colour (overrides applied later). */
+  readonly baseColor: string;
+  readonly contours: readonly ContourCoords[];
+}
+
+/** The three MPR orientations contours are projected for, regardless of layout. */
+const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
 
 /** Decimation tolerance for coplanar loops, in plane `(u, v)` units (~0.15% of a pane). */
 const CONTOUR_DECIMATE_UV = 0.0015;
@@ -1364,73 +1378,100 @@ export class Viewer {
   });
 
   /**
-   * Plane-space ROI contour geometry per MPR orientation — the expensive half of
-   * the contour overlay, split out so panning/zooming never re-runs it. Each
-   * visible ROI's contours are projected into the pane's `(u, v)` frame once
-   * ({@link contourPlaneResult}): coplanar loops are kept whole (decimated), and
-   * the contours that cut an orthogonal/oblique pane are folded into a single
-   * cross-section *outline* ({@link crossSectionOutline}) — a silhouette, not the
-   * per-slice interior spans that used to stack into a solid fill. Recomputed
-   * only from the volume, structure sets, slice indices, oblique tilt and ROI
-   * state — never pan, zoom, flip, window/level or the 3D camera.
+   * The expensive half: every ROI's contours projected into each MPR
+   * orientation's plane frame once ({@link projectContour}), with each contour's
+   * through-plane span precomputed. Recomputed only when the volume, structure
+   * sets or oblique tilt change — never on slice scroll, pan, zoom, flip,
+   * window/level, ROI visibility/colour, or the 3D camera. Projects all three
+   * MPR orientations regardless of layout so cycling panes needs no re-projection.
    */
-  private readonly contourPlaneGeometry = computed<Map<Orientation, RoiPlaneShapes[]>>(() => {
-    const out = new Map<Orientation, RoiPlaneShapes[]>();
+  private readonly contourCoords = computed<Map<Orientation, RoiContourCoords[]>>(() => {
+    const out = new Map<Orientation, RoiContourCoords[]>();
     const volume = this.volume();
     const sets = this.structureSets();
     if (!this.isReady() || !volume || sets.length === 0) return out;
 
-    const indices = this.sliceIndices();
     const obliques = this.obliques();
+    for (const orientation of MPR_ORIENTATIONS) {
+      const rotation = obliques[orientation];
+      const rois: RoiContourCoords[] = [];
+      sets.forEach((ss, setIndex) => {
+        for (const roi of ss.rois) {
+          const contours: ContourCoords[] = [];
+          for (const contour of roi.contours) {
+            const closed =
+              contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
+            const projected = projectContour(volume, orientation, contour.points, closed, rotation);
+            if (projected) contours.push(projected);
+          }
+          if (contours.length) {
+            rois.push({
+              setIndex,
+              roiNumber: roi.number,
+              baseColor: rgbColor(roi.color),
+              contours,
+            });
+          }
+        }
+      });
+      if (rois.length) out.set(orientation, rois);
+    }
+    return out;
+  });
+
+  /**
+   * The cheap, per-slice half: classify the cached {@link contourCoords} against
+   * the current slice — coplanar loops on this slice (decimated), crossing
+   * contours folded into the cross-section outline — and apply ROI visibility,
+   * colour and opacity. Scrolling slices re-runs only this (an O(1) span test
+   * skips off-slice contours; no re-projection), and only for the scrolled
+   * orientation's pane. Result is still in plane `(u, v)`; pan/zoom map to pixels.
+   */
+  private readonly contourPlaneGeometry = computed<Map<Orientation, RoiPlaneShapes[]>>(() => {
+    const out = new Map<Orientation, RoiPlaneShapes[]>();
+    const volume = this.volume();
+    const coordsByOrientation = this.contourCoords();
+    if (!volume || coordsByOrientation.size === 0) return out;
+
+    const indices = this.sliceIndices();
     const hidden = this.hiddenRois();
     const overrides = this.roiColorOverrides();
     const opacities = this.roiOpacities();
     const selectedSet = this.selectedSetIndex();
 
-    const orientations = new Set<Orientation>();
-    for (const pane of this.panes()) if (pane.kind === 'mpr') orientations.add(pane.orientation);
+    const shown = new Set<Orientation>();
+    for (const pane of this.panes()) if (pane.kind === 'mpr') shown.add(pane.orientation);
 
-    for (const orientation of orientations) {
+    for (const [orientation, rois] of coordsByOrientation) {
+      if (!shown.has(orientation)) continue;
       const sliceIndex = indices[orientation];
-      const rotation = obliques[orientation];
       const roiShapes: RoiPlaneShapes[] = [];
-      sets.forEach((ss, setIndex) => {
-        if (!setIsShown(selectedSet, setIndex)) return;
-        for (const roi of ss.rois) {
-          const key = roiKeyOf(setIndex, roi.number);
-          if (hidden.has(key)) continue;
+      for (const roi of rois) {
+        if (!setIsShown(selectedSet, roi.setIndex)) continue;
+        const key = roiKeyOf(roi.setIndex, roi.roiNumber);
+        if (hidden.has(key)) continue;
 
-          const loops: ContourPolyline[] = [];
-          const rows: CrossSectionRow[] = [];
-          for (const contour of roi.contours) {
-            const closed =
-              contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
-            const res = contourPlaneResult(
-              volume,
-              orientation,
-              sliceIndex,
-              contour.points,
-              closed,
-              rotation,
-            );
-            if (!res) continue;
-            if (res.kind === 'loop') {
-              loops.push({ points: decimate(res.points, CONTOUR_DECIMATE_UV), closed: res.closed });
-            } else {
-              rows.push(res.row);
-            }
+        const loops: ContourPolyline[] = [];
+        const rows: CrossSectionRow[] = [];
+        for (const c of roi.contours) {
+          const res = classifyContour(c, volume, orientation, sliceIndex);
+          if (!res) continue;
+          if (res.kind === 'loop') {
+            loops.push({ points: decimate(res.points, CONTOUR_DECIMATE_UV), closed: res.closed });
+          } else {
+            rows.push(res.row);
           }
-
-          const polylines = [...loops, ...crossSectionOutline(rows)];
-          if (polylines.length === 0) continue;
-          roiShapes.push({
-            key,
-            color: overrides.get(key) ?? rgbColor(roi.color),
-            opacity: opacities.get(key) ?? 1,
-            polylines,
-          });
         }
-      });
+
+        const polylines = [...loops, ...crossSectionOutline(rows)];
+        if (polylines.length === 0) continue;
+        roiShapes.push({
+          key,
+          color: overrides.get(key) ?? roi.baseColor,
+          opacity: opacities.get(key) ?? 1,
+          polylines,
+        });
+      }
       if (roiShapes.length) out.set(orientation, roiShapes);
     }
     return out;
