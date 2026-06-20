@@ -414,12 +414,6 @@ button.active {
   paint-order: stroke;
 }
 
-/* RTSTRUCT ROI surfaces: a translucent 2D-canvas overlay on the 3D pane. */
-.surface-3d {
-  position: absolute;
-  pointer-events: none;
-}
-
 /* Structures panel: per-ROI colour, type, visibility and opacity controls. */
 .roi-panel {
   flex-direction: column;

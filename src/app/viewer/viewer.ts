@@ -29,6 +29,7 @@ import {
   rezoomPan,
   SliceRenderer,
   type PaneView,
+  type SurfaceFrame,
 } from '../../render/slice-renderer';
 import {
   addControlPoint,
@@ -237,8 +238,6 @@ const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sa
 const CONTOUR_DECIMATE_UV = 0.0015;
 /** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
 const SURFACE_ALPHA = 0.4;
-/** Quantised shading levels per ROI, so fill strings are precomputed not per-triangle. */
-const SURFACE_SHADE_LEVELS = 16;
 
 /**
  * One ROI's 3D surface mesh, flattened for fast per-frame drawing: triangle
@@ -578,8 +577,6 @@ export class Viewer {
   private readonly initialPrefs = this.preferencesStore.preferences();
 
   private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
-  /** The 2D overlay canvas for the 3D ROI surfaces (present only while shown). */
-  private readonly surface3dRef = viewChild<ElementRef<HTMLCanvasElement>>('surface3d');
 
   private readonly renderer = signal<SliceRenderer | null>(null);
   private readonly load = signal<LoadState>({ status: 'idle' });
@@ -1068,9 +1065,9 @@ export class Viewer {
   /**
    * Per-ROI 3D surface meshes, lofted from each ROI's contour stack
    * ({@link loftContours}) in patient space. The 3D pane draws these as
-   * translucent shaded shells (see {@link drawSurfaces}) instead of a busy stack
-   * of wireframe rings, so the volume stays visible through them. Camera- and
-   * visibility-independent — recomputed only when the structure sets change.
+   * translucent shaded shells (rendered in the WebGPU pass) instead of a busy
+   * stack of wireframe rings, so the volume stays visible through them. Camera-
+   * and visibility-independent — recomputed only when the structure sets change.
    */
   private readonly surfaceMeshes = computed<RoiSurfaceMesh[]>(() => {
     const sets = this.structureSets();
@@ -1089,13 +1086,6 @@ export class Viewer {
       }
     });
     return meshes;
-  });
-
-  /** The 3D pane's rectangle (CSS px) when there are ROI surfaces to draw, else null. */
-  protected readonly surface3dRect = computed<PaneRect | null>(() => {
-    if (this.surfaceMeshes().length === 0) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    return mip && mip.rect.width >= 1 && mip.rect.height >= 1 ? mip.rect : null;
   });
 
   /**
@@ -1619,14 +1609,18 @@ export class Viewer {
   private cineHandle: ReturnType<typeof setInterval> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
-  /** Reusable per-frame scratch for {@link drawSurfaces}, grown as needed (no per-frame alloc). */
-  private surfBuf: {
-    coords: Float32Array; // 6 per triangle: x0,y0,x1,y1,x2,y2
+  /** Triangle centroids (3 floats each) for the visible ROI surface mesh, for depth sorting. */
+  private surfaceCentroids: Float32Array | null = null;
+  private surfaceTriangleCount = 0;
+  /** Reusable per-frame surface sort scratch, grown as needed (no per-frame alloc). */
+  private surfaceSort: {
     depth: Float32Array;
-    fill: Int32Array; // index into the per-frame fill-string table
-    order: Int32Array;
+    order: Uint32Array;
+    index: Uint32Array;
     cap: number;
   } | null = null;
+  /** Packed surface camera uniform (eye, axisU+uu, axisV+vv, light), reused each frame. */
+  private readonly surfaceCamera = new Float32Array(16);
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -1683,21 +1677,31 @@ export class Viewer {
       }
     });
 
-    // Redraw the translucent 3D ROI surfaces (a 2D-canvas overlay, drawn
-    // imperatively) whenever the meshes, camera, pane, ROI visibility/colour or
-    // device-pixel ratio change. Coalesced into one frame so an orbit drag — a
-    // stream of camera updates — repaints once per frame.
+    // Rebuild the GPU surface vertex buffer whenever the meshes or per-ROI
+    // visibility / colour / opacity change (not on camera — orbit/pan only need a
+    // re-sort + redraw, handled in the render frame). Then schedule a frame.
     effect(() => {
-      this.surfaceMeshes();
-      this.surface3dRect();
-      this.surface3dRef();
-      this.camera3d();
-      this.hiddenRois();
-      this.roiColorOverrides();
-      this.roiOpacities();
-      this.selectedSetIndex();
-      this.viewport();
+      const renderer = this.renderer();
+      const meshes = this.surfaceMeshes();
+      const hidden = this.hiddenRois();
+      const overrides = this.roiColorOverrides();
+      const opacities = this.roiOpacities();
+      const selectedSet = this.selectedSetIndex();
+      if (renderer)
+        this.buildSurfaceMesh(renderer, meshes, hidden, overrides, opacities, selectedSet);
       this.scheduleFrame();
+    });
+
+    // Test seam: reflect the 3D-camera pan onto the canvas as data attributes. The
+    // 3D pane renders in the WebGPU canvas, whose pixels can't be read back under a
+    // software adapter (headless CI), so e2e asserts on this (and on
+    // `data-roi-surface-triangles`, set in buildSurfaceMesh) instead of sampling
+    // the removed 2D overlay.
+    effect(() => {
+      const el = this.canvasRef().nativeElement;
+      const camera = this.camera3d();
+      el.dataset['cameraPanX'] = camera.panX.toFixed(3);
+      el.dataset['cameraPanY'] = camera.panY.toFixed(3);
     });
 
     this.destroyRef.onDestroy(() => {
@@ -1710,141 +1714,156 @@ export class Viewer {
 
   /** Coalesce surface redraws into a single animation frame. */
   /**
-   * Paint the visible ROI surfaces onto the 3D overlay canvas: project every
-   * triangle through the orbit camera, shade it by its facing to a head-light,
-   * sort back-to-front (painter's algorithm) and alpha-fill. Drawn over — not
-   * depth-composited with — the volume, so the volume shows through the
-   * translucent shells.
+   * Build the WebGPU vertex buffer for the visible ROI surfaces — one flat-shaded
+   * triangle list (position + face normal + RGBA per vertex) across every shown
+   * ROI — and hand it to the renderer. Also keeps each triangle's centroid for
+   * the per-frame depth sort. Camera-independent: only rebuilt when the meshes or
+   * ROI visibility / colour / opacity change.
    */
-  private drawSurfaces(): void {
-    const canvas = this.surface3dRef()?.nativeElement;
-    const rect = this.surface3dRect();
-    const volume = this.volume();
-    if (!canvas || !rect || !volume) return;
-
-    const dpr = this.viewport().dpr;
-    const w = Math.max(1, Math.round(rect.width * dpr));
-    const h = Math.max(1, Math.round(rect.height * dpr));
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, w, h);
-
-    const camera = this.camera3d();
-    const basis = cameraBasis(volume, camera, rect.width, rect.height);
-    const light = viewBasis(camera.azimuth, camera.elevation).forward; // head-light into screen
-    const hidden = this.hiddenRois();
-    const overrides = this.roiColorOverrides();
-    const opacities = this.roiOpacities();
-    const selectedSet = this.selectedSetIndex();
-
-    // Visible meshes + a precomputed fill-string table (one set of shade levels
-    // per ROI), so no rgba string is built per triangle.
-    const visible: { mesh: RoiSurfaceMesh; fillBase: number }[] = [];
-    const fills: string[] = [];
+  private buildSurfaceMesh(
+    renderer: SliceRenderer,
+    meshes: readonly RoiSurfaceMesh[],
+    hidden: ReadonlySet<string>,
+    overrides: ReadonlyMap<string, string>,
+    opacities: ReadonlyMap<string, number>,
+    selectedSet: number,
+  ): void {
     let total = 0;
-    for (const mesh of this.surfaceMeshes()) {
+    const visible: RoiSurfaceMesh[] = [];
+    for (const mesh of meshes) {
       if (!setIsShown(selectedSet, mesh.setIndex)) continue;
       const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
-      if (hidden.has(key)) continue;
-      const alpha = (opacities.get(key) ?? 1) * SURFACE_ALPHA;
-      if (alpha <= 0) continue;
-      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
-      const fillBase = fills.length;
-      for (let k = 0; k < SURFACE_SHADE_LEVELS; k++) {
-        const shade = 0.45 + (0.55 * k) / (SURFACE_SHADE_LEVELS - 1);
-        fills.push(`rgba(${(r * shade) | 0},${(g * shade) | 0},${(b * shade) | 0},${alpha})`);
-      }
-      visible.push({ mesh, fillBase });
+      if (hidden.has(key) || (opacities.get(key) ?? 1) <= 0) continue;
+      visible.push(mesh);
       total += mesh.count;
     }
-    if (total === 0) return;
+    this.surfaceTriangleCount = total;
+    this.canvasRef().nativeElement.dataset['roiSurfaceTriangles'] = String(total);
+    if (total === 0) {
+      renderer.setSurfaceMesh(new Float32Array(0));
+      return;
+    }
 
-    // Project + shade every triangle into reusable typed-array scratch (no
-    // per-triangle object/string allocation), inlining the orthographic project.
-    const buf = this.ensureSurfaceBuffer(total);
-    const { coords, depth, fill, order } = buf;
-    const ex = basis.eye[0];
-    const ey = basis.eye[1];
-    const ez = basis.eye[2];
-    const ux = basis.axisU[0];
-    const uy = basis.axisU[1];
-    const uz = basis.axisU[2];
-    const vx = basis.axisV[0];
-    const vy = basis.axisV[1];
-    const vz = basis.axisV[2];
-    const fx = basis.forward[0];
-    const fy = basis.forward[1];
-    const fz = basis.forward[2];
-    const uu = ux * ux + uy * uy + uz * uz;
-    const vv = vx * vx + vy * vy + vz * vz;
-    const lx = light[0];
-    const ly = light[1];
-    const lz = light[2];
-    const maxLevel = SURFACE_SHADE_LEVELS - 1;
-
-    let t = 0;
-    for (const { mesh, fillBase } of visible) {
+    const verts = new Float32Array(total * 3 * 10); // 3 verts × (pos3 + normal3 + rgba4)
+    const centroids = new Float32Array(total * 3);
+    let v = 0;
+    let c = 0;
+    for (const mesh of visible) {
+      const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
+      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
+      const cr = r / 255;
+      const cg = g / 255;
+      const cb = b / 255;
+      const alpha = (opacities.get(key) ?? 1) * SURFACE_ALPHA;
       const pos = mesh.positions;
       const nrm = mesh.normals;
       for (let i = 0; i < mesh.count; i++) {
         const p = i * 9;
-        let depthSum = 0;
-        const c6 = t * 6;
+        const n = i * 3;
+        const nx = nrm[n];
+        const ny = nrm[n + 1];
+        const nz = nrm[n + 2];
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
         for (let vtx = 0; vtx < 3; vtx++) {
           const o = p + vtx * 3;
-          const rx = pos[o] - ex;
-          const ry = pos[o + 1] - ey;
-          const rz = pos[o + 2] - ez;
-          const ndcX = (rx * ux + ry * uy + rz * uz) / uu;
-          const ndcY = (rx * vx + ry * vy + rz * vz) / vv;
-          coords[c6 + vtx * 2] = (ndcX + 1) * 0.5 * w;
-          coords[c6 + vtx * 2 + 1] = (1 - ndcY) * 0.5 * h;
-          depthSum += rx * fx + ry * fy + rz * fz;
+          const px = pos[o];
+          const py = pos[o + 1];
+          const pz = pos[o + 2];
+          verts[v++] = px;
+          verts[v++] = py;
+          verts[v++] = pz;
+          verts[v++] = nx;
+          verts[v++] = ny;
+          verts[v++] = nz;
+          verts[v++] = cr;
+          verts[v++] = cg;
+          verts[v++] = cb;
+          verts[v++] = alpha;
+          sx += px;
+          sy += py;
+          sz += pz;
         }
-        depth[t] = depthSum;
-        const n = i * 3;
-        const facing = Math.abs(nrm[n] * lx + nrm[n + 1] * ly + nrm[n + 2] * lz);
-        fill[t] = fillBase + Math.round(facing * maxLevel);
-        order[t] = t;
-        t++;
+        centroids[c++] = sx / 3;
+        centroids[c++] = sy / 3;
+        centroids[c++] = sz / 3;
       }
     }
-
-    // Painter's algorithm: draw far triangles first.
-    const ord = order.subarray(0, total);
-    ord.sort((a, b) => depth[b] - depth[a]);
-    let currentFill = -1;
-    for (let i = 0; i < total; i++) {
-      const idx = ord[i];
-      const c6 = idx * 6;
-      if (fill[idx] !== currentFill) {
-        currentFill = fill[idx];
-        ctx.fillStyle = fills[currentFill];
-      }
-      ctx.beginPath();
-      ctx.moveTo(coords[c6], coords[c6 + 1]);
-      ctx.lineTo(coords[c6 + 2], coords[c6 + 3]);
-      ctx.lineTo(coords[c6 + 4], coords[c6 + 5]);
-      ctx.closePath();
-      ctx.fill();
-    }
+    this.surfaceCentroids = centroids;
+    renderer.setSurfaceMesh(verts);
   }
 
-  /** Grow (and cache) the {@link drawSurfaces} scratch to hold `n` triangles. */
-  private ensureSurfaceBuffer(n: number): NonNullable<typeof this.surfBuf> {
-    if (!this.surfBuf || this.surfBuf.cap < n) {
-      const cap = Math.max(n, (this.surfBuf?.cap ?? 0) * 2, 4096);
-      this.surfBuf = {
-        coords: new Float32Array(cap * 6),
+  /**
+   * Per-frame surface data for the WebGPU pass: depth-sort the triangles
+   * back-to-front against the current camera and pack the camera uniform. Null
+   * when there's no 3D pane or no surface mesh.
+   */
+  private surfaceFrame(): SurfaceFrame | null {
+    const volume = this.volume();
+    const centroids = this.surfaceCentroids;
+    const n = this.surfaceTriangleCount;
+    if (!volume || !centroids || n === 0) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!mip || mip.rect.width < 1 || mip.rect.height < 1) return null;
+
+    const camera = this.camera3d();
+    const basis = cameraBasis(volume, camera, mip.rect.width, mip.rect.height);
+    const light = viewBasis(camera.azimuth, camera.elevation).forward;
+    const sort = this.ensureSurfaceSort(n);
+    const { depth, order, index } = sort;
+
+    const ex = basis.eye[0];
+    const ey = basis.eye[1];
+    const ez = basis.eye[2];
+    const fx = basis.forward[0];
+    const fy = basis.forward[1];
+    const fz = basis.forward[2];
+    for (let i = 0; i < n; i++) {
+      const c = i * 3;
+      depth[i] =
+        (centroids[c] - ex) * fx + (centroids[c + 1] - ey) * fy + (centroids[c + 2] - ez) * fz;
+      order[i] = i;
+    }
+    const ord = order.subarray(0, n);
+    ord.sort((a, b) => depth[b] - depth[a]); // far first (painter's order)
+    for (let k = 0; k < n; k++) {
+      const t = ord[k];
+      index[k * 3] = t * 3;
+      index[k * 3 + 1] = t * 3 + 1;
+      index[k * 3 + 2] = t * 3 + 2;
+    }
+
+    const cam = this.surfaceCamera;
+    cam[0] = ex;
+    cam[1] = ey;
+    cam[2] = ez;
+    cam[4] = basis.axisU[0];
+    cam[5] = basis.axisU[1];
+    cam[6] = basis.axisU[2];
+    cam[7] = dot(basis.axisU, basis.axisU);
+    cam[8] = basis.axisV[0];
+    cam[9] = basis.axisV[1];
+    cam[10] = basis.axisV[2];
+    cam[11] = dot(basis.axisV, basis.axisV);
+    cam[12] = light[0];
+    cam[13] = light[1];
+    cam[14] = light[2];
+    return { indices: index.subarray(0, n * 3), camera: cam };
+  }
+
+  /** Grow (and cache) the per-frame surface depth-sort scratch for `n` triangles. */
+  private ensureSurfaceSort(n: number): NonNullable<typeof this.surfaceSort> {
+    if (!this.surfaceSort || this.surfaceSort.cap < n) {
+      const cap = Math.max(n, (this.surfaceSort?.cap ?? 0) * 2, 4096);
+      this.surfaceSort = {
         depth: new Float32Array(cap),
-        fill: new Int32Array(cap),
-        order: new Int32Array(cap),
+        order: new Uint32Array(cap),
+        index: new Uint32Array(cap * 3),
         cap,
       };
     }
-    return this.surfBuf;
+    return this.surfaceSort;
   }
 
   /**
@@ -1921,10 +1940,9 @@ export class Viewer {
       this.frameHandle = null;
       const renderer = this.renderer();
       const views = this.pendingViews;
-      if (renderer && views) renderer.renderPanes(views);
-      // Draw the 3D ROI surfaces in the same frame as the volume, so they don't
-      // present a frame apart from the anatomy (which reads as lag while panning).
-      this.drawSurfaces();
+      // Render the panes and the ROI surfaces in one WebGPU pass/frame, so the
+      // structures never present a frame apart from the anatomy (no pan/orbit lag).
+      if (renderer && views) renderer.renderPanes(views, this.surfaceFrame());
     });
   }
 
