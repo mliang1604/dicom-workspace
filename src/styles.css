@@ -7,6 +7,18 @@
   --text: #e6e9ef;
   --muted: #8a92a3;
   --accent: #4c8dff;
+
+  /* Frosted-glass surface tokens — translucent chrome over the imaging. */
+  --glass-bg: rgba(21, 24, 31, 0.55);
+  --glass-bg-strong: rgba(21, 24, 31, 0.72); /* cards / denser surfaces */
+  --glass-border: rgba(255, 255, 255, 0.08); /* hairline lit edge */
+  --glass-blur: 14px;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+  --accent-ring: 0 0 0 1px rgba(76, 141, 255, 0.55), 0 0 12px rgba(76, 141, 255, 0.35);
 }
 
 * {
@@ -17,7 +29,12 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
+  /* Soft dark backdrop so the blurred chrome has something to refract against. */
+  background:
+    radial-gradient(120% 90% at 15% 0%, #131722 0%, rgba(19, 23, 34, 0) 55%),
+    radial-gradient(120% 90% at 100% 100%, #11151f 0%, rgba(17, 21, 31, 0) 50%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font:
     13px/1.4 system-ui,
