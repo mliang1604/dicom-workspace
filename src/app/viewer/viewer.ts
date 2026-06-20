@@ -71,6 +71,7 @@ import { VolumeLoader, type LoadResult } from '../volume-loader';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
 import { readDropped } from './drop-files';
+import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -278,6 +279,13 @@ const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
 /** Default cine playback speed (fps), used until the user picks another. */
 const DEFAULT_CINE_FPS = 15;
 
+/** WebM containers tried, most-preferred first, for the 3D rotation capture. */
+const VIDEO_MIME_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'] as const;
+/** Frames in one full 360° rotation capture (~4 s at the capture frame rate). */
+const ROTATION_FRAMES = 120;
+/** Frame rate the rotation capture's MediaRecorder samples the canvas at. */
+const ROTATION_FPS = 30;
+
 /** Radians of orbit per pixel dragged over the 3D pane. */
 const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
@@ -413,6 +421,22 @@ export class Viewer {
    * the volume at load — this flips whatever is shown, in every pane.
    */
   protected readonly invert = signal(false);
+  /**
+   * The WebM container the browser can record a rotation capture into, chosen
+   * once up front, or null when MediaRecorder/WebM isn't available (which hides
+   * the spin-capture control). MPR-only layouts still expose the PNG screenshot.
+   */
+  private readonly recordingMimeType = pickVideoMimeType(
+    VIDEO_MIME_TYPES,
+    (type) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type),
+  );
+  /** True while a 3D rotation capture is recording; disables the export controls. */
+  protected readonly recordingRotation = signal(false);
+  /** Whether the 3D rotation capture is available (3D pane shown + WebM support). */
+  protected readonly canRecordRotation = computed(
+    () => this.isReady() && this.has3dPane() && this.recordingMimeType !== null,
+  );
+
   /** Whether the keyboard-shortcut help overlay is open. */
   protected readonly helpOpen = signal(false);
   /** The shortcuts listed in the help overlay, in display order. */
@@ -861,56 +885,9 @@ export class Viewer {
     // (see scheduleFrame). Multiple signal changes within one frame — e.g. the
     // stream of pointer moves during an orbit drag — collapse into one render.
     effect(() => {
-      const renderer = this.renderer();
-      const volume = this.volume();
-      const panes = this.panes();
-      const { dpr } = this.viewport();
-      const indices = this.sliceIndices();
-      const zooms = this.zooms();
-      const pans = this.pans();
-      const camera = this.camera3d();
-      const projectionMode = this.projectionMode();
-      const transferFunction = this.transferFunction();
-      const clipToPlanes = this.clipToPlanes();
-      const slabThicknessMm = this.slabThicknessMm();
-      const windowCenter = this.windowCenter();
-      const windowWidth = this.windowWidth();
-      const sagittalFlipped = this.sagittalFlipped();
-      const invert = this.invert();
-      // The MIP renders at reduced quality while it's being orbited, zoomed, or
-      // window/levelled, then at full quality once interaction settles.
-      const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
-      if (!renderer || !volume) return;
-
-      this.pendingViews = panes.map((pane) =>
-        pane.kind === 'mip'
-          ? {
-              kind: 'mip',
-              windowCenter,
-              windowWidth,
-              camera,
-              projectionMode,
-              transferFunction,
-              clipToPlanes,
-              sliceIndices: indices,
-              slabThicknessMm,
-              interactive: mipInteractive,
-              invert,
-              rect: scaleRect(pane.rect, dpr),
-            }
-          : {
-              kind: 'mpr',
-              orientation: pane.orientation,
-              sliceIndex: indices[pane.orientation],
-              windowCenter,
-              windowWidth,
-              zoom: zooms[pane.orientation],
-              pan: pans[pane.orientation],
-              flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
-              invert,
-              rect: scaleRect(pane.rect, dpr),
-            },
-      );
+      const views = this.composePaneViews();
+      if (!views) return;
+      this.pendingViews = views;
       this.scheduleFrame();
     });
 
@@ -936,6 +913,67 @@ export class Viewer {
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.cineHandle !== null) clearInterval(this.cineHandle);
     });
+  }
+
+  /**
+   * Build the pane views to draw from the current state, in device pixels — the
+   * single source the render effect and the rotation capture both submit to the
+   * renderer. Reading every signal here (not in the effect body) keeps the
+   * effect's dependency tracking intact while letting the capture loop re-derive
+   * a frame synchronously after nudging the camera. Returns null until the GPU
+   * and a volume are ready.
+   */
+  private composePaneViews(): PaneView[] | null {
+    const renderer = this.renderer();
+    const volume = this.volume();
+    const panes = this.panes();
+    const { dpr } = this.viewport();
+    const indices = this.sliceIndices();
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const camera = this.camera3d();
+    const projectionMode = this.projectionMode();
+    const transferFunction = this.transferFunction();
+    const clipToPlanes = this.clipToPlanes();
+    const slabThicknessMm = this.slabThicknessMm();
+    const windowCenter = this.windowCenter();
+    const windowWidth = this.windowWidth();
+    const sagittalFlipped = this.sagittalFlipped();
+    const invert = this.invert();
+    // The MIP renders at reduced quality while it's being orbited, zoomed, or
+    // window/levelled, then at full quality once interaction settles.
+    const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
+    if (!renderer || !volume) return null;
+
+    return panes.map((pane) =>
+      pane.kind === 'mip'
+        ? {
+            kind: 'mip',
+            windowCenter,
+            windowWidth,
+            camera,
+            projectionMode,
+            transferFunction,
+            clipToPlanes,
+            sliceIndices: indices,
+            slabThicknessMm,
+            interactive: mipInteractive,
+            invert,
+            rect: scaleRect(pane.rect, dpr),
+          }
+        : {
+            kind: 'mpr',
+            orientation: pane.orientation,
+            sliceIndex: indices[pane.orientation],
+            windowCenter,
+            windowWidth,
+            zoom: zooms[pane.orientation],
+            pan: pans[pane.orientation],
+            flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
+            invert,
+            rect: scaleRect(pane.rect, dpr),
+          },
+    );
   }
 
   /** Submit the latest computed views on the next frame, coalescing rapid updates. */
@@ -1097,6 +1135,107 @@ export class Viewer {
   /** Open/close the keyboard-shortcut help overlay. */
   protected toggleHelp(): void {
     this.helpOpen.update((open) => !open);
+  }
+
+  /**
+   * Save a PNG of the active pane (the hovered one, else the first/main pane).
+   * The canvas is re-rendered and the pane's device-pixel region snapshotted in
+   * the same frame — before the next `getCurrentTexture()` recycles the WebGPU
+   * drawing buffer — then cropped onto a 2-D canvas and downloaded.
+   */
+  protected captureScreenshot(): void {
+    const renderer = this.renderer();
+    if (!renderer || !this.isReady()) return;
+    const pane = this.captureTargetPane();
+    if (!pane) return;
+    const views = this.composePaneViews();
+    if (!views) return;
+    const canvas = this.canvasRef().nativeElement;
+    const rect = scaleRect(pane.rect, this.viewport().dpr);
+    const filename = this.captureName(this.paneViewTag(pane), 'png');
+
+    requestAnimationFrame(() => {
+      renderer.renderPanes(views);
+      const region = cropCanvas(canvas, rect);
+      if (!region) return;
+      region.toBlob((blob) => {
+        if (blob) downloadBlob(blob, filename);
+      }, 'image/png');
+    });
+  }
+
+  /**
+   * Record a 360° spin of the 3D pane to a WebM clip. A MediaRecorder samples
+   * the canvas via {@link HTMLCanvasElement.captureStream} while the orbit camera
+   * steps through one full revolution ({@link rotationAzimuths}); each step is
+   * rendered synchronously so the captured frames track the spin. The camera is
+   * restored and the clip downloaded when recording stops. No-op (and the control
+   * is hidden) unless a 3D pane is shown and the browser supports WebM recording.
+   */
+  protected captureRotation(): void {
+    const renderer = this.renderer();
+    const mimeType = this.recordingMimeType;
+    if (!renderer || !mimeType || !this.canRecordRotation() || this.recordingRotation()) return;
+
+    const canvas = this.canvasRef().nativeElement;
+    const stream = canvas.captureStream(ROTATION_FPS);
+    const recorder = new MediaRecorder(stream, { mimeType });
+    const chunks: Blob[] = [];
+    const filename = this.captureName('rotation', 'webm');
+    const startAzimuth = this.camera3d().azimuth;
+    const azimuths = rotationAzimuths(startAzimuth, ROTATION_FRAMES);
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+      this.camera3d.update((camera) => ({ ...camera, azimuth: startAzimuth }));
+      this.recordingRotation.set(false);
+      if (chunks.length > 0) downloadBlob(new Blob(chunks, { type: mimeType }), filename);
+    };
+
+    this.recordingRotation.set(true);
+    recorder.start();
+
+    let frame = 0;
+    const step = () => {
+      if (frame >= azimuths.length) {
+        recorder.stop();
+        return;
+      }
+      this.camera3d.update((camera) => ({ ...camera, azimuth: azimuths[frame] }));
+      const views = this.composePaneViews();
+      if (views) {
+        this.pendingViews = views;
+        renderer.renderPanes(views);
+      }
+      frame++;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** The pane an export targets: the hovered pane, else the first (main) pane. */
+  private captureTargetPane(): PanePlacement | null {
+    const panes = this.panes();
+    const hovered = this.hoveredKey();
+    if (hovered) {
+      const found = panes.find((pane) => this.paneKey(pane) === hovered);
+      if (found) return found;
+    }
+    return panes[0] ?? null;
+  }
+
+  /** A short view tag for a capture filename: an orientation name, or `3d`. */
+  private paneViewTag(pane: PanePlacement): string {
+    return pane.kind === 'mip' ? '3d' : this.orientationName(pane.orientation).toLowerCase();
+  }
+
+  /** A download filename from the displayed series, a view tag, and the time. */
+  private captureName(view: string, extension: string): string {
+    const series = this.seriesList().find((s) => s.uid === this.selectedSeriesUid());
+    return captureFilename(series ?? null, view, extension, timestampSlug(new Date()));
   }
 
   /**
@@ -2061,6 +2200,36 @@ function placementAt(panes: readonly PanePlacement[], x: number, y: number): Pan
     if (withinRect(pane.rect, x, y)) return pane;
   }
   return null;
+}
+
+/**
+ * Copy a device-pixel region of the canvas onto a fresh 2-D canvas, for export.
+ * Drawing the WebGPU canvas through `drawImage` reads its current contents, so
+ * this must run in the same frame the region was rendered. Returns null for a
+ * degenerate (sub-pixel) rect or when a 2-D context can't be obtained.
+ */
+function cropCanvas(source: HTMLCanvasElement, rect: PaneRect): HTMLCanvasElement | null {
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  if (width < 1 || height < 1) return null;
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(source, Math.round(rect.x), Math.round(rect.y), width, height, 0, 0, width, height);
+  return out;
+}
+
+/** Trigger a browser download of a blob under the given filename. */
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  // Revoke after the click has been dispatched so the download isn't cancelled.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /** Whether a drag event carries files (vs. dragged text/elements within the page). */

@@ -133,6 +133,27 @@
     </label>
   </span>
 
+  <button
+    type="button"
+    (click)="captureScreenshot()"
+    [disabled]="!isReady() || recordingRotation()"
+    title="Save a PNG of the active (hovered or main) pane"
+  >
+    Screenshot ▣
+  </button>
+
+  @if (canRecordRotation() || recordingRotation()) {
+    <button
+      type="button"
+      (click)="captureRotation()"
+      [disabled]="!canRecordRotation() || recordingRotation()"
+      [class.active]="recordingRotation()"
+      title="Record a 360° spin of the 3D view to a WebM clip"
+    >
+      {{ recordingRotation() ? '● Recording…' : 'Spin ⟳' }}
+    </button>
+  }
+
   <span
     class="measure-palette"
     title="Measurement tools — click an MPR pane to place points; Esc cancels"
