@@ -43,6 +43,7 @@ import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
+import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
@@ -202,6 +203,7 @@ const MIP_SETTLE_MS = 200;
     '(window:keydown.f)': 'onFlipKey($event)',
     '(window:keydown.c)': 'onCrosshairKey($event)',
     '(window:keydown.l)': 'onLayoutKey($event)',
+    '(window:keydown.i)': 'onInfoKey($event)',
   },
 })
 export class Viewer {
@@ -301,6 +303,24 @@ export class Viewer {
   });
   /** Only show the picker when a folder held more than one series. */
   protected readonly hasMultipleSeries = computed(() => this.seriesList().length > 1);
+
+  /** Whether the metadata / tag inspector panel is open. */
+  protected readonly infoPanelOpen = signal(false);
+  /** Case-insensitive filter typed into the raw-tag search box. */
+  protected readonly rawTagFilter = signal('');
+
+  /** Captured metadata of the displayed series, or null when none is loaded. */
+  protected readonly metadata = computed<DicomMetadata | null>(() => {
+    const uid = this.selectedSeriesUid();
+    return this.seriesList().find((series) => series.uid === uid)?.metadata ?? null;
+  });
+
+  /** Raw tags of the displayed series, narrowed by the search box. */
+  protected readonly filteredRawTags = computed<readonly RawTag[]>(() => {
+    const metadata = this.metadata();
+    if (!metadata) return [];
+    return filterRawTags(metadata.rawTags, this.rawTagFilter());
+  });
 
   /** The selected viewport layout; defaults to the classic 3-pane MPR (1+2) view. */
   protected readonly layoutMode = signal<LayoutMode>(LayoutMode.TriMpr);
@@ -675,6 +695,21 @@ export class Viewer {
     if (event.target instanceof HTMLInputElement || !this.isReady()) return;
     event.preventDefault();
     this.toggleCrosshairs();
+  }
+
+  /** Open/close the metadata & raw-tag inspector panel. */
+  protected toggleInfoPanel(): void {
+    this.infoPanelOpen.update((open) => !open);
+  }
+
+  protected onInfoKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
+    event.preventDefault();
+    this.toggleInfoPanel();
+  }
+
+  protected onRawTagFilterInput(event: Event): void {
+    if (event.target instanceof HTMLInputElement) this.rawTagFilter.set(event.target.value);
   }
 
   /**
@@ -1277,6 +1312,22 @@ export function loadingText(loaded: number, total: number): string {
   if (total <= 0) return 'Loading…';
   const percent = Math.round((loaded / total) * 100);
   return `Loading… ${loaded} / ${total} files (${percent}%)`;
+}
+
+/**
+ * Narrow the raw-tag list to those matching a case-insensitive query against the
+ * tag id, VR, or value. An empty/blank query returns the list unchanged.
+ * Exported for direct unit testing of the search behaviour.
+ */
+export function filterRawTags(tags: readonly RawTag[], query: string): readonly RawTag[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return tags;
+  return tags.filter(
+    (tag) =>
+      tag.tag.toLowerCase().includes(q) ||
+      (tag.vr !== null && tag.vr.toLowerCase().includes(q)) ||
+      tag.value.toLowerCase().includes(q),
+  );
 }
 
 function intValue(event: Event): number {

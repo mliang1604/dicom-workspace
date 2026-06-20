@@ -77,6 +77,16 @@
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
   </button>
 
+  <button
+    type="button"
+    (click)="toggleInfoPanel()"
+    [disabled]="!isReady() || !metadata()"
+    [class.active]="infoPanelOpen()"
+    title="Show DICOM metadata and a searchable raw-tag inspector (I)"
+  >
+    Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
+  </button>
+
   <span class="spacer">
     @if (isReady()) {
       <span class="hint"
@@ -272,6 +282,63 @@
       }
       <circle class="axis-hub" [attr.cx]="axes.center" [attr.cy]="axes.center" r="2" />
     </svg>
+  }
+
+  <!-- Metadata & raw-tag inspector. A pure read-only overlay; never touches rendering. -->
+  @if (isReady() && infoPanelOpen() && metadata(); as meta) {
+    <aside class="info-panel" aria-label="DICOM metadata">
+      <header class="info-header">
+        <strong>Metadata</strong>
+        <button
+          type="button"
+          class="info-close"
+          (click)="toggleInfoPanel()"
+          title="Close (I)"
+          aria-label="Close metadata panel"
+        >
+          ✕
+        </button>
+      </header>
+
+      <div class="info-body">
+        @for (group of meta.curated; track group.title) {
+          <section class="info-group">
+            <h3>{{ group.title }}</h3>
+            <dl>
+              @for (field of group.fields; track field.label) {
+                <div class="info-row">
+                  <dt>{{ field.label }}</dt>
+                  <dd>{{ field.value }}</dd>
+                </div>
+              }
+            </dl>
+          </section>
+        }
+
+        <section class="info-group">
+          <h3>Raw tags</h3>
+          <input
+            type="search"
+            class="info-search"
+            placeholder="Filter by tag, VR, or value…"
+            [value]="rawTagFilter()"
+            (input)="onRawTagFilterInput($event)"
+            aria-label="Filter raw tags"
+          />
+          <ul class="raw-tags">
+            @for (tag of filteredRawTags(); track tag.tag) {
+              <li class="raw-tag">
+                <code class="raw-tag-id">{{ tag.tag }}</code>
+                <span class="raw-tag-vr">{{ tag.vr ?? '—' }}</span>
+                <span class="raw-tag-value">{{ tag.value }}</span>
+              </li>
+            } @empty {
+              <li class="raw-tag-empty">No tags match “{{ rawTagFilter() }}”.</li>
+            }
+          </ul>
+        </section>
+      </div>
+    </aside>
   }
 
   @if (isReady() && interpolationWarning(); as warning) {

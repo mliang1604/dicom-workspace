@@ -1,3 +1,5 @@
+import type { DicomMetadata } from './metadata';
+
 /** A single parsed DICOM slice, with the bits we need to build a volume. */
 export interface Slice {
   /** Source file name, for diagnostics. */
@@ -30,6 +32,12 @@ export interface Slice {
   readonly windowWidth: number | null;
   /** Rescaled pixel values for this slice (rows * columns), row-major. */
   readonly pixels: Float32Array;
+  /**
+   * Captured study/series/patient metadata and the raw-tag list for the info
+   * panel. Present only on a file's first frame (the series-representative image);
+   * null on the others to avoid carrying the tag list on every slice.
+   */
+  readonly metadata?: DicomMetadata | null;
 }
 
 /**

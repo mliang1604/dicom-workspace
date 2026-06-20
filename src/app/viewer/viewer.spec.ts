@@ -1,4 +1,5 @@
-import { loadingText, missingSliceWarning } from './viewer';
+import { filterRawTags, loadingText, missingSliceWarning } from './viewer';
+import type { RawTag } from '../../dicom/metadata';
 
 describe('loadingText', () => {
   it('falls back to an indeterminate label before the file count is known', () => {
@@ -39,5 +40,33 @@ describe('missingSliceWarning', () => {
 
     expect(warning).toContain('1 missing slice ');
     expect(warning).not.toContain('slices');
+  });
+});
+
+describe('filterRawTags', () => {
+  const tags: RawTag[] = [
+    { tag: '(0010,0010)', vr: 'PN', value: 'Doe, John' },
+    { tag: '(0008,0060)', vr: 'CS', value: 'CT' },
+    { tag: '(0028,0010)', vr: 'US', value: '512' },
+  ];
+
+  it('returns every tag for a blank query', () => {
+    expect(filterRawTags(tags, '   ')).toBe(tags);
+  });
+
+  it('matches on the tag id', () => {
+    expect(filterRawTags(tags, '0010,0010').map((t) => t.tag)).toEqual(['(0010,0010)']);
+  });
+
+  it('matches on the VR, case-insensitively', () => {
+    expect(filterRawTags(tags, 'cs').map((t) => t.tag)).toEqual(['(0008,0060)']);
+  });
+
+  it('matches on the value', () => {
+    expect(filterRawTags(tags, 'doe').map((t) => t.tag)).toEqual(['(0010,0010)']);
+  });
+
+  it('returns nothing when there is no match', () => {
+    expect(filterRawTags(tags, 'zzz')).toEqual([]);
   });
 });

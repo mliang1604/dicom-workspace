@@ -1,3 +1,4 @@
+import type { DicomMetadata } from './metadata';
 import type { Slice } from './types';
 
 /**
@@ -18,6 +19,8 @@ export interface Series {
   readonly imageCount: number;
   /** Representative in-plane dimensions [columns, rows] of the first slice. */
   readonly dims: readonly [number, number];
+  /** Captured DICOM metadata of the first slice, for the info panel; null if absent. */
+  readonly metadata: DicomMetadata | null;
   /** The slices, in the order encountered; {@link buildVolume} re-sorts them. */
   readonly slices: Slice[];
 }
@@ -50,6 +53,7 @@ export function groupSeries(slices: readonly Slice[]): Series[] {
       modality: first.modality,
       imageCount: group.length,
       dims: [first.columns, first.rows],
+      metadata: first.metadata ?? null,
       slices: group,
     });
   }

@@ -12,6 +12,7 @@ import {
   type StoredFrame,
   ybrFullToRgb,
 } from './photometric';
+import { extractMetadata } from './metadata';
 import type { Slice } from './types';
 
 /** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
@@ -213,9 +214,14 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
   return { ctx, frames };
 }
 
-/** Assemble the decoded raw frames into one Slice per frame. */
+/**
+ * Assemble the decoded raw frames into one Slice per frame, capturing the file's
+ * DICOM metadata onto the first frame (the series-representative image).
+ */
 function assemble(ctx: FileContext, frames: number, raw: FramePixels[]): Slice[] {
-  return frames > 1 ? parseMultiframe(ctx, frames, raw) : [parseSingleFrame(ctx, raw[0])];
+  const metadata = extractMetadata(ctx.dataSet);
+  const slices = frames > 1 ? parseMultiframe(ctx, frames, raw) : [parseSingleFrame(ctx, raw[0])];
+  return slices.map((slice, f) => (f === 0 ? { ...slice, metadata } : slice));
 }
 
 /** A frame's modality LUT and suggested display window, before photometric folding. */
