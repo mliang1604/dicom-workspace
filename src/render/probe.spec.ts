@@ -158,6 +158,57 @@ describe('probeVoxel', () => {
     expect(naive?.voxel).not.toEqual([2, 2, 4]);
   });
 
+  it('samples the oblique plane when a rotation is supplied', () => {
+    const volume = makeVolume([4, 4, 4]);
+
+    // Without a tilt the axial pane centre is the centre voxel.
+    const ortho = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 50, 50);
+    expect(ortho?.voxel).toEqual([2, 2, 2]);
+
+    // A 90° yaw turns the axial pane into a sagittal-like cut: the pane centre
+    // still samples the centre voxel, but moving across u now walks +z, so the
+    // left/right edges sample the slice-axis extremes rather than the columns.
+    const rotation = { tiltU: 0, tiltV: Math.PI / 2 };
+    const tiltedCentre = probeVoxel(
+      volume,
+      Orientation.Axial,
+      2,
+      1,
+      SQUARE,
+      50,
+      50,
+      false,
+      undefined,
+      rotation,
+    );
+    expect(tiltedCentre?.voxel).toEqual([2, 2, 2]);
+    const tiltedLeft = probeVoxel(
+      volume,
+      Orientation.Axial,
+      2,
+      1,
+      SQUARE,
+      1,
+      50,
+      false,
+      undefined,
+      rotation,
+    );
+    const tiltedRight = probeVoxel(
+      volume,
+      Orientation.Axial,
+      2,
+      1,
+      SQUARE,
+      99,
+      50,
+      false,
+      undefined,
+      rotation,
+    );
+    expect(tiltedLeft?.voxel[2]).not.toBe(tiltedRight?.voxel[2]); // u now walks z
+  });
+
   it('recovers the raw stored value through the modality LUT', () => {
     const volume = makeVolume([4, 4, 4], 2, -1024);
 

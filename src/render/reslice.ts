@@ -44,6 +44,30 @@ interface PlaneBasis {
 }
 
 /**
+ * An oblique tilt of a pane's plane away from its orthogonal anatomical default,
+ * as two rotations applied about the plane's *own* in-plane axes (so the tilt is
+ * intrinsic to the pane and survives pan/zoom/scroll):
+ *   - `tiltU` (radians) rotates about the in-plane horizontal axis (u) — a
+ *     pitch that swings the plane's top/bottom out of plane (single oblique);
+ *   - `tiltV` (radians) rotates about the in-plane vertical axis (v) — a yaw
+ *     that swings its left/right out of plane (the second, double-oblique, axis).
+ * `{ tiltU: 0, tiltV: 0 }` (see {@link NO_OBLIQUE}) is the orthogonal default and
+ * reproduces the axis-aligned views exactly.
+ */
+export interface ObliqueRotation {
+  readonly tiltU: number;
+  readonly tiltV: number;
+}
+
+/** The orthogonal (untilted) default: both oblique angles zero. */
+export const NO_OBLIQUE: ObliqueRotation = { tiltU: 0, tiltV: 0 };
+
+/** Whether a rotation actually tilts the plane (a non-zero angle on either axis). */
+export function isOblique(rotation: ObliqueRotation | undefined): rotation is ObliqueRotation {
+  return !!rotation && (rotation.tiltU !== 0 || rotation.tiltV !== 0);
+}
+
+/**
  * The volume's geometry, or an axis-aligned identity derived from its spacing
  * when none is recorded. The identity reproduces the legacy behaviour of
  * treating the acquisition axes as the patient axes.
@@ -54,11 +78,23 @@ export function resolveGeometry(volume: Volume): VolumeGeometry {
   return { iStep: [sx, 0, 0], jStep: [0, sy, 0], kStep: [0, 0, sz], origin: [0, 0, 0] };
 }
 
-/** Affine plane→texture map for one orientation, shared by shader and probe. */
-export function planeToTex(volume: Volume, orientation: Orientation): PlaneToTex {
+/**
+ * Affine plane→texture map for one orientation, shared by shader and probe.
+ *
+ * Pass an {@link ObliqueRotation} to tilt the plane off its anatomical default;
+ * omitting it (or passing {@link NO_OBLIQUE}) reproduces the orthogonal view. The
+ * tilt rotates the plane's in-plane and through-plane axes about the volume
+ * centre, so the same physical field of view and slice spacing are preserved —
+ * only the plane's orientation changes.
+ */
+export function planeToTex(
+  volume: Volume,
+  orientation: Orientation,
+  rotation?: ObliqueRotation,
+): PlaneToTex {
   const geom = resolveGeometry(volume);
   const dims = volume.dims;
-  const basis = planeBasis(orientation, patientBounds(geom, dims));
+  const basis = obliqueBasis(planeBasis(orientation, patientBounds(geom, dims)), rotation);
 
   const dU = perTexel(invMul(geom, basis.axisU), dims);
   const dV = perTexel(invMul(geom, basis.axisV), dims);
@@ -102,8 +138,12 @@ export function planeCoordsAt(map: PlaneToTex, coord: Vec3): PlaneCoords {
 }
 
 /** Column-major 4×4 of {@link planeToTex} for upload to the shader uniform. */
-export function planeToTexMatrix(volume: Volume, orientation: Orientation): Float32Array {
-  const { dU, dV, dS, origin } = planeToTex(volume, orientation);
+export function planeToTexMatrix(
+  volume: Volume,
+  orientation: Orientation,
+  rotation?: ObliqueRotation,
+): Float32Array {
+  const { dU, dV, dS, origin } = planeToTex(volume, orientation, rotation);
   // texcoord = (M · vec4(u, v, slicePos, 1)).xyz, with M's columns being the
   // three deltas and the origin. WGSL reads mat4x4 column-major.
   // prettier-ignore
@@ -113,6 +153,122 @@ export function planeToTexMatrix(volume: Volume, orientation: Orientation): Floa
     dS[0], dS[1], dS[2], 0,
     origin[0], origin[1], origin[2], 1,
   ]);
+}
+
+/** A pane's displayed plane: its orientation, slice, and optional oblique tilt. */
+export interface ObliquePlane {
+  readonly orientation: Orientation;
+  readonly sliceIndex: number;
+  /** Oblique tilt; omitted/{@link NO_OBLIQUE} is the orthogonal plane. */
+  readonly rotation?: ObliqueRotation;
+}
+
+/**
+ * A line in a pane's normalised in-plane coordinates, as the implicit equation
+ * `a·u + b·v + c = 0` (u along the plane's pre-flip horizontal axis, v top→bottom,
+ * both in [0, 1]). This is the reference line {@link referenceLine} produces and
+ * {@link clipLineToUnitSquare} trims to the displayed square.
+ */
+export interface PlaneLine {
+  readonly a: number;
+  readonly b: number;
+  readonly c: number;
+}
+
+/** A pane's current plane frame in patient space (LPS, mm). */
+interface PlaneFrame {
+  /** Patient point at u=v=0 on the displayed slice. */
+  readonly base: Vec3;
+  /** Unit in-plane horizontal axis; `lengthU` mm spans u∈[0,1]. */
+  readonly uHat: Vec3;
+  readonly lengthU: number;
+  /** Unit in-plane vertical axis; `lengthV` mm spans v∈[0,1]. */
+  readonly vHat: Vec3;
+  readonly lengthV: number;
+  /** Unit plane normal (the through-plane direction). */
+  readonly normal: Vec3;
+}
+
+/** The patient-space frame of a pane's currently displayed (possibly oblique) slice. */
+function planeFrame(volume: Volume, plane: ObliquePlane): PlaneFrame {
+  const geom = resolveGeometry(volume);
+  const basis = obliqueBasis(
+    planeBasis(plane.orientation, patientBounds(geom, volume.dims)),
+    plane.rotation,
+  );
+  const count = sliceCountFor(volume, plane.orientation);
+  const slicePos = count > 1 ? (plane.sliceIndex + 0.5) / count : 0.5;
+  return {
+    base: add(basis.origin, scale(basis.axisS, slicePos)),
+    uHat: normalize(basis.axisU),
+    lengthU: length(basis.axisU),
+    vHat: normalize(basis.axisV),
+    lengthV: length(basis.axisV),
+    normal: normalize(basis.axisS),
+  };
+}
+
+/**
+ * Where plane `other` cuts across pane `into`, as a {@link PlaneLine} in `into`'s
+ * normalised in-plane coordinates — the reference line a viewer draws on `into`
+ * to show (and let the user adjust) the oblique angle of `other`. Both planes may
+ * themselves be oblique. Returns `null` when the planes are parallel (no visible
+ * crossing) — including the degenerate case of a plane against itself.
+ *
+ * Derivation: a point on `into`'s slice is `base + u'·uHat + v'·vHat` (u', v' in
+ * mm); it also lies on `other`'s plane when `dot(normalₒ, point − baseₒ) = 0`.
+ * That constraint is linear in (u', v'); rescaling u'=u·lengthU, v'=v·lengthV to
+ * the [0,1] pane axes gives the implicit line returned here.
+ */
+export function referenceLine(
+  volume: Volume,
+  into: ObliquePlane,
+  other: ObliquePlane,
+): PlaneLine | null {
+  const fa = planeFrame(volume, into);
+  const fb = planeFrame(volume, other);
+  const a = dot(fb.normal, fa.uHat) * fa.lengthU;
+  const b = dot(fb.normal, fa.vHat) * fa.lengthV;
+  const c = dot(fb.normal, sub(fa.base, fb.base));
+  if (Math.abs(a) < 1e-9 && Math.abs(b) < 1e-9) return null; // parallel planes
+  return { a, b, c };
+}
+
+/**
+ * The two endpoints where a {@link PlaneLine} crosses the unit square [0,1]², in
+ * pane (u, v) coordinates, or `null` when the line misses the square. Used to
+ * draw a reference line as a segment spanning the pane.
+ */
+export function clipLineToUnitSquare(
+  line: PlaneLine,
+): readonly [PlaneCoords2D, PlaneCoords2D] | null {
+  const { a, b, c } = line;
+  const hits: PlaneCoords2D[] = [];
+  const push = (u: number, v: number): void => {
+    if (u < -1e-9 || u > 1 + 1e-9 || v < -1e-9 || v > 1 + 1e-9) return;
+    const cu = Math.min(1, Math.max(0, u));
+    const cv = Math.min(1, Math.max(0, v));
+    if (!hits.some((p) => Math.abs(p.u - cu) < 1e-6 && Math.abs(p.v - cv) < 1e-6)) {
+      hits.push({ u: cu, v: cv });
+    }
+  };
+  // Crossings with the v=0 and v=1 edges (solve for u), then the u=0/u=1 edges.
+  if (Math.abs(a) > 1e-12) {
+    push(-c / a, 0);
+    push(-(b + c) / a, 1);
+  }
+  if (Math.abs(b) > 1e-12) {
+    push(0, -c / b);
+    push(1, -(a + c) / b);
+  }
+  if (hits.length < 2) return null;
+  return [hits[0], hits[1]];
+}
+
+/** An in-plane point in normalised pane coordinates, both components in [0,1]. */
+export interface PlaneCoords2D {
+  readonly u: number;
+  readonly v: number;
 }
 
 /** The volume's patient-space (LPS) bounding box, plus its centre and radius. */
@@ -518,6 +674,44 @@ function planeBasis(orientation: Orientation, bounds: Bounds): PlaneBasis {
       return exhaustive;
     }
   }
+}
+
+/**
+ * Tilt a plane basis off its orthogonal default by an {@link ObliqueRotation},
+ * pivoting about the plane's centre so the slice rotates in place.
+ *
+ * The two angles rotate the basis about its own (orthonormal) in-plane axes —
+ * `tiltU` about `axisU`, `tiltV` about `axisV` — preserving each axis's length,
+ * so the field of view and the through-plane spacing are unchanged and only the
+ * plane's orientation tilts. The centre (`origin + ½(axisU+axisV+axisS)`, the
+ * volume centre for every orthogonal basis) is held fixed, and the origin is
+ * re-derived from the rotated axes. A zero/absent rotation returns the basis
+ * untouched, so the orthogonal path is bit-for-bit unchanged.
+ */
+function obliqueBasis(basis: PlaneBasis, rotation: ObliqueRotation | undefined): PlaneBasis {
+  if (!isOblique(rotation)) return basis;
+  const uHat = normalize(basis.axisU);
+  const vHat = normalize(basis.axisV);
+  const sHat = normalize(basis.axisS);
+  // Rotate the orthonormal frame about its own u then v axis. Both pivots are the
+  // original axes, so the composition is a single rigid rotation of the frame.
+  const rot = (v: Vec3): Vec3 =>
+    rotateAbout(rotateAbout(v, uHat, rotation.tiltU), vHat, rotation.tiltV);
+  const axisU = scale(rot(uHat), length(basis.axisU));
+  const axisV = scale(rot(vHat), length(basis.axisV));
+  const axisS = scale(rot(sHat), length(basis.axisS));
+  const center = add(basis.origin, scale(add(add(basis.axisU, basis.axisV), basis.axisS), 0.5));
+  const origin = sub(center, scale(add(add(axisU, axisV), axisS), 0.5));
+  return { origin, axisU, axisV, axisS };
+}
+
+/** Rotate `v` about unit axis `k` by `angle` (radians) via Rodrigues' formula. */
+function rotateAbout(v: Vec3, k: Vec3, angle: number): Vec3 {
+  if (angle === 0) return v;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  // v·c + (k×v)·s + k·(k·v)·(1−c), with k a unit vector.
+  return add(add(scale(v, c), scale(cross(k, v), s)), scale(k, dot(k, v) * (1 - c)));
 }
 
 /** Multiply the inverse of the geometry's 3×3 linear map by a patient vector. */

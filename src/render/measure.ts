@@ -1,6 +1,13 @@
 import { Orientation, type Volume } from '../dicom/types';
 import type { PlanePoint } from './pane-coords';
-import { planeExtentMm, planePixelDims, planeToTex, sliceCountFor, texCoordAt } from './reslice';
+import {
+  planeExtentMm,
+  planePixelDims,
+  planeToTex,
+  sliceCountFor,
+  texCoordAt,
+  type ObliqueRotation,
+} from './reslice';
 
 /**
  * Pure measurement maths for the MPR overlays: physical length, angle, and
@@ -179,6 +186,7 @@ export function roiStats(
   shape: RoiShape,
   a: PlanePoint,
   b: PlanePoint,
+  rotation?: ObliqueRotation,
 ): RoiResult {
   const [widthMm, heightMm] = planeExtentMm(volume, orientation);
   const bounds = roiBounds(a, b);
@@ -187,7 +195,7 @@ export function roiStats(
   const [nu, nv] = planePixelDims(volume, orientation);
   const count = sliceCountFor(volume, orientation);
   const slicePos = count > 1 ? (sliceIndex + 0.5) / count : 0.5;
-  const map = planeToTex(volume, orientation);
+  const map = planeToTex(volume, orientation, rotation);
   const [dimX, dimY, dimZ] = volume.dims;
 
   // Restrict the scan to the ROI's bounding-box pixels of the slice grid.

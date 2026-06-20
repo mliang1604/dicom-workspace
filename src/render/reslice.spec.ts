@@ -1,13 +1,18 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
 import { dot, sub } from '../dicom/vec3';
 import {
+  clipLineToUnitSquare,
   clipPlaneTex,
   clipTRange,
+  isOblique,
+  NO_OBLIQUE,
   orientTowardRay,
+  planeCoordsAt,
   planeExtentMm,
   planePixelDims,
   planeToTex,
   patientToTexMatrix,
+  referenceLine,
   slabTRange,
   sliceClipPlaneTex,
   sliceCountFor,
@@ -15,6 +20,7 @@ import {
   texCoordAt,
   viewClipHalfSpaces,
   type HalfSpace,
+  type ObliqueRotation,
   type PatientPlane,
   type VolumeBounds,
 } from './reslice';
@@ -76,6 +82,116 @@ describe('planeToTex', () => {
     // higher slice maps to a lower row coordinate.
     expectVec(texCoordAt(axial, 0.5, 0.5, 0), [0.5, 1, 0.5]);
     expectVec(texCoordAt(axial, 0.5, 0.5, 1), [0.5, 0, 0.5]);
+  });
+});
+
+describe('planeToTex oblique rotation', () => {
+  const volume = makeVolume([4, 4, 4]); // identity geom: tex = (index + 0.5) / 4
+
+  it('is a no-op for a zero/absent rotation', () => {
+    const base = planeToTex(volume, Orientation.Axial);
+    const zero = planeToTex(volume, Orientation.Axial, NO_OBLIQUE);
+    expectVec(zero.dU, base.dU);
+    expectVec(zero.dV, base.dV);
+    expectVec(zero.dS, base.dS);
+    expectVec(zero.origin, base.origin);
+    expect(isOblique(NO_OBLIQUE)).toBe(false);
+    expect(isOblique({ tiltU: 0.1, tiltV: 0 })).toBe(true);
+  });
+
+  it('yaws the axial plane about its vertical axis (single oblique)', () => {
+    // tiltV = +90° about v (patient +y) swings u from +x onto −z and the slice
+    // axis from +z onto +x: the axial pane becomes a sagittal-like cut.
+    const map = planeToTex(volume, Orientation.Axial, { tiltU: 0, tiltV: Math.PI / 2 });
+    expectVec(map.dU, [0, 0, -1]); // u now walks −z in texture space
+    expectVec(map.dV, [0, 1, 0]); // v (the pivot) is unchanged
+    expectVec(map.dS, [1, 0, 0]); // the slice axis now walks +x
+    // The plane still pivots about the volume centre.
+    expectVec(texCoordAt(map, 0.5, 0.5, 0.5), [0.5, 0.5, 0.5]);
+  });
+
+  it('pitches the axial plane about its horizontal axis (double oblique)', () => {
+    // tiltU = +90° about u (patient +x) swings v and the slice axis; u is the pivot.
+    const map = planeToTex(volume, Orientation.Axial, { tiltU: Math.PI / 2, tiltV: 0 });
+    expectVec(map.dU, [1, 0, 0]); // u (the pivot) is unchanged
+    expectVec(map.dV, [0, 0, 1]); // v now walks +z
+    expectVec(map.dS, [0, -1, 0]); // the slice axis now walks −y
+    expectVec(texCoordAt(map, 0.5, 0.5, 0.5), [0.5, 0.5, 0.5]);
+  });
+
+  it('preserves in-plane spacing under an arbitrary tilt', () => {
+    // A small double-oblique tilt keeps the centre fixed and the physical step
+    // per unit u/v unchanged (the rotation is rigid), so spacing is preserved.
+    const rotation: ObliqueRotation = { tiltU: 0.3, tiltV: -0.4 };
+    const base = planeToTex(volume, Orientation.Axial);
+    const tilted = planeToTex(volume, Orientation.Axial, rotation);
+    const mmPerTex = 4; // identity geom, dims 4: one texel spans 4 mm here
+    const len = (v: readonly number[]): number => Math.hypot(v[0], v[1], v[2]) * mmPerTex;
+    expect(len(tilted.dU)).toBeCloseTo(len(base.dU), 6);
+    expect(len(tilted.dV)).toBeCloseTo(len(base.dV), 6);
+    // Centre stays put and the rotated axes stay orthonormal (dU ⟂ dV).
+    expectVec(texCoordAt(tilted, 0.5, 0.5, 0.5), [0.5, 0.5, 0.5]);
+    const cosUV =
+      tilted.dU[0] * tilted.dV[0] + tilted.dU[1] * tilted.dV[1] + tilted.dU[2] * tilted.dV[2];
+    expect(cosUV).toBeCloseTo(0, 6);
+  });
+
+  it('keeps the probe inverse consistent with the oblique forward map', () => {
+    const rotation: ObliqueRotation = { tiltU: 0.2, tiltV: 0.5 };
+    const map = planeToTex(volume, Orientation.Coronal, rotation);
+    const coord = texCoordAt(map, 0.3, 0.6, 0.4);
+    const back = planeCoordsAt(map, coord);
+    expect(back.u).toBeCloseTo(0.3, 6);
+    expect(back.v).toBeCloseTo(0.6, 6);
+    expect(back.slicePos).toBeCloseTo(0.4, 6);
+  });
+});
+
+describe('referenceLine / clipLineToUnitSquare', () => {
+  const volume = makeVolume([4, 4, 4]);
+
+  it('draws an orthogonal coronal cut as a horizontal line in the axial pane', () => {
+    // Coronal walks +y; on the axial pane (u=x, v=y) its plane is the line v = slicePos.
+    const line = referenceLine(
+      volume,
+      { orientation: Orientation.Axial, sliceIndex: 1 },
+      { orientation: Orientation.Coronal, sliceIndex: 2 },
+    );
+    expect(line).not.toBeNull();
+    // a·u + b·v + c = 0 with a = 0 → horizontal; solving gives v = (2 + 0.5) / 4.
+    expect(line!.a).toBeCloseTo(0, 6);
+    expect(-line!.c / line!.b).toBeCloseTo(0.625, 6);
+
+    const ends = clipLineToUnitSquare(line!);
+    expect(ends).not.toBeNull();
+    for (const p of ends!) expect(p.v).toBeCloseTo(0.625, 6);
+    expect(ends![0].u).toBeCloseTo(0, 6);
+    expect(ends![1].u).toBeCloseTo(1, 6);
+  });
+
+  it('returns null for parallel planes (a plane against itself)', () => {
+    const plane = { orientation: Orientation.Axial, sliceIndex: 1 };
+    expect(referenceLine(volume, plane, { ...plane, sliceIndex: 3 })).toBeNull();
+  });
+
+  it('tilts the reference line as the other plane goes oblique', () => {
+    // A coronal plane yawed about its vertical axis crosses the axial pane on a
+    // slanted (non-horizontal) line, so the drawn reference reflects the angle.
+    const line = referenceLine(
+      volume,
+      { orientation: Orientation.Axial, sliceIndex: 1 },
+      {
+        orientation: Orientation.Coronal,
+        sliceIndex: 1,
+        rotation: { tiltU: 0, tiltV: 0.4 },
+      },
+    );
+    expect(line).not.toBeNull();
+    expect(Math.abs(line!.a)).toBeGreaterThan(1e-3); // no longer purely horizontal
+  });
+
+  it('returns null when the line misses the displayed square', () => {
+    expect(clipLineToUnitSquare({ a: 0, b: 1, c: 5 })).toBeNull(); // v = -5, off-pane
   });
 });
 

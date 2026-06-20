@@ -316,6 +316,55 @@ button.active {
   opacity: 0.85;
 }
 
+/* Cross-pane reference lines: where another (oblique) plane crosses this pane. */
+.reference-line {
+  position: absolute;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.reference-line line {
+  stroke-width: 1.25;
+  opacity: 0.7;
+  stroke-dasharray: 6 4;
+}
+
+/* Oblique rotation knob drawn over an MPR pane; only the knob is pointer-active. */
+.oblique-gizmo {
+  position: absolute;
+  pointer-events: none;
+  overflow: visible;
+  opacity: 0.55;
+}
+
+.oblique-gizmo.active {
+  opacity: 0.9;
+}
+
+.oblique-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: 0.6;
+}
+
+.oblique-arm {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.oblique-knob {
+  fill: var(--accent);
+  stroke: #000;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.oblique-knob:hover {
+  fill: var(--text);
+}
+
 /* Interactive cut-plane gizmo drawn over the 3D pane, clipped to its rectangle. */
 .clip-plane-gizmo {
   position: absolute;
