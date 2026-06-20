@@ -1,5 +1,13 @@
-import { filterRawTags, loadingText, missingSliceWarning, nextCineIndex } from './viewer';
+import {
+  buildRoiLegend,
+  filterRawTags,
+  loadingText,
+  missingSliceWarning,
+  nextCineIndex,
+  roiKeyOf,
+} from './viewer';
 import type { RawTag } from '../../dicom/metadata';
+import type { Contour, Roi, StructureSet } from '../../dicom/types';
 
 describe('loadingText', () => {
   it('falls back to an indeterminate label before the file count is known', () => {
@@ -94,5 +102,125 @@ describe('filterRawTags', () => {
 
   it('returns nothing when there is no match', () => {
     expect(filterRawTags(tags, 'zzz')).toEqual([]);
+  });
+});
+
+describe('buildRoiLegend', () => {
+  const oneContour: Contour[] = [{ geometricType: 'CLOSED_PLANAR', points: [[0, 0, 0]] }];
+
+  const roi = (over: Partial<Roi>): Roi => ({
+    number: 1,
+    name: 'Heart',
+    color: [255, 0, 0],
+    interpretedType: 'ORGAN',
+    contours: oneContour,
+    ...over,
+  });
+
+  const set = (rois: Roi[], over: Partial<StructureSet> = {}): StructureSet => ({
+    name: 'ss.dcm',
+    label: 'Plan',
+    frameOfReferenceUid: 'for-1',
+    referencedSeriesUids: [],
+    rois,
+    ...over,
+  });
+
+  const noOverrides = new Map<string, string>();
+  const noOpacities = new Map<string, number>();
+
+  it('lists each ROI with its name, interpreted type and display colour', () => {
+    const legend = buildRoiLegend([set([roi({})])], new Set(), noOverrides, noOpacities, -1);
+
+    expect(legend).toHaveLength(1);
+    expect(legend[0]).toMatchObject({
+      key: '0:1',
+      setIndex: 0,
+      name: 'Heart',
+      type: 'ORGAN',
+      color: 'rgb(255, 0, 0)',
+      colorHex: '#ff0000',
+      opacityPercent: 100,
+      visible: true,
+    });
+  });
+
+  it('skips ROIs that carry no contours', () => {
+    const legend = buildRoiLegend(
+      [set([roi({ number: 2, contours: [] })])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+    );
+
+    expect(legend).toEqual([]);
+  });
+
+  it('falls back to a numbered name and uppercases the interpreted type', () => {
+    const legend = buildRoiLegend(
+      [set([roi({ number: 7, name: '', interpretedType: 'ptv' })])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+    );
+
+    expect(legend[0].name).toBe('ROI 7');
+    expect(legend[0].type).toBe('PTV');
+  });
+
+  it('reports a missing colour as a neutral grey', () => {
+    const legend = buildRoiLegend(
+      [set([roi({ color: null })])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+    );
+
+    expect(legend[0].color).toBe('rgb(200, 200, 200)');
+    expect(legend[0].colorHex).toBe('#c8c8c8');
+  });
+
+  it('marks hidden ROIs and applies colour and opacity overrides', () => {
+    const key = roiKeyOf(0, 1);
+    const legend = buildRoiLegend(
+      [set([roi({})])],
+      new Set([key]),
+      new Map([[key, '#00ff00']]),
+      new Map([[key, 0.4]]),
+      -1,
+    );
+
+    expect(legend[0].visible).toBe(false);
+    expect(legend[0].color).toBe('#00ff00');
+    expect(legend[0].colorHex).toBe('#00ff00');
+    expect(legend[0].opacityPercent).toBe(40);
+  });
+
+  it('qualifies the key by structure-set index so equal ROI numbers never collide', () => {
+    const legend = buildRoiLegend(
+      [set([roi({ number: 1 })]), set([roi({ number: 1, name: 'Liver' })])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+    );
+
+    expect(legend.map((e) => e.key)).toEqual(['0:1', '1:1']);
+  });
+
+  it('filters to a single structure set when one is selected', () => {
+    const legend = buildRoiLegend(
+      [set([roi({ number: 1 })]), set([roi({ number: 1, name: 'Liver' })])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      1,
+    );
+
+    expect(legend).toHaveLength(1);
+    expect(legend[0]).toMatchObject({ key: '1:1', name: 'Liver' });
   });
 });

@@ -415,33 +415,76 @@ button.active {
   pointer-events: none;
 }
 
-/* Structures legend: a compact list of ROI visibility toggles in the toolbar. */
-.roi-legend {
+/* Structures panel: per-ROI colour, type, visibility and opacity controls. */
+.roi-panel {
   flex-direction: column;
   align-items: stretch;
+  gap: 6px;
+}
+
+.roi-set-select {
+  width: 100%;
+}
+
+.roi-set-select select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The scrolling list of ROI rows; the master toggle sits above it. */
+.roi-legend {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   max-height: 220px;
   overflow-y: auto;
+}
+
+.roi-all {
+  font-weight: 600;
 }
 
 .roi-item {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.roi-color {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 2px;
+  background: none;
   cursor: pointer;
 }
 
-.roi-swatch {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 auto;
-  border-radius: 2px;
-  border: 1px solid rgba(0, 0, 0, 0.5);
-}
-
 .roi-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Interpreted type badge (ORGAN / PTV / GTV…). */
+.roi-type {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.7em;
+  letter-spacing: 0.02em;
+  background: rgba(255, 255, 255, 0.12);
+  opacity: 0.85;
+}
+
+.roi-opacity {
+  flex: 0 0 auto;
+  width: 64px;
+  cursor: pointer;
 }
 
 /* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
