@@ -14,6 +14,21 @@
   <button type="button" (click)="filesInput.click()">Open files…</button>
   <input #filesInput type="file" multiple hidden (change)="onFilesSelected($event)" />
 
+  @if (recent().length) {
+    <label
+      class="ctrl"
+      title="Re-open a recently loaded folder or file set — browsers can't silently re-read files, so this re-triggers the picker"
+    >
+      Recent
+      <select (change)="onRecentPick($event, folderInput, filesInput)">
+        <option value="" disabled selected>Recent…</option>
+        @for (entry of recent(); track $index; let i = $index) {
+          <option [value]="i">{{ entry.label }}</option>
+        }
+      </select>
+    </label>
+  }
+
   @if (hasMultipleSeries()) {
     <label class="ctrl" title="Choose which series in the folder to view">
       Series
@@ -159,7 +174,13 @@
   </label>
 </header>
 
-<main class="viewport">
+<main
+  class="viewport"
+  (dragenter)="onDragEnter($event)"
+  (dragover)="onDragOver($event)"
+  (dragleave)="onDragLeave($event)"
+  (drop)="onDrop($event)"
+>
   <canvas
     #canvas
     [class.grabbable]="isReady()"
@@ -268,5 +289,11 @@
 
   @if (probeText(); as probe) {
     <div class="probe">{{ probe }}</div>
+  }
+
+  @if (isDraggingFiles()) {
+    <div class="drop-overlay" role="status">
+      <div class="drop-message">Drop a DICOM folder or files to load</div>
+    </div>
   }
 </main>

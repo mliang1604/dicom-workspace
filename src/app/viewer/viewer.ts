@@ -45,6 +45,8 @@ import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
+import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
+import { readDropped } from './drop-files';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -204,6 +206,7 @@ const MIP_SETTLE_MS = 200;
 })
 export class Viewer {
   private readonly loader = inject(VolumeLoader);
+  private readonly recentStore = inject(RecentStore);
   private readonly destroyRef = inject(DestroyRef);
 
   private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
@@ -267,6 +270,10 @@ export class Viewer {
   protected readonly crosshairsEnabled = signal(true);
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
+  /** True while files are being dragged over the viewport, for the drop overlay. */
+  protected readonly isDraggingFiles = signal(false);
+  /** The recent loads, most recent first, surfaced for the toolbar re-pick list. */
+  protected readonly recent = this.recentStore.entries;
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
   private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
   protected readonly windowCenter = signal(0);
@@ -502,6 +509,12 @@ export class Viewer {
   private frameHandle: number | null = null;
   /** Handle of the MIP settle timeout, or null when not settling. */
   private settleHandle: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Nesting depth of drag-enter over the viewport's children. `dragenter`/
+   * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
+   * the drop overlay steady as the pointer crosses pane borders.
+   */
+  private dragDepth = 0;
 
   constructor() {
     afterNextRender(() => void this.initGpu());
@@ -752,7 +765,57 @@ export class Viewer {
     if (!(input instanceof HTMLInputElement) || !input.files) return;
     const files = Array.from(input.files);
     input.value = ''; // allow re-selecting the same folder
-    if (files.length > 0) await this.loadFiles(files);
+    if (files.length > 0) await this.loadFiles(files, describeSelection(files));
+  }
+
+  /**
+   * A file/folder drag entered the viewport: raise the drop overlay. The depth
+   * counter keeps it up while the pointer moves between child elements.
+   */
+  protected onDragEnter(event: DragEvent): void {
+    if (!hasFiles(event)) return;
+    this.dragDepth++;
+    this.isDraggingFiles.set(true);
+  }
+
+  /** Allow the drop and show the copy cursor while a file drag hovers the viewport. */
+  protected onDragOver(event: DragEvent): void {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  }
+
+  /** A drag left a child (or the viewport): lower the overlay once fully outside. */
+  protected onDragLeave(event: DragEvent): void {
+    if (!hasFiles(event)) return;
+    this.dragDepth = Math.max(0, this.dragDepth - 1);
+    if (this.dragDepth === 0) this.isDraggingFiles.set(false);
+  }
+
+  /** Load the dropped folder/files, walking dropped directories for their slices. */
+  protected async onDrop(event: DragEvent): Promise<void> {
+    event.preventDefault();
+    this.dragDepth = 0;
+    this.isDraggingFiles.set(false);
+    if (!event.dataTransfer) return;
+    const { files, entry } = await readDropped(event.dataTransfer);
+    if (files.length > 0) await this.loadFiles(files, entry);
+  }
+
+  /**
+   * Re-pick a recent entry. Browsers can't silently re-read a path, so this just
+   * re-opens the matching picker (folder or files) for the user to re-select.
+   */
+  protected onRecentPick(
+    event: Event,
+    folderInput: HTMLInputElement,
+    filesInput: HTMLInputElement,
+  ): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const entry = this.recent()[Number(event.target.value)];
+    event.target.selectedIndex = 0; // back to the "Recent…" placeholder so re-picking fires
+    if (!entry) return;
+    (entry.kind === 'folder' ? folderInput : filesInput).click();
   }
 
   /** Begin a click-drag over the pane under the pointer. */
@@ -1048,7 +1111,7 @@ export class Viewer {
     }
   }
 
-  private async loadFiles(files: readonly File[]): Promise<void> {
+  private async loadFiles(files: readonly File[], entry: RecentEntry | null): Promise<void> {
     this.load.set({ status: 'loading', loaded: 0, total: files.length });
     try {
       const result = await this.loader.loadFromFiles(files, (loaded, total) => {
@@ -1056,6 +1119,7 @@ export class Viewer {
         if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
       });
       this.applyVolume(result);
+      if (entry) this.recentStore.record(entry); // remember it once it loaded cleanly
     } catch (error) {
       this.load.set({ status: 'error', message: messageOf(error) });
     }
@@ -1159,6 +1223,12 @@ function placementAt(panes: readonly PanePlacement[], x: number, y: number): Pan
     if (withinRect(pane.rect, x, y)) return pane;
   }
   return null;
+}
+
+/** Whether a drag event carries files (vs. dragged text/elements within the page). */
+function hasFiles(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+  return types ? Array.from(types).includes('Files') : false;
 }
 
 /** Whether CSS-pixel point (x, y) lies within a rectangle. */
