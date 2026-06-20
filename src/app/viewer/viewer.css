@@ -408,6 +408,13 @@ button.active {
   paint-order: stroke;
 }
 
+/* RTSTRUCT ROI contours projected into the 3D pane, clipped to its rectangle. */
+.contours-3d {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 /* Structures legend: a compact list of ROI visibility toggles in the toolbar. */
 .roi-legend {
   flex-direction: column;

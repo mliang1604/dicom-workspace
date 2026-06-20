@@ -564,6 +564,26 @@
       </svg>
     }
 
+    <!-- RTSTRUCT ROI contours projected into the 3D pane; rotate with the orbit. -->
+    @if (contours3d(); as c3) {
+      <svg
+        class="contours-3d"
+        aria-hidden="true"
+        [style.left.px]="c3.rect.x"
+        [style.top.px]="c3.rect.y"
+        [attr.width]="c3.rect.width"
+        [attr.height]="c3.rect.height"
+      >
+        @for (shape of c3.shapes; track shape.key) {
+          @if (shape.closed) {
+            <polygon class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+          } @else {
+            <polyline class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+          }
+        }
+      </svg>
+    }
+
     <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->
     @if (clipPlaneGizmo(); as gizmo) {
       <svg
