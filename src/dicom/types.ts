@@ -14,6 +14,12 @@ export interface Slice {
   readonly orientation: readonly number[] | null;
   /** InstanceNumber, fallback ordering. Tag (0020,0013). */
   readonly instanceNumber: number;
+  /** SeriesInstanceUID, Tag (0020,000E). Groups slices into a series; null if absent. */
+  readonly seriesUid: string | null;
+  /** SeriesNumber, Tag (0020,0011). Orders series in the picker; null if absent. */
+  readonly seriesNumber: number | null;
+  /** SeriesDescription, Tag (0008,103E). Labels the series; null if absent. */
+  readonly seriesDescription: string | null;
   /** Modality (e.g. "CT", "MR"), Tag (0008,0060). Determines the value unit. Null if absent. */
   readonly modality: string | null;
   /** Modality LUT: rescaled value = raw * slope + intercept. */

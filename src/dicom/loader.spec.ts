@@ -162,7 +162,10 @@ function dicomFile(dataSetBody: Uint8Array, transferSyntax = EXPLICIT_VR_LE): Ar
 function singleFrameCt(): ArrayBuffer {
   const body = concat([
     element(0x0008, 0x0060, 'CS', text('CT')), // Modality
+    element(0x0008, 0x103e, 'LO', text('Axial CT')), // SeriesDescription
+    element(0x0020, 0x0011, 'IS', numbers([4])), // SeriesNumber
     element(0x0020, 0x0013, 'IS', numbers([7])), // InstanceNumber
+    element(0x0020, 0x000e, 'UI', uid('1.2.3.4')), // SeriesInstanceUID
     element(0x0020, 0x0032, 'DS', numbers([10, 20, 30])), // ImagePositionPatient
     element(0x0020, 0x0037, 'DS', numbers([1, 0, 0, 0, 1, 0])), // ImageOrientationPatient
     element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
@@ -273,6 +276,9 @@ describe('parseFile — single frame', () => {
     expect(s.rows).toBe(2);
     expect(s.columns).toBe(2);
     expect(s.modality).toBe('CT');
+    expect(s.seriesUid).toBe('1.2.3.4');
+    expect(s.seriesNumber).toBe(4);
+    expect(s.seriesDescription).toBe('Axial CT');
     expect(s.instanceNumber).toBe(7);
     expect(s.position).toEqual([10, 20, 30]);
     expect(s.orientation).toEqual([1, 0, 0, 0, 1, 0]);

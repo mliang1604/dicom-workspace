@@ -35,6 +35,12 @@ function num(dataSet: dicomParser.DataSet, tag: string, fallback: number): numbe
   return v === undefined || Number.isNaN(v) ? fallback : v;
 }
 
+/** Read a DICOM IS tag as an integer, or null when absent/unparseable. */
+function intOrNull(dataSet: dicomParser.DataSet, tag: string): number | null {
+  const v = dataSet.intString(tag);
+  return v === undefined || Number.isNaN(v) ? null : v;
+}
+
 /**
  * The fields shared by every frame in a file: image geometry that is fixed by
  * the pixel data layout, plus the byte offset where frame 0's samples begin.
@@ -47,6 +53,9 @@ interface FileContext {
   readonly columns: number;
   readonly bitsAllocated: number;
   readonly pixelRepresentation: number;
+  readonly seriesUid: string | null;
+  readonly seriesNumber: number | null;
+  readonly seriesDescription: string | null;
   readonly modality: string | null;
   /** The PixelData (7FE0,0010) element — the source of encapsulated frames. */
   readonly pixelElement: dicomParser.Element;
@@ -101,6 +110,9 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
     columns,
     bitsAllocated: dataSet.uint16('x00280100') ?? 16,
     pixelRepresentation: dataSet.uint16('x00280103') ?? 0, // 0 unsigned, 1 signed
+    seriesUid: dataSet.string('x0020000e')?.trim() || null, // SeriesInstanceUID
+    seriesNumber: intOrNull(dataSet, 'x00200011'), // SeriesNumber
+    seriesDescription: dataSet.string('x0008103e')?.trim() || null, // SeriesDescription
     modality: dataSet.string('x00080060')?.trim() || null,
     pixelElement,
     codec,
@@ -125,6 +137,9 @@ function parseSingleFrame(ctx: FileContext): Slice {
     position: readTriple(dataSet, 'x00200032'),
     orientation: readFloats(dataSet, 'x00200037', 6),
     instanceNumber: num(dataSet, 'x00200013', 0),
+    seriesUid: ctx.seriesUid,
+    seriesNumber: ctx.seriesNumber,
+    seriesDescription: ctx.seriesDescription,
     modality: ctx.modality,
     rescaleSlope,
     rescaleIntercept,
@@ -168,6 +183,9 @@ function parseMultiframe(ctx: FileContext, frames: number): Slice[] {
       // Plane Orientation Sequence (0020,9116) -> ImageOrientationPatient (0020,0037).
       orientation: readGroupValue(groups, 'x00209116', (ds) => readFloats(ds, 'x00200037', 6)),
       instanceNumber: f + 1,
+      seriesUid: ctx.seriesUid,
+      seriesNumber: ctx.seriesNumber,
+      seriesDescription: ctx.seriesDescription,
       modality: ctx.modality,
       rescaleSlope,
       rescaleIntercept,
