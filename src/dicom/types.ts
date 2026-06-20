@@ -223,6 +223,13 @@ export type LayerDisplay =
 export const GRAYSCALE_DISPLAY: LayerDisplay = { kind: 'grayscale' };
 
 /**
+ * Default composite opacity for an added overlay image layer: half-transparent so
+ * the base layer beneath stays visible through it. Fusion (dose) overlays may
+ * pick a different value through their own controls.
+ */
+export const DEFAULT_OVERLAY_OPACITY = 0.5;
+
+/**
  * One entry in the viewer's layer registry: a loaded {@link Volume} plus how it
  * participates in the composited view. A single-series load holds exactly one
  * layer, role `'base'`; fusion (CT + dose overlay) and side-by-side compare add
@@ -259,6 +266,25 @@ export function baseImageLayer(id: string, volume: Volume): Layer {
     role: 'base',
     display: GRAYSCALE_DISPLAY,
     opacity: 1,
+    visible: true,
+  };
+}
+
+/**
+ * Build an overlay image layer for a {@link Volume}: a translucent, visible,
+ * grayscale `'overlay'`-role layer that sits above the base. Used when a second
+ * (or Nth) series sharing the base's frame of reference is loaded as an added
+ * layer rather than replacing the current load. Grayscale by default — a fusion
+ * caller (e.g. a dose map) can swap {@link Layer.display} for a colormap.
+ */
+export function overlayImageLayer(id: string, volume: Volume): Layer {
+  return {
+    id,
+    volume,
+    modality: volume.modality,
+    role: 'overlay',
+    display: GRAYSCALE_DISPLAY,
+    opacity: DEFAULT_OVERLAY_OPACITY,
     visible: true,
   };
 }

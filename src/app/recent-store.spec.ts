@@ -45,4 +45,9 @@ describe('addRecent', () => {
     const list = addRecent([folder('c'), folder('b'), folder('a')], folder('d'), 3);
     expect(list.map((e) => e.label)).toEqual(['d', 'c', 'b']);
   });
+
+  it('keeps the overlay flag and lets a layered load supersede a fresh one', () => {
+    const list = addRecent([folder('study')], { label: 'study', kind: 'folder', overlay: true }, 5);
+    expect(list).toEqual([{ label: 'study', kind: 'folder', overlay: true }]);
+  });
 });

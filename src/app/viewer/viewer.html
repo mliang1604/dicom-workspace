@@ -23,7 +23,7 @@
       <select (change)="onRecentPick($event, folderInput, filesInput)">
         <option value="" disabled selected>Recent…</option>
         @for (entry of recent(); track $index; let i = $index) {
-          <option [value]="i">{{ entry.label }}</option>
+          <option [value]="i">{{ entry.label }}{{ entry.overlay ? ' (overlay)' : '' }}</option>
         }
       </select>
     </label>

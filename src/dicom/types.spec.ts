@@ -1,4 +1,11 @@
-import { baseImageLayer, baseLayer, modalityUnit, type Layer, type Volume } from './types';
+import {
+  baseImageLayer,
+  baseLayer,
+  modalityUnit,
+  overlayImageLayer,
+  type Layer,
+  type Volume,
+} from './types';
 
 describe('modalityUnit', () => {
   it('labels CT values as Hounsfield Units', () => {
@@ -42,6 +49,22 @@ describe('baseImageLayer', () => {
       role: 'base',
       display: { kind: 'grayscale' },
       opacity: 1,
+      visible: true,
+    });
+  });
+});
+
+describe('overlayImageLayer', () => {
+  it('wraps a volume as a translucent, visible, grayscale overlay layer', () => {
+    const volume = fakeVolume('MR');
+    const layer = overlayImageLayer('series-2', volume);
+    expect(layer).toEqual({
+      id: 'series-2',
+      volume,
+      modality: 'MR',
+      role: 'overlay',
+      display: { kind: 'grayscale' },
+      opacity: 0.5,
       visible: true,
     });
   });
