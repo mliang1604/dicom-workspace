@@ -271,6 +271,11 @@ const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 
+/** Frames-per-second options offered in the cine speed selector, in display order. */
+const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
+/** Default cine playback speed (fps), used until the user picks another. */
+const DEFAULT_CINE_FPS = 15;
+
 /** Radians of orbit per pixel dragged over the 3D pane. */
 const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
@@ -323,6 +328,7 @@ const MIP_SETTLE_MS = 200;
     '(window:keydown.x)': 'onSwapKey($event)',
     '(window:keydown.f)': 'onFlipKey($event)',
     '(window:keydown.c)': 'onCrosshairKey($event)',
+    '(window:keydown.p)': 'onCineKey($event)',
     '(window:keydown.l)': 'onLayoutKey($event)',
     '(window:keydown.i)': 'onInfoKey($event)',
     '(window:keydown.escape)': 'onEscapeKey($event)',
@@ -392,6 +398,14 @@ export class Viewer {
   private readonly focusVoxel = signal<readonly [number, number, number] | null>(null);
   /** When true (default), draw the linked crosshair at the focus voxel in each MPR pane. */
   protected readonly crosshairsEnabled = signal(true);
+  /** True while cine playback is auto-advancing slices through a pane. */
+  protected readonly cinePlaying = signal(false);
+  /** Cine playback speed in frames per second. */
+  protected readonly cineFps = signal(DEFAULT_CINE_FPS);
+  /** The fps options offered in the cine speed selector, in display order. */
+  protected readonly cineFpsOptions = CINE_FPS_OPTIONS;
+  /** Orientation whose slices cine is advancing; captured when playback starts. */
+  private readonly cineOrientation = signal<Orientation>(Orientation.Axial);
   /** The active measurement tool, or `none` for the default pan/orbit gestures. */
   protected readonly activeTool = signal<ToolMode>('none');
   /** Completed measurements, each pinned to its orientation + slice. */
@@ -793,6 +807,8 @@ export class Viewer {
   private frameHandle: number | null = null;
   /** Handle of the MIP settle timeout, or null when not settling. */
   private settleHandle: ReturnType<typeof setTimeout> | null = null;
+  /** Handle of the cine playback interval, or null when paused. */
+  private cineHandle: ReturnType<typeof setInterval> | null = null;
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -861,6 +877,7 @@ export class Viewer {
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
+      if (this.cineHandle !== null) clearInterval(this.cineHandle);
     });
   }
 
@@ -916,6 +933,7 @@ export class Viewer {
 
   /** Step the viewport to the next layout (3-pane → 4-pane → 3D-only → …). */
   protected cycleLayout(): void {
+    this.stopCine(); // the cined pane may move or vanish in the new layout
     this.layoutMode.update((mode) => {
       const i = this.layoutModes.findIndex((m) => m.value === mode);
       return this.layoutModes[(i + 1) % this.layoutModes.length].value;
@@ -929,6 +947,7 @@ export class Viewer {
   }
 
   protected swapMain(): void {
+    this.stopCine(); // swapping reshuffles the panes, so stop the cined one
     this.mainOrientation.update((current) => {
       const next = (ORIENTATION_ORDER.indexOf(current) + 1) % ORIENTATION_ORDER.length;
       return ORIENTATION_ORDER[next];
@@ -959,6 +978,76 @@ export class Viewer {
     if (event.target instanceof HTMLInputElement || !this.isReady()) return;
     event.preventDefault();
     this.toggleCrosshairs();
+  }
+
+  /**
+   * Start or stop cine playback. When starting it cines the hovered MPR pane if
+   * one is under the cursor, otherwise the main pane — so you can review whichever
+   * stack you're looking at — advancing its slice index on a timer and looping
+   * back to the first slice at the end.
+   */
+  protected toggleCine(): void {
+    if (this.cinePlaying()) this.stopCine();
+    else this.startCine();
+  }
+
+  protected onCineKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement || !this.isReady() || !this.hasMprPane()) return;
+    event.preventDefault();
+    this.toggleCine();
+  }
+
+  /** Change the cine speed; re-arm the running timer so the new fps takes effect at once. */
+  protected onCineFpsChange(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const fps = Number(event.target.value);
+    if (!Number.isFinite(fps) || fps <= 0) return;
+    this.cineFps.set(fps);
+    if (this.cinePlaying()) this.restartCineTimer();
+  }
+
+  /** Begin auto-advancing the hovered (or main) pane's slices at the current fps. */
+  private startCine(): void {
+    if (!this.isReady() || !this.hasMprPane()) return;
+    this.cineOrientation.set(this.cinePaneOrientation());
+    this.cinePlaying.set(true);
+    this.restartCineTimer();
+  }
+
+  /** Stop cine playback and clear its timer. Idempotent — safe to call any time. */
+  private stopCine(): void {
+    if (this.cineHandle !== null) {
+      clearInterval(this.cineHandle);
+      this.cineHandle = null;
+    }
+    if (this.cinePlaying()) this.cinePlaying.set(false);
+  }
+
+  /** (Re)arm the cine interval from the current fps, replacing any running timer. */
+  private restartCineTimer(): void {
+    if (this.cineHandle !== null) clearInterval(this.cineHandle);
+    const fps = clamp(this.cineFps(), 1, 60);
+    this.cineHandle = setInterval(() => this.cineTick(), 1000 / fps);
+  }
+
+  /** Advance the cined pane by one slice, looping back to the start at the end. */
+  private cineTick(): void {
+    const renderer = this.renderer();
+    if (!renderer) return;
+    const orientation = this.cineOrientation();
+    const count = renderer.sliceCount(orientation);
+    this.sliceIndices.update((indices) =>
+      withValue(indices, orientation, nextCineIndex(indices[orientation], count, 1)),
+    );
+  }
+
+  /** The orientation cine should drive: the hovered MPR pane's, else the main pane's. */
+  private cinePaneOrientation(): Orientation {
+    const hovered = this.hoveredKey();
+    for (const pane of this.panes()) {
+      if (pane.kind === 'mpr' && this.paneKey(pane) === hovered) return pane.orientation;
+    }
+    return this.mainOrientation();
   }
 
   /** Open/close the metadata & raw-tag inspector panel. */
@@ -1572,6 +1661,7 @@ export class Viewer {
     const renderer = this.renderer();
     const step = Math.sign(deltaY);
     if (!renderer || step === 0) return;
+    this.stopCine(); // a manual scroll takes over from cine playback
 
     const max = renderer.sliceCount(orientation) - 1;
     this.sliceIndices.update((indices) => {
@@ -1704,6 +1794,7 @@ export class Viewer {
       this.load.set({ status: 'error', message: 'GPU is not ready yet — try again.' });
       return;
     }
+    this.stopCine(); // a fresh volume resets the view; don't keep cining the old one
     renderer.setVolume(result.volume);
     this.windowCenter.set(Math.round(result.volume.windowCenter));
     this.windowWidth.set(Math.round(result.volume.windowWidth));
@@ -1870,6 +1961,19 @@ function withValue<T>(
 
 function middleSlice(renderer: SliceRenderer, orientation: Orientation): number {
   return Math.floor(renderer.sliceCount(orientation) / 2);
+}
+
+/**
+ * The next slice index for cine playback, wrapping at the ends so the loop runs
+ * continuously: stepping past the last slice returns to the first, and stepping
+ * before the first returns to the last. `step` is the per-tick advance (±1) and
+ * `count` the orientation's slice count. A stack of one slice (or none) has
+ * nothing to cine, so the index is clamped into range and left there. Exported
+ * for unit testing the advance/looping logic.
+ */
+export function nextCineIndex(current: number, count: number, step: number): number {
+  if (count <= 1) return clamp(current, 0, Math.max(0, count - 1));
+  return (((current + step) % count) + count) % count;
 }
 
 function describeVolume(result: LoadResult): string {
