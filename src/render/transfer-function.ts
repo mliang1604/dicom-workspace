@@ -118,6 +118,95 @@ export function transferFunction(preset: TransferFunctionPreset): TransferFuncti
 }
 
 /**
+ * Smallest intensity gap kept between an interior control point and its
+ * neighbours while dragging, so the editor never lets two points cross and
+ * reorder — the index of a point stays stable across an edit.
+ */
+const EDIT_EPSILON = 1e-3;
+
+/**
+ * Move one control point of a (preset-seeded) transfer function, returning a new
+ * {@link TransferFunction} — the immutable edit the DVR editor applies live. The
+ * opacity is clamped to `[0, 1]`. The two endpoints keep their intensity (so the
+ * baked LUT always spans the full {@link TransferFunction.domain}); an interior
+ * point's intensity is clamped to stay strictly between its neighbours, so the
+ * points never reorder and `index` keeps addressing the same point. Colours are
+ * untouched here — {@link setControlPointColor} edits those.
+ */
+export function moveControlPoint(
+  tf: TransferFunction,
+  index: number,
+  intensity: number,
+  opacity: number,
+): TransferFunction {
+  const points = tf.controlPoints;
+  if (index < 0 || index >= points.length) return tf;
+  const [lo, hi] = tf.domain;
+  const a = clamp(opacity, 0, 1);
+  let x = points[index].intensity;
+  if (index > 0 && index < points.length - 1) {
+    const left = points[index - 1].intensity + EDIT_EPSILON;
+    const right = points[index + 1].intensity - EDIT_EPSILON;
+    x = clamp(intensity, Math.min(left, right), Math.max(left, right));
+  }
+  x = clamp(x, lo, hi);
+  const next = points.map((p, i) =>
+    i === index ? { intensity: x, color: p.color, opacity: a } : p,
+  );
+  return { ...tf, controlPoints: next };
+}
+
+/** Recolour one control point (channels clamped to `[0, 1]`), returning a new TF. */
+export function setControlPointColor(
+  tf: TransferFunction,
+  index: number,
+  color: readonly [number, number, number],
+): TransferFunction {
+  const points = tf.controlPoints;
+  if (index < 0 || index >= points.length) return tf;
+  const c: [number, number, number] = [
+    clamp(color[0], 0, 1),
+    clamp(color[1], 0, 1),
+    clamp(color[2], 0, 1),
+  ];
+  const next = points.map((p, i) => (i === index ? { ...p, color: c } : p));
+  return { ...tf, controlPoints: next };
+}
+
+/**
+ * Insert a control point at `intensity` (clamped to the domain) with the given
+ * opacity, taking its colour from the curve at that intensity so the inserted
+ * stop sits on the existing colour ramp. The result stays sorted by intensity.
+ */
+export function addControlPoint(
+  tf: TransferFunction,
+  intensity: number,
+  opacity: number,
+): TransferFunction {
+  const [lo, hi] = tf.domain;
+  const x = clamp(intensity, lo, hi);
+  const [r, g, b] = sampleTransferFunction(tf, x);
+  const point: TfControlPoint = { intensity: x, color: [r, g, b], opacity: clamp(opacity, 0, 1) };
+  const next = [...tf.controlPoints, point].sort((p, q) => p.intensity - q.intensity);
+  return { ...tf, controlPoints: next };
+}
+
+/**
+ * Remove the control point at `index`, returning a new TF. A no-op when it would
+ * drop below two points (a curve needs at least its two endpoints) or the index
+ * is out of range.
+ */
+export function removeControlPoint(tf: TransferFunction, index: number): TransferFunction {
+  const points = tf.controlPoints;
+  if (points.length <= 2 || index < 0 || index >= points.length) return tf;
+  return { ...tf, controlPoints: points.filter((_, i) => i !== index) };
+}
+
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value));
+}
+
+/**
  * Sample a transfer function's control points at one intensity, returning the
  * piecewise-linearly interpolated `[r, g, b, a]`. Intensities below the first
  * control point clamp to it and those above the last clamp to it, so the curve

@@ -1,5 +1,5 @@
 import type { Vec3 } from '../dicom/types';
-import { length, normalize, scale } from '../dicom/vec3';
+import { add, length, normalize, scale } from '../dicom/vec3';
 
 /**
  * Pure helpers for the 3D pane's direct volume rendering (DVR), the CPU mirror
@@ -108,6 +108,92 @@ export function centralDifference(sampleAt: (point: Vec3) => number, p: Vec3, h:
     grad[a] = (sampleAt(plus) - sampleAt(minus)) / (2 * h[a]);
   }
   return grad;
+}
+
+/**
+ * User-tunable lighting for DVR. The light is a single directional source posed
+ * relative to the camera: `azimuth`/`elevation` (degrees) swing it off the
+ * headlight — `0, 0` points straight back at the viewer, the historical default.
+ * `ambient`/`diffuse`/`specular` are the Blinn–Phong material weights and
+ * `shininess` the specular exponent. With `enabled` false the DVR samples render
+ * unshaded at their transfer-function colour.
+ */
+export interface DvrLighting {
+  readonly enabled: boolean;
+  /** Degrees the light swings around the view-up axis; 0 keeps it on the headlight. */
+  readonly azimuth: number;
+  /** Degrees the light tilts toward the view-up axis; 0 keeps it on the headlight. */
+  readonly elevation: number;
+  /** Ambient floor in `[0, 1]` so away-facing surfaces stay visible. */
+  readonly ambient: number;
+  /** Diffuse (Lambert) weight, ≥ 0. */
+  readonly diffuse: number;
+  /** Specular (Blinn–Phong highlight) weight, ≥ 0. */
+  readonly specular: number;
+  /** Specular exponent, ≥ 1; larger is a tighter highlight. */
+  readonly shininess: number;
+}
+
+/**
+ * Default DVR lighting: a headlight with the legacy ambient/diffuse split
+ * ({@link DVR_AMBIENT} + the complementary diffuse) and no specular, so a freshly
+ * loaded volume looks exactly as it did before the lighting controls existed.
+ */
+export const DEFAULT_DVR_LIGHTING: DvrLighting = {
+  enabled: true,
+  azimuth: 0,
+  elevation: 0,
+  ambient: DVR_AMBIENT,
+  diffuse: 1 - DVR_AMBIENT,
+  specular: 0,
+  shininess: 24,
+};
+
+/**
+ * The light direction in the camera's view frame (x = right, y = up, z = toward
+ * the camera) from its azimuth/elevation. `0, 0` returns the headlight `(0, 0, 1)`;
+ * the result is a unit vector. The renderer rotates this into texture space with
+ * {@link lightToPatient} before handing it to the shader.
+ */
+export function lightViewDirection(lighting: Pick<DvrLighting, 'azimuth' | 'elevation'>): Vec3 {
+  const az = (lighting.azimuth * Math.PI) / 180;
+  const el = (lighting.elevation * Math.PI) / 180;
+  const cosEl = Math.cos(el);
+  return [cosEl * Math.sin(az), Math.sin(el), cosEl * Math.cos(az)];
+}
+
+/**
+ * Express a view-frame light direction in patient space, given the camera's unit
+ * right (`u`) and up (`v`) axes and its `forward` (into-the-scene) direction. The
+ * view frame's z points toward the camera — opposite `forward` — so a headlight
+ * `(0, 0, 1)` comes back as `-forward`. The result is normalised.
+ */
+export function lightToPatient(viewLight: Vec3, u: Vec3, v: Vec3, forward: Vec3): Vec3 {
+  const back = scale(forward, -1);
+  return normalize(
+    add(add(scale(u, viewLight[0]), scale(v, viewLight[1])), scale(back, viewLight[2])),
+  );
+}
+
+/**
+ * Pack the DVR lighting into the eight floats the raycast shader reads as its
+ * `light` and `material` uniforms: `[lx, ly, lz, enabled]` then
+ * `[ambient, diffuse, specular, shininess]`. The light direction is taken
+ * pre-transformed into texture space (the shader dots it against the texture-space
+ * gradient); the material weights are clamped to their valid ranges. Pure, so the
+ * exact bytes the shader sees can be unit-tested.
+ */
+export function dvrLightingParams(lightDirTex: Vec3, lighting: DvrLighting): Float32Array {
+  return new Float32Array([
+    lightDirTex[0],
+    lightDirTex[1],
+    lightDirTex[2],
+    lighting.enabled ? 1 : 0,
+    clamp01(lighting.ambient),
+    Math.max(0, lighting.diffuse),
+    Math.max(0, lighting.specular),
+    Math.max(1, lighting.shininess),
+  ]);
 }
 
 function dot(a: Vec3, b: Vec3): number {

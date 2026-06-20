@@ -225,10 +225,10 @@
   </label>
 
   @if (isDvrMode()) {
-    <label class="ctrl" title="DVR transfer-function preset">
+    <label class="ctrl" title="DVR transfer-function preset (seeds the TF editor)">
       TF
       <select
-        [value]="transferFunction()"
+        [value]="transferFunctionPreset()"
         (change)="onTransferFunctionChange($event)"
         [disabled]="!isReady() || !has3dPane()"
       >
@@ -528,6 +528,157 @@
             }
           </ul>
         </section>
+      </div>
+    </aside>
+  }
+
+  <!-- DVR transfer-function editor + lighting. Only meaningful in DVR mode; edits
+       re-bake the LUT / repack the shader uniforms live. Never affects MPR panes. -->
+  @if (isReady() && isDvrMode() && has3dPane()) {
+    <aside class="dvr-panel" aria-label="DVR transfer function and lighting">
+      <header class="info-header">
+        <strong>DVR — transfer function</strong>
+      </header>
+
+      <div class="dvr-body">
+        <!-- Opacity curve. Drag a point to reshape; double-click to add a stop. -->
+        <svg
+          class="tf-editor"
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+          (pointermove)="onTfPointerMove($event)"
+          (pointerup)="onTfPointerUp($event)"
+          (pointercancel)="onTfPointerUp($event)"
+          (dblclick)="onTfAddPoint($event)"
+        >
+          <polygon class="tf-area" [attr.points]="tfEditor().area" />
+          <polyline class="tf-line" [attr.points]="tfEditor().line" />
+          @for (p of tfEditor().points; track p.index) {
+            <circle
+              class="tf-point"
+              [class.selected]="p.index === tfSelected()"
+              [attr.cx]="p.x"
+              [attr.cy]="p.y"
+              r="3"
+              [attr.fill]="p.color"
+              (pointerdown)="onTfPointerDown($event, p.index)"
+            />
+          }
+        </svg>
+        <div class="tf-axis">
+          <span>{{ tfEditor().lo }} HU</span>
+          <span>opacity ↑ · drag points · dbl-click to add</span>
+          <span>{{ tfEditor().hi }} HU</span>
+        </div>
+
+        <div class="dvr-row">
+          <label class="dvr-color" title="Colour of the selected control point">
+            Colour
+            <input
+              type="color"
+              [value]="tfSelectedColor()"
+              (input)="onTfColorChange($event)"
+              [disabled]="tfSelected() === null"
+            />
+          </label>
+          <button
+            type="button"
+            class="dvr-remove"
+            (click)="onTfRemovePoint()"
+            [disabled]="!tfCanRemove()"
+            title="Remove the selected control point"
+          >
+            Remove point
+          </button>
+        </div>
+      </div>
+
+      <header class="info-header">
+        <strong>Lighting</strong>
+        <button
+          type="button"
+          class="dvr-toggle"
+          [class.active]="dvrLighting().enabled"
+          (click)="toggleShading()"
+          title="Toggle gradient shading on/off"
+        >
+          Shading {{ dvrLighting().enabled ? 'on' : 'off' }}
+        </button>
+      </header>
+
+      <div class="dvr-body">
+        <label class="dvr-slider" title="Swing the light around the view-up axis">
+          <span>Light ↔</span>
+          <input
+            type="range"
+            min="-180"
+            max="180"
+            step="1"
+            [value]="dvrLighting().azimuth"
+            (input)="onLightingInput('azimuth', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
+        <label class="dvr-slider" title="Tilt the light toward the view-up axis">
+          <span>Light ↕</span>
+          <input
+            type="range"
+            min="-90"
+            max="90"
+            step="1"
+            [value]="dvrLighting().elevation"
+            (input)="onLightingInput('elevation', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
+        <label class="dvr-slider" title="Ambient light floor">
+          <span>Ambient</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            [value]="dvrLighting().ambient"
+            (input)="onLightingInput('ambient', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
+        <label class="dvr-slider" title="Diffuse (Lambert) strength">
+          <span>Diffuse</span>
+          <input
+            type="range"
+            min="0"
+            max="2"
+            step="0.01"
+            [value]="dvrLighting().diffuse"
+            (input)="onLightingInput('diffuse', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
+        <label class="dvr-slider" title="Specular highlight strength">
+          <span>Specular</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            [value]="dvrLighting().specular"
+            (input)="onLightingInput('specular', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
+        <label class="dvr-slider" title="Specular exponent (highlight tightness)">
+          <span>Shininess</span>
+          <input
+            type="range"
+            min="1"
+            max="128"
+            step="1"
+            [value]="dvrLighting().shininess"
+            (input)="onLightingInput('shininess', $event)"
+            [disabled]="!dvrLighting().enabled"
+          />
+        </label>
       </div>
     </aside>
   }

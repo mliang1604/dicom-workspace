@@ -28,10 +28,12 @@ struct Params {
   axisV : vec4<f32>,          // half-height image-plane axis in .xyz, windowWidth in .w
   forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz, voxels-per-t in .w
   modeSlab : vec4<f32>,       // mode (0 max,1 min,2 mean,3 DVR) .x, slab t-range [.y,.z], clip on .w
-  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), Lambert ambient .z, gray invert .w
+  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), unused .z, gray invert .w
   clipA : vec4<f32>,          // axial cut-plane: texture-space normal .xyz, offset .w
   clipC : vec4<f32>,          // coronal cut-plane
   clipS : vec4<f32>,          // sagittal cut-plane
+  light : vec4<f32>,          // DVR light direction (texture space) .xyz, shading enabled .w
+  material : vec4<f32>,       // DVR Blinn-Phong: ambient .x, diffuse .y, specular .z, shininess .w
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -85,9 +87,16 @@ fn clipPlane(planeN : vec3<f32>, planeOff : f32, ro : vec3<f32>, rd : vec3<f32>,
 fn renderDvr(ro : vec3<f32>, rd : vec3<f32>, tEntry : f32, dt : f32, steps : u32) -> vec4<f32> {
   let tfLo = P.tfDomain.x;
   let tfHi = P.tfDomain.y;
-  let ambient = P.tfDomain.z;
   let texel = 1.0 / vec3<f32>(textureDimensions(volTex));
-  let lightDir = -normalize(rd); // headlight from the orthographic camera
+  let viewDir = -normalize(rd);   // toward the orthographic camera
+  let shadeOn = P.light.w > 0.5;
+  // Light direction (texture space) is the headlight by default, swung off it by
+  // the lighting controls; fall back to the headlight if it was left unset.
+  let lightDir = select(viewDir, normalize(P.light.xyz), shadeOn && length(P.light.xyz) > 1e-6);
+  let ambient = P.material.x;
+  let diffuse = P.material.y;
+  let specular = P.material.z;
+  let shininess = max(P.material.w, 1.0);
   let stepVoxels = dt * P.forward.w; // march length in voxels, for opacity correction
 
   var color = vec3<f32>(0.0);
@@ -108,13 +117,19 @@ fn renderDvr(ro : vec3<f32>, rd : vec3<f32>, tEntry : f32, dt : f32, steps : u32
         sampleVol(coord + vec3<f32>(0.0, texel.y, 0.0)) - sampleVol(coord - vec3<f32>(0.0, texel.y, 0.0)),
         sampleVol(coord + vec3<f32>(0.0, 0.0, texel.z)) - sampleVol(coord - vec3<f32>(0.0, 0.0, texel.z)),
       );
-      var shade = 1.0;
-      if (length(grad) > 1e-6) {
+      // Blinn-Phong: ambient + diffuse·(n·l) tints by the TF colour, with a white
+      // specular highlight added on top. Shading off, or a flat (zero-gradient)
+      // region, leaves the sample at its unshaded transfer-function colour.
+      var lit = tf.rgb;
+      if (shadeOn && length(grad) > 1e-6) {
         let n = normalize(-grad);
-        shade = ambient + (1.0 - ambient) * max(dot(n, lightDir), 0.0);
+        let ndotl = max(dot(n, lightDir), 0.0);
+        let half = normalize(lightDir + viewDir);
+        let spec = specular * pow(max(dot(n, half), 0.0), shininess);
+        lit = tf.rgb * (ambient + diffuse * ndotl) + vec3<f32>(spec);
       }
       let w = (1.0 - alpha) * a;
-      color = color + tf.rgb * shade * w;
+      color = color + lit * w;
       alpha = alpha + w;
       if (alpha >= 0.99) { break; }
     }

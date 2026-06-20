@@ -3,7 +3,7 @@ import { type OrbitCamera } from './camera';
 import type { PaneRect } from './layout';
 import { pickProjection } from './pick';
 import { ProjectionMode } from './slice-renderer';
-import { TransferFunctionPreset } from './transfer-function';
+import { transferFunction, TransferFunctionPreset } from './transfer-function';
 
 function makeVolume(dims: [number, number, number], geometry?: VolumeGeometry): Volume {
   const [x, y, z] = dims;
@@ -117,7 +117,7 @@ describe('pickProjection', () => {
       CENTRE.x,
       CENTRE.y,
       {
-        transferFunction: TransferFunctionPreset.CtBone,
+        transferFunction: transferFunction(TransferFunctionPreset.CtBone),
       },
     );
 

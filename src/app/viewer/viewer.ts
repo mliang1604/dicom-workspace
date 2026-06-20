@@ -30,7 +30,17 @@ import {
   SliceRenderer,
   type PaneView,
 } from '../../render/slice-renderer';
-import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
+import {
+  addControlPoint,
+  moveControlPoint,
+  removeControlPoint,
+  setControlPointColor,
+  transferFunction,
+  TRANSFER_FUNCTION_PRESETS,
+  TransferFunctionPreset,
+  type TransferFunction,
+} from '../../render/transfer-function';
+import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
 import { planeExtentMm, slicePlaneCorners, volumeBounds } from '../../render/reslice';
 import {
   mmPerScreenPixel,
@@ -372,10 +382,22 @@ export class Viewer {
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
   /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
   protected readonly projectionMode = signal<ProjectionMode>(this.initialPrefs.projectionMode);
-  /** Transfer-function preset used when the 3D pane is in DVR mode. */
-  protected readonly transferFunction = signal<TransferFunctionPreset>(
-    TransferFunctionPreset.CtBone,
+  /**
+   * The live DVR transfer function: seeded from a preset and then editable in the
+   * TF editor. Held as the full {@link TransferFunction} (not just a preset code)
+   * so dragged control points re-bake the LUT immediately.
+   */
+  protected readonly transferFunction = signal<TransferFunction>(
+    transferFunction(TransferFunctionPreset.CtBone),
   );
+  /** The preset the editor is currently seeded from, driving the TF selector. */
+  protected readonly transferFunctionPreset = computed(() => this.transferFunction().preset);
+  /** DVR lighting/shading (Blinn–Phong material + posed headlight). */
+  protected readonly dvrLighting = signal<DvrLighting>(DEFAULT_DVR_LIGHTING);
+  /** The TF-editor control point being dragged (index), or null. */
+  private readonly tfDrag = signal<number | null>(null);
+  /** The selected TF control point (for recolour / removal), or null. */
+  protected readonly tfSelected = signal<number | null>(null);
   /** When true, clip the 3D pane to the MPR slice planes for a cut-away view. */
   protected readonly clipToPlanes = signal(false);
   /** True when the 3D pane is in direct-volume-rendering mode (drives the UI). */
@@ -398,6 +420,38 @@ export class Viewer {
   protected readonly mode3dTag = computed(() => {
     const label = MODE_TAGS[this.projectionMode()];
     return this.clipToPlanes() ? `${label} ✂` : label;
+  });
+  /**
+   * Geometry for the TF editor's SVG: each control point as a `(x, y)` in the
+   * editor's 0..100 viewBox (intensity left→right, opacity bottom→top) plus a
+   * polyline for the opacity curve and a closed area under it for an opacity fill.
+   */
+  protected readonly tfEditor = computed(() => {
+    const tf = this.transferFunction();
+    const [lo, hi] = tf.domain;
+    const span = hi - lo || 1;
+    const points = tf.controlPoints.map((p, index) => ({
+      index,
+      x: ((p.intensity - lo) / span) * 100,
+      y: (1 - p.opacity) * 100,
+      color: rgbToHex(p.color),
+      intensity: Math.round(p.intensity),
+      isEndpoint: index === 0 || index === tf.controlPoints.length - 1,
+    }));
+    const line = points.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+    return { lo, hi, points, line, area: `0,100 ${line} 100,100` };
+  });
+  /** Hex colour of the selected TF control point, for the colour input. */
+  protected readonly tfSelectedColor = computed(() => {
+    const index = this.tfSelected();
+    const points = this.transferFunction().controlPoints;
+    return index !== null && points[index] ? rgbToHex(points[index].color) : '#ffffff';
+  });
+  /** Whether the selected TF control point can be removed (interior, ≥ 3 points). */
+  protected readonly tfCanRemove = computed(() => {
+    const index = this.tfSelected();
+    const points = this.transferFunction().controlPoints;
+    return index !== null && index > 0 && index < points.length - 1 && points.length > 2;
   });
   /** The in-progress drag (pan or orbit), or null when no button is held. */
   private readonly drag = signal<Drag | null>(null);
@@ -934,6 +988,7 @@ export class Viewer {
     const camera = this.camera3d();
     const projectionMode = this.projectionMode();
     const transferFunction = this.transferFunction();
+    const lighting = this.dvrLighting();
     const clipToPlanes = this.clipToPlanes();
     const slabThicknessMm = this.slabThicknessMm();
     const windowCenter = this.windowCenter();
@@ -954,6 +1009,7 @@ export class Viewer {
             camera,
             projectionMode,
             transferFunction,
+            lighting,
             clipToPlanes,
             sliceIndices: indices,
             slabThicknessMm,
@@ -2040,10 +2096,94 @@ export class Viewer {
     this.markMipSettling();
   }
 
-  /** Choose the DVR transfer-function preset (CT Bone / Soft-tissue / Angio / Lung). */
+  /** Re-seed the editable TF from a preset (CT Bone / Soft-tissue / Angio / Lung). */
   protected onTransferFunctionChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
-    this.transferFunction.set(Number(event.target.value) as TransferFunctionPreset);
+    this.transferFunction.set(
+      transferFunction(Number(event.target.value) as TransferFunctionPreset),
+    );
+    this.tfSelected.set(null);
+    this.markMipSettling();
+  }
+
+  /**
+   * Map a pointer event over the TF editor to a `[intensity, opacity]` in the
+   * transfer function's domain. The editor's viewBox is 0..100 in each axis, with
+   * intensity rising left→right across the domain and opacity rising bottom→top.
+   */
+  private tfEventValue(event: PointerEvent | MouseEvent): [number, number] {
+    const svg = (event.currentTarget ?? event.target) as SVGGraphicsElement;
+    const rect = svg.getBoundingClientRect();
+    const fx = rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0;
+    const fy = rect.height > 0 ? clamp((event.clientY - rect.top) / rect.height, 0, 1) : 0;
+    const [lo, hi] = this.transferFunction().domain;
+    return [lo + fx * (hi - lo), 1 - fy];
+  }
+
+  /** Start dragging the TF control point at `index` (and select it). */
+  protected onTfPointerDown(event: PointerEvent, index: number): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.tfDrag.set(index);
+    this.tfSelected.set(index);
+    const svg = (event.target as SVGElement).ownerSVGElement;
+    svg?.setPointerCapture(event.pointerId);
+  }
+
+  /** Drag the active TF control point to the pointer's intensity/opacity. */
+  protected onTfPointerMove(event: PointerEvent): void {
+    const index = this.tfDrag();
+    if (index === null) return;
+    const [intensity, opacity] = this.tfEventValue(event);
+    this.transferFunction.update((tf) => moveControlPoint(tf, index, intensity, opacity));
+    this.markMipSettling();
+  }
+
+  /** Finish a TF control-point drag. */
+  protected onTfPointerUp(event: PointerEvent): void {
+    if (this.tfDrag() === null) return;
+    this.tfDrag.set(null);
+    (event.target as SVGElement).ownerSVGElement?.releasePointerCapture(event.pointerId);
+  }
+
+  /** Double-click the TF editor background to insert a control point there. */
+  protected onTfAddPoint(event: MouseEvent): void {
+    const [intensity, opacity] = this.tfEventValue(event);
+    this.transferFunction.update((tf) => addControlPoint(tf, intensity, opacity));
+    this.tfSelected.set(null);
+    this.markMipSettling();
+  }
+
+  /** Recolour the selected TF control point from the colour input. */
+  protected onTfColorChange(event: Event): void {
+    const index = this.tfSelected();
+    if (index === null || !(event.target instanceof HTMLInputElement)) return;
+    const color = hexToRgb(event.target.value);
+    this.transferFunction.update((tf) => setControlPointColor(tf, index, color));
+    this.markMipSettling();
+  }
+
+  /** Remove the selected TF control point (no-op on an endpoint or the last two). */
+  protected onTfRemovePoint(): void {
+    const index = this.tfSelected();
+    if (index === null) return;
+    this.transferFunction.update((tf) => removeControlPoint(tf, index));
+    this.tfSelected.set(null);
+    this.markMipSettling();
+  }
+
+  /** Toggle DVR shading on/off (off renders samples at their flat TF colour). */
+  protected toggleShading(): void {
+    this.dvrLighting.update((l) => ({ ...l, enabled: !l.enabled }));
+    this.markMipSettling();
+  }
+
+  /** Update one numeric DVR lighting parameter from a slider. */
+  protected onLightingInput(key: keyof DvrLighting, event: Event): void {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const value = Number(event.target.value);
+    if (!Number.isFinite(value)) return;
+    this.dvrLighting.update((l) => ({ ...l, [key]: value }));
     this.markMipSettling();
   }
 
@@ -2121,7 +2261,9 @@ export class Viewer {
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
-    this.transferFunction.set(TransferFunctionPreset.CtBone);
+    this.transferFunction.set(transferFunction(TransferFunctionPreset.CtBone));
+    this.tfSelected.set(null);
+    this.dvrLighting.set(DEFAULT_DVR_LIGHTING);
     this.clipToPlanes.set(false);
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
@@ -2354,6 +2496,22 @@ function intValue(event: Event): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+/** A linear RGB triple in [0, 1] as a `#rrggbb` hex string for an `<input type=color>`. */
+function rgbToHex(color: readonly [number, number, number]): string {
+  const hex = (c: number) =>
+    Math.round(clamp(c, 0, 1) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${hex(color[0])}${hex(color[1])}${hex(color[2])}`;
+}
+
+/** Parse a `#rrggbb` hex string back into a linear RGB triple in [0, 1]. */
+function hexToRgb(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return [1, 1, 1];
+  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
 }
 
 function messageOf(error: unknown): string {

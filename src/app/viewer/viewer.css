@@ -454,7 +454,8 @@ button.active {
 
 /* The glass card shared by the metadata inspector and the shortcut help. */
 .info-panel,
-.help-panel {
+.help-panel,
+.dvr-panel {
   display: flex;
   flex-direction: column;
   background: var(--glass-bg);
@@ -621,11 +622,94 @@ button.active {
   .pane-tag,
   .status,
   .probe,
-  .info-panel {
+  .info-panel,
+  .dvr-panel {
     background: var(--panel);
   }
 
   .warning {
     background: rgba(60, 42, 8, 0.95);
   }
+}
+
+/* DVR transfer-function + lighting editor: a glass panel pinned to the viewport's
+   left edge, shown only in DVR mode. Drag the curve/sliders; never affects MPR. */
+.dvr-panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 280px;
+  max-width: calc(100% - 24px);
+  font-size: 12px;
+}
+
+.dvr-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+}
+
+/* Opacity curve: a flat box; the polyline/area use a 0..100 viewBox. */
+.tf-editor {
+  width: 100%;
+  height: 110px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  touch-action: none;
+}
+
+.tf-area {
+  fill: rgba(120, 170, 255, 0.18);
+}
+
+.tf-line {
+  fill: none;
+  stroke: var(--accent, #6aa6ff);
+}
+
+.tf-point {
+  stroke: #fff;
+  cursor: grab;
+}
+
+.tf-line,
+.tf-point {
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.tf-point.selected {
+  stroke-width: 2.4;
+}
+
+.tf-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.tf-axis span:nth-child(2) {
+  text-align: center;
+}
+
+.dvr-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dvr-color,
+.dvr-slider {
+  color: var(--muted);
+}
+
+.dvr-slider {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 8px;
 }

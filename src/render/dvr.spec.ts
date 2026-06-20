@@ -2,8 +2,12 @@ import type { Vec3 } from '../dicom/types';
 import {
   centralDifference,
   compositeOver,
+  DEFAULT_DVR_LIGHTING,
   DVR_AMBIENT,
+  dvrLightingParams,
   lambertShade,
+  lightToPatient,
+  lightViewDirection,
   opacityCorrection,
   surfaceNormal,
 } from './dvr';
@@ -108,5 +112,97 @@ describe('centralDifference', () => {
     expect(grad[1]).toBe(0); // no offset along y → left at zero
     expect(grad[0]).toBeCloseTo(1, 6);
     expect(grad[2]).toBeCloseTo(1, 6);
+  });
+});
+
+describe('lightViewDirection', () => {
+  it('points straight at the camera (the headlight) with no offset', () => {
+    expect(lightViewDirection({ azimuth: 0, elevation: 0 })).toEqual([0, 0, 1]);
+  });
+
+  it('swings onto the view-right axis at 90° azimuth', () => {
+    const d = lightViewDirection({ azimuth: 90, elevation: 0 });
+    expect(d[0]).toBeCloseTo(1, 6);
+    expect(d[1]).toBeCloseTo(0, 6);
+    expect(d[2]).toBeCloseTo(0, 6);
+  });
+
+  it('tilts onto the view-up axis at 90° elevation', () => {
+    const d = lightViewDirection({ azimuth: 0, elevation: 90 });
+    expect(d[0]).toBeCloseTo(0, 6);
+    expect(d[1]).toBeCloseTo(1, 6);
+    expect(d[2]).toBeCloseTo(0, 6);
+  });
+
+  it('always returns a unit vector', () => {
+    const d = lightViewDirection({ azimuth: 37, elevation: -52 });
+    expect(Math.hypot(d[0], d[1], d[2])).toBeCloseTo(1, 6);
+  });
+});
+
+describe('lightToPatient', () => {
+  const u: Vec3 = [1, 0, 0];
+  const v: Vec3 = [0, 1, 0];
+  const forward: Vec3 = [0, 0, 1]; // into the scene → headlight comes back as -forward
+
+  it('maps the headlight to the opposite of the forward direction', () => {
+    expect(lightToPatient([0, 0, 1], u, v, forward)).toEqual([0, 0, -1]);
+  });
+
+  it('maps the view-right component onto the right axis', () => {
+    const p = lightToPatient([1, 0, 0], u, v, forward);
+    expect(p[0]).toBeCloseTo(1, 6);
+    expect(p[1]).toBeCloseTo(0, 6);
+    expect(p[2]).toBeCloseTo(0, 6);
+  });
+
+  it('returns a unit vector for a mixed direction', () => {
+    const p = lightToPatient(lightViewDirection({ azimuth: 45, elevation: 20 }), u, v, forward);
+    expect(Math.hypot(p[0], p[1], p[2])).toBeCloseTo(1, 6);
+  });
+});
+
+describe('dvrLightingParams', () => {
+  it('packs the light direction + enabled flag, then the material weights', () => {
+    const out = dvrLightingParams([0.1, 0.2, 0.3], {
+      enabled: true,
+      azimuth: 0,
+      elevation: 0,
+      ambient: 0.3,
+      diffuse: 0.7,
+      specular: 0.5,
+      shininess: 32,
+    });
+    const expected = [0.1, 0.2, 0.3, 1, 0.3, 0.7, 0.5, 32];
+    expect(out.length).toBe(expected.length);
+    expected.forEach((v, i) => expect(out[i]).toBeCloseTo(v, 6));
+  });
+
+  it('flags shading off as a zero in the .w slot', () => {
+    const out = dvrLightingParams([0, 0, 1], { ...DEFAULT_DVR_LIGHTING, enabled: false });
+    expect(out[3]).toBe(0);
+  });
+
+  it('clamps the material weights to their valid ranges', () => {
+    const out = dvrLightingParams([0, 0, 1], {
+      enabled: true,
+      azimuth: 0,
+      elevation: 0,
+      ambient: 2, // → clamped to 1
+      diffuse: -1, // → clamped to 0
+      specular: -3, // → clamped to 0
+      shininess: 0, // → clamped up to 1
+    });
+    expect(out[4]).toBe(1);
+    expect(out[5]).toBe(0);
+    expect(out[6]).toBe(0);
+    expect(out[7]).toBe(1);
+  });
+
+  it('defaults to the legacy headlight ambient/diffuse split with no specular', () => {
+    expect(DEFAULT_DVR_LIGHTING.ambient).toBe(DVR_AMBIENT);
+    expect(DEFAULT_DVR_LIGHTING.diffuse).toBeCloseTo(1 - DVR_AMBIENT, 6);
+    expect(DEFAULT_DVR_LIGHTING.specular).toBe(0);
+    expect(DEFAULT_DVR_LIGHTING.enabled).toBe(true);
   });
 });
