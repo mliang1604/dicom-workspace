@@ -25,6 +25,21 @@
   box-sizing: border-box;
 }
 
+/* Honour users who ask for less motion: drop UI transitions/animations to near-
+   instant. Geometry-driven canvas/overlay updates aren't animations and are
+   unaffected; this only neutralises the chrome's easing (button hovers, the
+   load-progress fill, etc.). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 html,
 body {
   margin: 0;
@@ -32,8 +47,7 @@ body {
   /* Soft dark backdrop so the blurred chrome has something to refract against. */
   background:
     radial-gradient(120% 90% at 15% 0%, #131722 0%, rgba(19, 23, 34, 0) 55%),
-    radial-gradient(120% 90% at 100% 100%, #11151f 0%, rgba(17, 21, 31, 0) 50%),
-    var(--bg);
+    radial-gradient(120% 90% at 100% 100%, #11151f 0%, rgba(17, 21, 31, 0) 50%), var(--bg);
   background-attachment: fixed;
   color: var(--text);
   font:

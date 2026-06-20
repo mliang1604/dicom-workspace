@@ -625,6 +625,10 @@ export class Viewer {
 
   /** Whether the keyboard-shortcut help overlay is open. */
   protected readonly helpOpen = signal(false);
+  /** The modal help panel, so focus can move into it on open. */
+  private readonly helpPanelRef = viewChild<ElementRef<HTMLElement>>('helpPanel');
+  /** The control focused before the help modal opened, restored when it closes. */
+  private helpReturnFocus: HTMLElement | null = null;
   /** The shortcuts listed in the help overlay, in display order. */
   protected readonly shortcuts = [
     { keys: 'X', label: 'Swap the main view to the next orientation' },
@@ -1157,6 +1161,9 @@ export class Viewer {
     return state.loaded / state.total;
   });
 
+  /** {@link loadProgress} as a 0–100 whole percent for the progress bar's `aria-valuenow`. */
+  protected readonly loadPercent = computed<number>(() => Math.round(this.loadProgress() * 100));
+
   /** Warns that reconstructed planes are interpolated across significant gaps. */
   protected readonly interpolationWarning = computed<string | null>(() => {
     const volume = this.volume();
@@ -1269,6 +1276,24 @@ export class Viewer {
         windowWidth: this.windowWidth(),
         slabThicknessMm: this.slabThicknessMm(),
       });
+    });
+
+    // Focus management for the modal shortcut help: move focus into the panel
+    // when it opens so keyboard/AT users land inside it, and restore focus to the
+    // trigger when it closes. Focus is moved, not trapped — Tab still reaches the
+    // chrome behind it and Esc closes (see onEscapeKey), per the a11y brief.
+    effect(() => {
+      const panel = this.helpPanelRef()?.nativeElement;
+      if (this.helpOpen()) {
+        // Capture the trigger and move focus in once, on first appearance.
+        if (panel && this.helpReturnFocus === null) {
+          this.helpReturnFocus = document.activeElement as HTMLElement | null;
+          panel.focus();
+        }
+      } else if (this.helpReturnFocus) {
+        this.helpReturnFocus.focus();
+        this.helpReturnFocus = null;
+      }
     });
 
     this.destroyRef.onDestroy(() => {
@@ -1817,11 +1842,19 @@ export class Viewer {
     this.pending.set(null);
   }
 
-  /** Escape cancels an in-progress measurement, then deactivates the tool. */
+  /**
+   * Escape closes the open overlays (help, then metadata), then cancels an
+   * in-progress measurement, then deactivates the tool — most-modal first so one
+   * press peels off one layer.
+   */
   protected onEscapeKey(event: Event): void {
     if (event.target instanceof HTMLInputElement) return;
     if (this.helpOpen()) {
       this.helpOpen.set(false);
+      return;
+    }
+    if (this.infoPanelOpen()) {
+      this.infoPanelOpen.set(false);
       return;
     }
     if (this.pending()) {

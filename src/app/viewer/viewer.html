@@ -1,4 +1,4 @@
-<header class="toolbar">
+<header class="toolbar" aria-label="Viewer controls">
   <strong class="brand">DICOM Workspace</strong>
 
   <button type="button" (click)="folderInput.click()">Open folder…</button>
@@ -72,6 +72,7 @@
     (click)="toggleCrosshairs()"
     [disabled]="!isReady()"
     [class.active]="crosshairsEnabled()"
+    [attr.aria-pressed]="crosshairsEnabled()"
     title="Show linked crosshairs and the 3D cut-planes at the Shift+clicked focus point (C)"
   >
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
@@ -107,6 +108,7 @@
       (click)="toggleInvert()"
       [disabled]="!isReady()"
       [class.active]="invert()"
+      [attr.aria-pressed]="invert()"
       title="Invert the displayed grayscale (V)"
     >
       Invert ◐ <kbd>V</kbd> {{ invert() ? 'on' : 'off' }}
@@ -119,6 +121,7 @@
       (click)="toggleCine()"
       [disabled]="!isReady() || !hasMprPane()"
       [class.active]="cinePlaying()"
+      [attr.aria-pressed]="cinePlaying()"
       title="Play/pause cine through the hovered or main pane's slices (P)"
     >
       {{ cinePlaying() ? '⏸ Pause' : '▶ Play' }} <kbd>P</kbd>
@@ -148,6 +151,7 @@
       (click)="captureRotation()"
       [disabled]="!canRecordRotation() || recordingRotation()"
       [class.active]="recordingRotation()"
+      [attr.aria-pressed]="recordingRotation()"
       title="Record a 360° spin of the 3D view to a WebM clip"
     >
       {{ recordingRotation() ? '● Recording…' : 'Spin ⟳' }}
@@ -156,6 +160,8 @@
 
   <span
     class="measure-palette"
+    role="group"
+    aria-label="Measurement tools"
     title="Measurement tools — click an MPR pane to place points; Esc cancels"
   >
     @for (tool of measureTools; track tool.value) {
@@ -164,6 +170,8 @@
         (click)="setTool(tool.value)"
         [disabled]="!isReady() || !hasMprPane()"
         [class.active]="activeTool() === tool.value"
+        [attr.aria-pressed]="activeTool() === tool.value"
+        [attr.aria-label]="tool.label"
         [title]="tool.label"
       >
         {{ tool.glyph }} {{ tool.label }}
@@ -184,6 +192,8 @@
     (click)="toggleInfoPanel()"
     [disabled]="!isReady() || !metadata()"
     [class.active]="infoPanelOpen()"
+    [attr.aria-pressed]="infoPanelOpen()"
+    aria-haspopup="dialog"
     title="Show DICOM metadata and a searchable raw-tag inspector (I)"
   >
     Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
@@ -194,6 +204,8 @@
     (click)="toggleHelp()"
     [disabled]="!isReady()"
     [class.active]="helpOpen()"
+    [attr.aria-pressed]="helpOpen()"
+    aria-haspopup="dialog"
     title="Show the keyboard & mouse shortcut overlay (?)"
   >
     Help <kbd>?</kbd>
@@ -257,6 +269,7 @@
     (click)="toggleClipToPlanes()"
     [disabled]="!isReady() || !has3dPane()"
     [class.active]="clipToPlanes()"
+    [attr.aria-pressed]="clipToPlanes()"
     title="Clip the 3D pane to the MPR slice planes for a cut-away view"
   >
     Cut-away ⌧ {{ clipToPlanes() ? 'on' : 'off' }}
@@ -267,6 +280,7 @@
     (click)="toggleClipPlane()"
     [disabled]="!isReady() || !has3dPane()"
     [class.active]="clipPlaneEnabled()"
+    [attr.aria-pressed]="clipPlaneEnabled()"
     title="Clip the 3D pane to a draggable plane; drag the handle to slice through the volume"
   >
     Clip plane ▢ {{ clipPlaneEnabled() ? 'on' : 'off' }}
@@ -285,7 +299,11 @@
 
   <label class="ctrl" title="Apply a window/level preset">
     Preset
-    <select (change)="onPresetChange($event)" [disabled]="!isReady()">
+    <select
+      aria-label="Window/level preset"
+      (change)="onPresetChange($event)"
+      [disabled]="!isReady()"
+    >
       <option value="" disabled selected>Preset…</option>
       @for (preset of wlPresets(); track preset.label; let i = $index) {
         <option [value]="i">{{ preset.label }} ({{ preset.center }} / {{ preset.width }})</option>
@@ -298,6 +316,7 @@
     <input
       type="number"
       step="1"
+      aria-label="Window level (centre)"
       [value]="windowCenter()"
       (input)="onWindowCenterInput($event)"
       [disabled]="!isReady()"
@@ -310,6 +329,7 @@
       type="number"
       step="1"
       min="1"
+      aria-label="Window width"
       [value]="windowWidth()"
       (input)="onWindowWidthInput($event)"
       [disabled]="!isReady()"
@@ -797,7 +817,7 @@
       aria-label="Keyboard and mouse shortcuts"
       (click)="toggleHelp()"
     >
-      <aside class="help-panel" (click)="$event.stopPropagation()">
+      <aside #helpPanel class="help-panel" tabindex="-1" (click)="$event.stopPropagation()">
         <header class="info-header">
           <strong>Keyboard &amp; mouse shortcuts</strong>
           <button
@@ -828,10 +848,23 @@
     <div class="warning" role="status">⚠ {{ warning }}</div>
   }
 
-  <div class="status" [class.error]="statusIsError()">
+  <div
+    class="status"
+    [class.error]="statusIsError()"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+  >
     {{ statusText() }}
     @if (isLoading()) {
-      <span class="progress" role="progressbar" aria-label="Loading DICOM files">
+      <span
+        class="progress"
+        role="progressbar"
+        aria-label="Loading DICOM files"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        [attr.aria-valuenow]="loadPercent()"
+      >
         <span class="progress-fill" [style.width.%]="loadProgress() * 100"></span>
       </span>
     }
