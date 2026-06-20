@@ -78,7 +78,13 @@ import {
   windowPresets,
   type WindowPreset,
 } from '../../render/window-level';
-import { cameraBasis, projectToPane, viewBasis, type OrbitCamera } from '../../render/camera';
+import {
+  cameraBasis,
+  projectToPane,
+  rezoomCameraPan,
+  viewBasis,
+  type OrbitCamera,
+} from '../../render/camera';
 import { axisMarkers } from '../../render/axis-indicator';
 import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
@@ -404,7 +410,7 @@ const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
 const MAX_ELEVATION = 1.45;
 /** Default 3D view: a slight three-quarter orbit, patient superior up. */
-const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1 };
+const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1, panX: 0, panY: 0 };
 
 /**
  * Only warn about interpolation when the widest gap spans more than this
@@ -2287,9 +2293,9 @@ export class Viewer {
     const dy = event.clientY - drag.lastY;
     this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
     this.camera3d.update((cam) => ({
+      ...cam,
       azimuth: cam.azimuth + dx * ORBIT_SPEED,
       elevation: clamp(cam.elevation - dy * ORBIT_SPEED, -MAX_ELEVATION, MAX_ELEVATION),
-      zoom: cam.zoom,
     }));
   }
 
@@ -2353,7 +2359,11 @@ export class Viewer {
 
     event.preventDefault();
     if (placement.kind === 'mip') {
-      this.zoomCamera(event.deltaY);
+      const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+      this.zoomCamera(event.deltaY, placement.rect, {
+        x: event.clientX - bounds.left,
+        y: event.clientY - bounds.top,
+      });
     } else if (event.ctrlKey) {
       const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
       this.zoomPane(placement.orientation, event.deltaY, {
@@ -2365,14 +2375,26 @@ export class Viewer {
     }
   }
 
-  /** Wheel over the 3D pane magnifies (scroll up) or shrinks the MIP. */
-  private zoomCamera(deltaY: number): void {
+  /**
+   * Wheel over the 3D pane magnifies (scroll up) or shrinks the MIP, anchoring
+   * the zoom on the cursor: the structure under the pointer stays roughly fixed,
+   * matching the MPR panes' Ctrl+wheel zoom. The orbit camera's `zoom` changes and
+   * its in-plane pan shifts to hold the cursor's world point in place.
+   */
+  private zoomCamera(deltaY: number, rect: PaneRect, cursor: Vec2): void {
     if (deltaY === 0) return;
     const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    this.camera3d.update((cam) => ({
-      ...cam,
-      zoom: clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM),
-    }));
+    const volume = this.volume();
+    if (!volume || rect.width < 1 || rect.height < 1) return;
+    const from = this.camera3d();
+    const to = clamp(from.zoom * factor, MIN_ZOOM, MAX_ZOOM);
+    if (to === from.zoom) return;
+
+    // Cursor → centred device coords with +y up, matching the raycaster and pick.
+    const ndcX = ((cursor.x - rect.x) / rect.width) * 2 - 1;
+    const ndcY = 1 - ((cursor.y - rect.y) / rect.height) * 2;
+    const { panX, panY } = rezoomCameraPan(volume, from, rect.width, rect.height, to, ndcX, ndcY);
+    this.camera3d.set({ ...from, zoom: to, panX, panY });
     this.markMipSettling();
   }
 

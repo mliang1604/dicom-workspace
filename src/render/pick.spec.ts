@@ -29,7 +29,7 @@ function setVoxel(volume: Volume, x: number, y: number, z: number, value: number
 }
 
 /** The default anterior, level, fit-to-volume orbit used across the cases. */
-const LEVEL: OrbitCamera = { azimuth: 0, elevation: 0, zoom: 1 };
+const LEVEL: OrbitCamera = { azimuth: 0, elevation: 0, zoom: 1, panX: 0, panY: 0 };
 const PANE: PaneRect = { x: 0, y: 0, width: 100, height: 100 };
 /** Centre of the square pane: a ray straight down the volume's middle column. */
 const CENTRE = { x: 50, y: 50 };
