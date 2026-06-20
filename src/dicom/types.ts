@@ -210,6 +210,71 @@ export interface MissingSlices {
 }
 
 /**
+ * How a {@link Layer}'s voxels are colour-mapped when composited. The base image
+ * layer is drawn grayscale through its window/level (`'grayscale'`); fusion
+ * overlays (e.g. a dose map) tint through a named colormap. Modelled as a union
+ * so the renderer can switch on it exhaustively as fusion modes are added.
+ */
+export type LayerDisplay =
+  | { readonly kind: 'grayscale' }
+  | { readonly kind: 'colormap'; readonly name: string };
+
+/** The default grayscale display, used by the base image layer. */
+export const GRAYSCALE_DISPLAY: LayerDisplay = { kind: 'grayscale' };
+
+/**
+ * One entry in the viewer's layer registry: a loaded {@link Volume} plus how it
+ * participates in the composited view. A single-series load holds exactly one
+ * layer, role `'base'`; fusion (CT + dose overlay) and side-by-side compare add
+ * `'overlay'` layers above it. Identified by {@link id} so the registry can be
+ * keyed and reordered without positional ambiguity.
+ */
+export interface Layer {
+  /** Stable identifier, unique within a load; the registry's key. */
+  readonly id: string;
+  /** The assembled scalar volume this layer draws. */
+  readonly volume: Volume;
+  /** DICOM modality of {@link volume}, surfaced for labelling; null when absent. */
+  readonly modality: string | null;
+  /** Whether this is the underlying image (`'base'`) or sits above it (`'overlay'`). */
+  readonly role: 'base' | 'overlay';
+  /** How the layer is colour-mapped when composited. */
+  readonly display: LayerDisplay;
+  /** Composite opacity in `[0, 1]`; 1 for an opaque base layer. */
+  readonly opacity: number;
+  /** Whether the layer is currently drawn. */
+  readonly visible: boolean;
+}
+
+/**
+ * Build the base image layer for a {@link Volume}: an opaque, visible,
+ * grayscale `'base'`-role layer. The single layer a one-series load holds, and
+ * the underlay fusion overlays sit on top of.
+ */
+export function baseImageLayer(id: string, volume: Volume): Layer {
+  return {
+    id,
+    volume,
+    modality: volume.modality,
+    role: 'base',
+    display: GRAYSCALE_DISPLAY,
+    opacity: 1,
+    visible: true,
+  };
+}
+
+/**
+ * The base image layer of a registry: the `'base'`-role layer, falling back to
+ * the first entry when none is tagged (a non-empty registry always has one).
+ * Every single-layer consumer (reslice, probe, contours, crosshair, capture)
+ * reads this, so one-layer behaviour matches the pre-registry single volume.
+ * Returns `undefined` only for an empty registry.
+ */
+export function baseLayer(layers: readonly Layer[]): Layer | undefined {
+  return layers.find((layer) => layer.role === 'base') ?? layers[0];
+}
+
+/**
  * The unit of a volume's rescaled voxel values, given its DICOM modality.
  *
  * CT values rescaled through the modality LUT are Hounsfield Units (HU). Other
