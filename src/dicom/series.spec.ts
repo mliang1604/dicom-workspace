@@ -14,6 +14,7 @@ function slice(seriesUid: string | null, overrides: Partial<Slice> = {}): Slice 
     seriesUid,
     seriesNumber: null,
     seriesDescription: null,
+    frameOfReferenceUid: null,
     modality: null,
     rescaleSlope: 1,
     rescaleIntercept: 0,

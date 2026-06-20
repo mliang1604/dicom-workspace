@@ -1,4 +1,5 @@
 import * as dicomParser from 'dicom-parser';
+import type { Series } from './series';
 import type { Contour, Roi, StructureSet, Vec3 } from './types';
 
 /** SOP Class UID identifying an RT Structure Set Storage object. */
@@ -29,9 +30,14 @@ export function parseStructureSet(name: string, buffer: ArrayBuffer): StructureS
   // and referenced frame of reference. This seeds an ROI keyed by ROI Number.
   const rois = new Map<number, MutableRoi>();
   const order: number[] = [];
+  let roiFrameOfReference: string | null = null;
   for (const item of items(dataSet, 'x30060020')) {
     const number = item.intString('x30060022'); // ROI Number
     if (number === undefined) continue;
+    // Referenced Frame of Reference UID (3006,0024): the frame the ROI's contour
+    // points live in. All ROIs normally share one; keep the first seen as the
+    // fallback when the top-level reference sequence is absent.
+    roiFrameOfReference ??= item.string('x30060024')?.trim() || null;
     rois.set(number, {
       number,
       name: item.string('x30060026')?.trim() ?? '', // ROI Name
@@ -63,11 +69,70 @@ export function parseStructureSet(name: string, buffer: ArrayBuffer): StructureS
     roi.interpretedType = item.string('x300600a4')?.trim() || null; // RT ROI Interpreted Type
   }
 
+  const references = readReferences(dataSet);
+
   return {
     name,
     label: dataSet.string('x30060002')?.trim() || null, // Structure Set Label
+    frameOfReferenceUid: references.frameOfReferenceUid ?? roiFrameOfReference,
+    referencedSeriesUids: references.referencedSeriesUids,
     rois: order.map((number) => freeze(rois.get(number)!)),
   };
+}
+
+/**
+ * Walk the Referenced Frame of Reference Sequence (3006,0010) for the frame of
+ * reference and the referenced Series Instance UIDs that tie a structure set to
+ * its image series. The frame of reference is the primary association key; the
+ * series UIDs are the fallback.
+ *
+ * Nesting: Referenced Frame of Reference Sequence (3006,0010) → Frame of
+ * Reference UID (0020,0052), and within it RT Referenced Study Sequence
+ * (3006,0012) → RT Referenced Series Sequence (3006,0014) → Series Instance UID
+ * (0020,000E).
+ */
+function readReferences(dataSet: dicomParser.DataSet): {
+  frameOfReferenceUid: string | null;
+  referencedSeriesUids: string[];
+} {
+  let frameOfReferenceUid: string | null = null;
+  const seriesUids = new Set<string>();
+  for (const frameRef of items(dataSet, 'x30060010')) {
+    frameOfReferenceUid ??= frameRef.string('x00200052')?.trim() || null; // Frame of Reference UID
+    for (const study of items(frameRef, 'x30060012')) {
+      for (const series of items(study, 'x30060014')) {
+        const uid = series.string('x0020000e')?.trim(); // Series Instance UID
+        if (uid) seriesUids.add(uid);
+      }
+    }
+  }
+  return { frameOfReferenceUid, referencedSeriesUids: [...seriesUids] };
+}
+
+/**
+ * Pick the structure sets that annotate a given {@link Series}.
+ *
+ * Primary match: the structure set's referenced Frame of Reference UID equals
+ * the series' (RTSTRUCT 3006,0024 / 3006,0010 vs series 0020,0052) — the
+ * spatial frame both share, so the contour points already live in the series'
+ * coordinate system. Fallback (when the frame of reference is absent on either
+ * side, or doesn't match): the structure set names the series in its RT
+ * Referenced Series Sequence (0020,000E). A structure set with no usable
+ * reference is left unassociated rather than guessed onto a series.
+ */
+export function structureSetsForSeries(
+  structureSets: readonly StructureSet[],
+  series: Series,
+): StructureSet[] {
+  return structureSets.filter((ss) => associates(ss, series));
+}
+
+/** Whether a structure set annotates a series by frame of reference or, failing that, by referenced series UID. */
+function associates(ss: StructureSet, series: Series): boolean {
+  if (ss.frameOfReferenceUid && series.frameOfReferenceUid) {
+    if (ss.frameOfReferenceUid === series.frameOfReferenceUid) return true;
+  }
+  return series.uid !== '' && ss.referencedSeriesUids.includes(series.uid);
 }
 
 /** An ROI under construction, before it is frozen into a {@link Roi}. */

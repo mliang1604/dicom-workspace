@@ -1,7 +1,36 @@
 import type { MissingSlices, Slice, Vec3, Volume, VolumeGeometry } from './types';
-import { cross, dot, normalize, scale } from './vec3';
+import { cross, dot, normalize, scale, sub } from './vec3';
 
 export class VolumeBuildError extends Error {}
+
+/**
+ * Map a patient-space point (LPS, mm) to a continuous voxel index `(i, j, k)` —
+ * column, row, slice — in a volume's grid. The inverse of the forward placement
+ * `patient = origin + i·iStep + j·jStep + k·kStep` described on
+ * {@link VolumeGeometry}: it inverts the 3×3 map whose columns are the steps.
+ *
+ * This is the bridge that lets an RTSTRUCT's contour points (stored in patient
+ * coordinates) be drawn over the resliced planes: a point shared with the image
+ * volume's frame of reference resolves to the same voxel the image samples
+ * there. Indices are continuous (not rounded) and may fall outside `[0, dim)`
+ * for points beyond the volume; callers decide how to clip or interpolate.
+ *
+ * Returns `null` when the geometry is singular (degenerate steps that cannot be
+ * inverted) — the same condition {@link buildVolume} guards when assembling.
+ */
+export function patientToVoxel(geometry: VolumeGeometry, point: Vec3): Vec3 | null {
+  const { iStep, jStep, kStep, origin } = geometry;
+  // Columns of the inverse via the adjugate: each output index is the relative
+  // point projected onto the reciprocal of the corresponding step pair.
+  const det = dot(iStep, cross(jStep, kStep));
+  if (Math.abs(det) < 1e-9) return null;
+  const rel = sub(point, origin);
+  return [
+    dot(cross(jStep, kStep), rel) / det,
+    dot(cross(kStep, iStep), rel) / det,
+    dot(cross(iStep, jStep), rel) / det,
+  ];
+}
 
 /**
  * Assemble a stack of {@link Slice}s into a {@link Volume}.

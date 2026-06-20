@@ -1,7 +1,8 @@
 /// <reference lib="webworker" />
 
 import { parseFileAsync } from '../dicom/loader';
-import type { Slice } from '../dicom/types';
+import { parseStructureSet } from '../dicom/structure-set';
+import type { Slice, StructureSet } from '../dicom/types';
 
 /**
  * A request to parse one file: the file's bytes plus the id used to pair the
@@ -15,27 +16,40 @@ export interface ParseRequest {
 }
 
 /**
- * The result of one {@link ParseRequest}: the parsed slices on success, or the
- * error message on failure (the worker never throws across the boundary). On
- * success each slice's pixel buffer is transferred back, not copied.
+ * The result of one {@link ParseRequest}: the parsed image slices and structure
+ * sets on success, or the error message on failure (the worker never throws
+ * across the boundary). On success each slice's pixel buffer is transferred
+ * back, not copied. `structureSets` holds the file's RTSTRUCT when it is one
+ * (its contour points carry no pixel buffers, so they are cloned, not
+ * transferred); empty otherwise.
  */
 export type ParseResponse =
-  | { readonly id: number; readonly ok: true; readonly slices: Slice[] }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly slices: Slice[];
+      readonly structureSets: StructureSet[];
+    }
   | { readonly id: number; readonly ok: false; readonly message: string };
 
 /**
- * Thin off-main-thread wrapper around the pure {@link parseFileAsync}: parse one
- * file per message and post its slices back, transferring the pixel buffers so
- * the large arrays move without a copy. All parsing/decoding logic stays in
- * `../dicom`; this file is only the worker plumbing.
+ * Thin off-main-thread wrapper around the pure parsers: parse one file per
+ * message and post its slices (and any RTSTRUCT) back, transferring the pixel
+ * buffers so the large arrays move without a copy. An RTSTRUCT carries no
+ * PixelData, so {@link parseFileAsync} yields no slices for it; only then do we
+ * try {@link parseStructureSet}, which returns null for ordinary images. All
+ * parsing/decoding logic stays in `../dicom`; this file is only the worker
+ * plumbing.
  */
 addEventListener('message', async (event: MessageEvent<ParseRequest>) => {
   const { id, name, buffer } = event.data;
   try {
     const slices = await parseFileAsync(name, buffer);
+    const structureSet = slices.length === 0 ? parseStructureSet(name, buffer) : null;
+    const structureSets = structureSet ? [structureSet] : [];
     // Transfer each frame's pixel buffer back instead of cloning it.
     const transfer = slices.map((slice) => slice.pixels.buffer);
-    postMessage({ id, ok: true, slices } satisfies ParseResponse, transfer);
+    postMessage({ id, ok: true, slices, structureSets } satisfies ParseResponse, transfer);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     postMessage({ id, ok: false, message } satisfies ParseResponse);

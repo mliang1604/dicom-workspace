@@ -18,6 +18,12 @@ export interface Slice {
   readonly instanceNumber: number;
   /** SeriesInstanceUID, Tag (0020,000E). Groups slices into a series; null if absent. */
   readonly seriesUid: string | null;
+  /**
+   * FrameOfReferenceUID, Tag (0020,0052). The spatial frame the patient
+   * coordinates live in; an RTSTRUCT is associated to a series by matching this.
+   * Null when absent.
+   */
+  readonly frameOfReferenceUid: string | null;
   /** SeriesNumber, Tag (0020,0011). Orders series in the picker; null if absent. */
   readonly seriesNumber: number | null;
   /** SeriesDescription, Tag (0008,103E). Labels the series; null if absent. */
@@ -89,6 +95,21 @@ export interface StructureSet {
   readonly name: string;
   /** Structure Set Label (3006,0002), a short human label; null when absent. */
   readonly label: string | null;
+  /**
+   * Referenced Frame of Reference UID — the spatial frame the contour points are
+   * defined in. Taken from the Referenced Frame of Reference Sequence (3006,0010
+   * → 0020,0052), falling back to a ROI's Referenced Frame of Reference UID
+   * (3006,0024). The primary key for {@link import('./series').Series}
+   * association: it matches the series' {@link Slice.frameOfReferenceUid}. Null
+   * when absent.
+   */
+  readonly frameOfReferenceUid: string | null;
+  /**
+   * Series Instance UIDs this structure set references (RT Referenced Series
+   * Sequence, 3006,0014 → 0020,000E). Used as the association fallback when the
+   * frame of reference is absent or unmatched. Empty when none are declared.
+   */
+  readonly referencedSeriesUids: readonly string[];
   /** The regions of interest, joined across the three RTSTRUCT sequences. */
   readonly rois: readonly Roi[];
 }

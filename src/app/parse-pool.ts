@@ -1,8 +1,14 @@
-import type { Slice } from '../dicom/types';
+import type { Slice, StructureSet } from '../dicom/types';
 import type { ParseRequest, ParseResponse } from './parse.worker';
 
 /** Reports parse progress: files finished out of the total selected. */
 export type LoadProgress = (loaded: number, total: number) => void;
+
+/** What a batch parse yields: image slices and any RTSTRUCTs, in file order. */
+export interface ParsedFiles {
+  readonly slices: Slice[];
+  readonly structureSets: StructureSet[];
+}
 
 /**
  * Upper bound on the worker pool size. Parsing is CPU-bound, so a handful of
@@ -32,14 +38,14 @@ function createWorker(): Worker {
 export async function parseFilesInWorkers(
   files: readonly File[],
   onProgress?: LoadProgress,
-): Promise<Slice[]> {
+): Promise<ParsedFiles> {
   const total = files.length;
   onProgress?.(0, total);
-  if (total === 0) return [];
+  if (total === 0) return { slices: [], structureSets: [] };
 
   // One result bucket per file, filled at the file's original index so the
   // flattened output preserves selection order despite out-of-order completion.
-  const perFile: Slice[][] = new Array(total);
+  const perFile: ParseResult[] = new Array(total);
   let nextIndex = 0;
   let completed = 0;
 
@@ -63,20 +69,27 @@ export async function parseFilesInWorkers(
     for (const worker of workers) worker.terminate();
   }
 
-  return perFile.flat();
+  return {
+    slices: perFile.flatMap((r) => r.slices),
+    structureSets: perFile.flatMap((r) => r.structureSets),
+  };
 }
 
+/** One file's parse output, before flattening across the batch. */
+type ParseResult = Pick<ParsedFiles, 'slices' | 'structureSets'>;
+
 /**
- * Post one file to a worker and await its parsed slices. Each worker handles a
- * single file at a time, so at most one request is in flight per worker.
+ * Post one file to a worker and await its parsed slices and structure sets. Each
+ * worker handles a single file at a time, so at most one request is in flight
+ * per worker.
  */
 function parseInWorker(
   worker: Worker,
   id: number,
   name: string,
   buffer: ArrayBuffer,
-): Promise<Slice[]> {
-  return new Promise<Slice[]>((resolve, reject) => {
+): Promise<ParseResult> {
+  return new Promise<ParseResult>((resolve, reject) => {
     const cleanup = () => {
       worker.removeEventListener('message', onMessage);
       worker.removeEventListener('error', onError);
@@ -85,7 +98,7 @@ function parseInWorker(
       const data = event.data;
       if (data.id !== id) return; // not this request's response
       cleanup();
-      if (data.ok) resolve(data.slices);
+      if (data.ok) resolve({ slices: data.slices, structureSets: data.structureSets });
       else reject(new Error(data.message));
     };
     const onError = (event: ErrorEvent) => {
