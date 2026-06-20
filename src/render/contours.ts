@@ -238,18 +238,30 @@ export type ContourPlaneResult =
   | { readonly kind: 'cross'; readonly row: CrossSectionRow }
   | null;
 
-export function contourPlaneResult(
+/**
+ * One contour projected into a pane's plane frame, with its through-plane span
+ * precomputed. This is the expensive, slice-independent half — project once
+ * ({@link projectContour}), then classify against any slice cheaply
+ * ({@link classifyContour}) as the user scrolls.
+ */
+export interface ContourCoords {
+  readonly coords: readonly PlaneCoords[];
+  readonly closed: boolean;
+  readonly minSlicePos: number;
+  readonly maxSlicePos: number;
+  readonly meanSlicePos: number;
+}
+
+/** Project a contour into a pane's plane frame once, with its slicePos span. */
+export function projectContour(
   volume: Volume,
   orientation: Orientation,
-  sliceIndex: number,
   points: readonly Vec3[],
   closed: boolean,
   rotation?: ObliqueRotation,
-): ContourPlaneResult {
+): ContourCoords | null {
   const coords = contourPlaneCoords(volume, orientation, points, rotation);
   if (!coords) return null;
-
-  const { slicePos0, half } = slicePosBand(volume, orientation, sliceIndex);
   let min = Infinity;
   let max = -Infinity;
   let sum = 0;
@@ -258,19 +270,47 @@ export function contourPlaneResult(
     if (c.slicePos > max) max = c.slicePos;
     sum += c.slicePos;
   }
+  return { coords, closed, minSlicePos: min, maxSlicePos: max, meanSlicePos: sum / coords.length };
+}
 
-  if (max - min <= half) {
-    if (Math.abs(sum / coords.length - slicePos0) > half) return null;
-    return { kind: 'loop', points: coords.map((c) => ({ u: c.u, v: c.v })), closed };
+/**
+ * Classify a pre-projected contour ({@link projectContour}) against a slice —
+ * the cheap, per-scroll half. Uses the precomputed span for an O(1) off-slice
+ * skip, so scrolling re-runs no projection.
+ */
+export function classifyContour(
+  c: ContourCoords,
+  volume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+): ContourPlaneResult {
+  const { slicePos0, half } = slicePosBand(volume, orientation, sliceIndex);
+
+  if (c.maxSlicePos - c.minSlicePos <= half) {
+    if (Math.abs(c.meanSlicePos - slicePos0) > half) return null;
+    return { kind: 'loop', points: c.coords.map((p) => ({ u: p.u, v: p.v })), closed: c.closed };
   }
 
-  const crossings = sliceCrossings(coords, slicePos0, closed);
+  const crossings = sliceCrossings(c.coords, slicePos0, c.closed);
   if (crossings.length < 2) return null;
   // For axial contours (constant z) on a coronal/sagittal pane the crossings are
   // collinear at a constant v (= the contour's plane position); the mean is exact
   // there and a reasonable row position for the rare oblique case.
-  const v = crossings.reduce((s, c) => s + c.v, 0) / crossings.length;
-  return { kind: 'cross', row: { v, us: crossings.map((c) => c.u) } };
+  const v = crossings.reduce((s, p) => s + p.v, 0) / crossings.length;
+  return { kind: 'cross', row: { v, us: crossings.map((p) => p.u) } };
+}
+
+export function contourPlaneResult(
+  volume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+  points: readonly Vec3[],
+  closed: boolean,
+  rotation?: ObliqueRotation,
+): ContourPlaneResult {
+  const projected = projectContour(volume, orientation, points, closed, rotation);
+  if (!projected) return null;
+  return classifyContour(projected, volume, orientation, sliceIndex);
 }
 
 /**

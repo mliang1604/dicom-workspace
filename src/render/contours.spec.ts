@@ -1,10 +1,12 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
 import {
+  classifyContour,
   contourOnPlane,
   contourPlaneResult,
   crossSectionOutline,
   decimate,
   patientToPlane,
+  projectContour,
   sliceCrossings,
   sliceSegments,
   type CrossSectionRow,
@@ -292,5 +294,38 @@ describe('contourPlaneResult', () => {
       expect(res.row.us.length).toBeGreaterThanOrEqual(2);
       expect(res.row.v).toBeCloseTo(1 - 4.5 / 8, 6);
     }
+  });
+});
+
+describe('projectContour / classifyContour (cached split)', () => {
+  const dim = 8;
+  const loop: Vec3[] = [
+    [2, 2, 4],
+    [5, 2, 4],
+    [5, 5, 4],
+    [2, 5, 4],
+  ];
+
+  it('projects once with a precomputed through-plane span, then classifies per slice', () => {
+    const volume = makeVolume(dim);
+    const projected = projectContour(volume, Orientation.Axial, loop, true)!;
+    expect(projected).not.toBeNull();
+    // A flat axial loop: min ≈ max ≈ mean slicePos (z = 4 → 4.5/8).
+    expect(projected.minSlicePos).toBeCloseTo(4.5 / 8, 6);
+    expect(projected.maxSlicePos).toBeCloseTo(4.5 / 8, 6);
+    expect(projected.meanSlicePos).toBeCloseTo(4.5 / 8, 6);
+
+    // Re-classifying against different slices reuses the same projection.
+    expect(classifyContour(projected, volume, Orientation.Axial, 4)?.kind).toBe('loop');
+    expect(classifyContour(projected, volume, Orientation.Axial, 6)).toBeNull(); // off-slice
+  });
+
+  it('matches contourPlaneResult for the crossing (coronal) case', () => {
+    const volume = makeVolume(dim);
+    const projected = projectContour(volume, Orientation.Coronal, loop, true)!;
+    const viaSplit = classifyContour(projected, volume, Orientation.Coronal, 3);
+    const direct = contourPlaneResult(volume, Orientation.Coronal, 3, loop, true);
+    expect(viaSplit).toEqual(direct);
+    expect(viaSplit?.kind).toBe('cross');
   });
 });
