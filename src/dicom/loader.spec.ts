@@ -286,6 +286,96 @@ function jpegLsCt(): ArrayBuffer {
   return dicomFile(body, '1.2.840.10008.1.2.4.80');
 }
 
+/** Raw 8-bit PixelData (e.g. interleaved RGB or palette indices). */
+function pixelData8(bytes: readonly number[]): Uint8Array {
+  return element(0x7fe0, 0x0010, 'OB', padEven(Uint8Array.from(bytes), 0));
+}
+
+/** A 2×2 MONOCHROME1 image (inverted sense) with a rescale LUT and a window. */
+function monochrome1(): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0060, 'CS', text('CR')), // Modality
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0004, 'CS', text('MONOCHROME1')), // PhotometricInterpretation
+    element(0x0028, 0x0010, 'US', u16le(2)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(2)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(16)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    element(0x0028, 0x1050, 'DS', numbers([40])), // WindowCenter
+    element(0x0028, 0x1051, 'DS', numbers([400])), // WindowWidth
+    element(0x0028, 0x1052, 'DS', numbers([10])), // RescaleIntercept
+    element(0x0028, 0x1053, 'DS', numbers([2])), // RescaleSlope
+    pixelData([[1, 2, 3, 4]]),
+  ]);
+  return dicomFile(body);
+}
+
+/** A 1×4 12-bits-stored signed image; samples chosen to exercise sign extension. */
+function signed12(): ArrayBuffer {
+  const body = concat([
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0010, 'US', u16le(1)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(4)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(16)), // BitsAllocated
+    element(0x0028, 0x0101, 'US', u16le(12)), // BitsStored
+    element(0x0028, 0x0102, 'US', u16le(11)), // HighBit
+    element(0x0028, 0x0103, 'US', u16le(1)), // PixelRepresentation (signed)
+    pixelData([[0xfff, 0x800, 0x7ff, 0x000]]),
+  ]);
+  return dicomFile(body);
+}
+
+/** A 1×4 image with a PixelPaddingValue marking two background pixels. */
+function paddedImage(): ArrayBuffer {
+  const body = concat([
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0010, 'US', u16le(1)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(4)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(16)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    element(0x0028, 0x0120, 'US', u16le(2000)), // PixelPaddingValue
+    pixelData([[2000, 5, 2000, 80]]),
+  ]);
+  return dicomFile(body);
+}
+
+/** A 1×2 8-bit interleaved RGB image: pixel 0 white, pixel 1 black. */
+function rgbImage(): ArrayBuffer {
+  const body = concat([
+    element(0x0028, 0x0002, 'US', u16le(3)), // SamplesPerPixel
+    element(0x0028, 0x0004, 'CS', text('RGB')), // PhotometricInterpretation
+    element(0x0028, 0x0006, 'US', u16le(0)), // PlanarConfiguration (interleaved)
+    element(0x0028, 0x0010, 'US', u16le(1)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(2)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(8)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    pixelData8([255, 255, 255, 0, 0, 0]),
+  ]);
+  return dicomFile(body);
+}
+
+/** A 1×2 PALETTE COLOR image: index 0 → black, index 1 → white. */
+function paletteImage(): ArrayBuffer {
+  const descriptor = concat([u16le(2), u16le(0), u16le(8)]); // 2 entries, first 0, 8 bits
+  const lutData = concat([u16le(0), u16le(255)]); // entry 0 black, entry 1 white
+  const body = concat([
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0004, 'CS', text('PALETTE COLOR')), // PhotometricInterpretation
+    element(0x0028, 0x0010, 'US', u16le(1)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(2)), // Columns
+    element(0x0028, 0x0100, 'US', u16le(8)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    element(0x0028, 0x1101, 'US', descriptor), // Red Palette LUT Descriptor
+    element(0x0028, 0x1102, 'US', descriptor), // Green Palette LUT Descriptor
+    element(0x0028, 0x1103, 'US', descriptor), // Blue Palette LUT Descriptor
+    element(0x0028, 0x1201, 'OW', lutData), // Red Palette LUT Data
+    element(0x0028, 0x1202, 'OW', lutData), // Green Palette LUT Data
+    element(0x0028, 0x1203, 'OW', lutData), // Blue Palette LUT Data
+    pixelData8([0, 1]),
+  ]);
+  return dicomFile(body);
+}
+
 // --- Tests ------------------------------------------------------------------
 
 describe('parseFile — single frame', () => {
@@ -391,6 +481,52 @@ describe('parseFileAsync — wasm-decoded compression', () => {
 
   it('sync parseFile throws for a wasm-only transfer syntax', () => {
     expect(() => parseFile('jls.dcm', jpegLsCt())).toThrow(UnsupportedDicomError);
+  });
+});
+
+describe('parseFile — photometric handling', () => {
+  it('inverts MONOCHROME1 by negating the modality LUT and window', () => {
+    const s = parseFile('mono1.dcm', monochrome1())[0];
+    // Stored 2·raw+10 negated to −(2·raw+10): [12,14,16,18] → [−12,−14,−16,−18].
+    expect(Array.from(s.pixels)).toEqual([-12, -14, -16, -18]);
+    expect(s.rescaleSlope).toBe(-2);
+    expect(s.rescaleIntercept).toBe(-10);
+    expect(s.windowCenter).toBe(-40); // centre flips; width is unchanged
+    expect(s.windowWidth).toBe(400);
+  });
+
+  it('leaves MONOCHROME2 untouched (no photometric tag)', () => {
+    // The classic CT fixture has no PhotometricInterpretation: default MONOCHROME2.
+    const s = parseFile('ct.dcm', singleFrameCt())[0];
+    expect(s.rescaleSlope).toBe(1);
+    expect(Array.from(s.pixels)).toEqual([-1023, -1022, -1021, -1020]);
+  });
+
+  it('masks and sign-extends sub-width signed samples per BitsStored', () => {
+    const s = parseFile('s12.dcm', signed12())[0];
+    // 12-bit signed: 0xFFF=−1, 0x800=−2048, 0x7FF=+2047, 0=0 (slope 1, intercept 0).
+    expect(Array.from(s.pixels)).toEqual([-1, -2048, 2047, 0]);
+  });
+
+  it('remaps PixelPaddingValue pixels to the minimum real value', () => {
+    const s = parseFile('pad.dcm', paddedImage())[0];
+    expect(Array.from(s.pixels)).toEqual([5, 5, 5, 80]);
+  });
+
+  it('loads an RGB image as luminance instead of erroring', () => {
+    const slices = parseFile('rgb.dcm', rgbImage());
+    expect(slices).toHaveLength(1);
+    expect(slices[0].pixels[0]).toBeCloseTo(255); // white
+    expect(slices[0].pixels[1]).toBe(0); // black
+    expect(slices[0].rescaleSlope).toBe(1);
+    expect(slices[0].rescaleIntercept).toBe(0);
+  });
+
+  it('applies the palette LUTs to render PALETTE COLOR as luminance', () => {
+    const slices = parseFile('palette.dcm', paletteImage());
+    expect(slices).toHaveLength(1);
+    expect(slices[0].pixels[0]).toBe(0); // index 0 → black
+    expect(slices[0].pixels[1]).toBeCloseTo(255); // index 1 → white
   });
 });
 
