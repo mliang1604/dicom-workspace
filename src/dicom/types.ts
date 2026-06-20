@@ -41,6 +41,59 @@ export interface Slice {
 }
 
 /**
+ * One planar contour of an ROI: a loop or polyline of points in patient space.
+ *
+ * Sourced from one item of the Contour Sequence (3006,0040). The points come
+ * straight from Contour Data (3006,0050) — a flat `x\y\z` list in patient
+ * coordinates (LPS, millimetres) — regrouped into triplets.
+ */
+export interface Contour {
+  /**
+   * Contour Geometric Type (3006,0042): typically `CLOSED_PLANAR`,
+   * `OPEN_PLANAR`, or `POINT`. Kept as the raw string so unrecognised types
+   * (e.g. `CLOSED_PLANAR_XOR`) round-trip rather than being dropped.
+   */
+  readonly geometricType: string;
+  /** The contour's points in patient coordinates (LPS, mm). */
+  readonly points: readonly Vec3[];
+}
+
+/**
+ * One region of interest from an RTSTRUCT: its identity and colour joined to the
+ * contour stack and interpreted type that live in separate top-level sequences.
+ */
+export interface Roi {
+  /** ROI Number (3006,0022): the identifier the other sequences reference. */
+  readonly number: number;
+  /** ROI Name (3006,0026), e.g. "Heart" or "PTV". */
+  readonly name: string;
+  /** ROI Display Color (3006,002A) as `[r, g, b]` in 0–255; null when absent. */
+  readonly color: readonly [number, number, number] | null;
+  /**
+   * RT ROI Interpreted Type (3006,00A4) from the RT ROI Observations Sequence
+   * (e.g. `ORGAN`, `PTV`, `GTV`); null when the ROI has no observation.
+   */
+  readonly interpretedType: string | null;
+  /** The ROI's planar contours, in Contour Sequence order. */
+  readonly contours: readonly Contour[];
+}
+
+/**
+ * A parsed DICOM RTSTRUCT: a named set of coloured ROIs, each a stack of planar
+ * contours in patient coordinates. Unlike a {@link Slice}, it carries no pixel
+ * data; it overlays onto a separately-loaded image volume sharing its frame of
+ * reference.
+ */
+export interface StructureSet {
+  /** Source file name, for diagnostics. */
+  readonly name: string;
+  /** Structure Set Label (3006,0002), a short human label; null when absent. */
+  readonly label: string | null;
+  /** The regions of interest, joined across the three RTSTRUCT sequences. */
+  readonly rois: readonly Roi[];
+}
+
+/**
  * Which way we are slicing the volume. Modelled as an `as const` object rather
  * than a `const enum` so it survives `isolatedModules` transpilation, and as a
  * union type so switches can be checked for exhaustiveness.
