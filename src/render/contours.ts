@@ -163,6 +163,29 @@ export function sliceSegments(
  * Returns an empty array for degenerate input (fewer than two points, or a
  * singular volume geometry).
  */
+/**
+ * Map a whole contour's patient-space points into a pane's `(u, v, slicePos)`
+ * frame in one pass, reusing a single `planeToTex` affine. Returns null for a
+ * degenerate contour (fewer than two points) or a singular volume geometry —
+ * the expensive step, so callers can cache it independent of pan/zoom/flip.
+ */
+export function contourPlaneCoords(
+  volume: Volume,
+  orientation: Orientation,
+  points: readonly Vec3[],
+  rotation?: ObliqueRotation,
+): PlaneCoords[] | null {
+  if (points.length < 2) return null;
+  const map = planeToTex(volume, orientation, rotation);
+  const coords: PlaneCoords[] = [];
+  for (const point of points) {
+    const pc = projectPoint(map, volume, point);
+    if (!pc) return null;
+    coords.push(pc);
+  }
+  return coords;
+}
+
 export function contourOnPlane(
   volume: Volume,
   orientation: Orientation,
@@ -171,14 +194,8 @@ export function contourOnPlane(
   closed: boolean,
   rotation?: ObliqueRotation,
 ): ContourPolyline[] {
-  if (points.length < 2) return [];
-  const map = planeToTex(volume, orientation, rotation);
-  const coords: PlaneCoords[] = [];
-  for (const point of points) {
-    const pc = projectPoint(map, volume, point);
-    if (!pc) return [];
-    coords.push(pc);
-  }
+  const coords = contourPlaneCoords(volume, orientation, points, rotation);
+  if (!coords) return [];
 
   const { slicePos0, half } = slicePosBand(volume, orientation, sliceIndex);
   let min = Infinity;
@@ -200,4 +217,129 @@ export function contourOnPlane(
     points: segment,
     closed: false,
   }));
+}
+
+/** One contour's crossing of a slice: its spans' `u` values at a constant `v`. */
+export interface CrossSectionRow {
+  readonly v: number;
+  readonly us: readonly number[];
+}
+
+/**
+ * How one contour meets a pane's displayed slice, with the expensive patient→plane
+ * projection done once. Either a coplanar `loop` to draw whole, a `cross` row of
+ * `(u, v)` crossings to fold into the ROI's cross-section silhouette, or null when
+ * the contour is off this slice / degenerate. Unlike {@link contourOnPlane} this
+ * returns the raw crossings so the caller can build an *outline* across the ROI's
+ * contours rather than stacking per-slice interior spans (which read as a fill).
+ */
+export type ContourPlaneResult =
+  | { readonly kind: 'loop'; readonly points: PlanePoint[]; readonly closed: boolean }
+  | { readonly kind: 'cross'; readonly row: CrossSectionRow }
+  | null;
+
+export function contourPlaneResult(
+  volume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+  points: readonly Vec3[],
+  closed: boolean,
+  rotation?: ObliqueRotation,
+): ContourPlaneResult {
+  const coords = contourPlaneCoords(volume, orientation, points, rotation);
+  if (!coords) return null;
+
+  const { slicePos0, half } = slicePosBand(volume, orientation, sliceIndex);
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  for (const c of coords) {
+    if (c.slicePos < min) min = c.slicePos;
+    if (c.slicePos > max) max = c.slicePos;
+    sum += c.slicePos;
+  }
+
+  if (max - min <= half) {
+    if (Math.abs(sum / coords.length - slicePos0) > half) return null;
+    return { kind: 'loop', points: coords.map((c) => ({ u: c.u, v: c.v })), closed };
+  }
+
+  const crossings = sliceCrossings(coords, slicePos0, closed);
+  if (crossings.length < 2) return null;
+  // For axial contours (constant z) on a coronal/sagittal pane the crossings are
+  // collinear at a constant v (= the contour's plane position); the mean is exact
+  // there and a reasonable row position for the rare oblique case.
+  const v = crossings.reduce((s, c) => s + c.v, 0) / crossings.length;
+  return { kind: 'cross', row: { v, us: crossings.map((c) => c.u) } };
+}
+
+/**
+ * Build the cross-section *outline* of an ROI from its per-contour crossing rows:
+ * the left (min-u) and right (max-u) envelopes down the stack of slices, joined
+ * into one closed loop. This traces the structure's silhouette where it cuts the
+ * plane instead of filling it with one interior span per contour.
+ */
+export function crossSectionOutline(rows: readonly CrossSectionRow[]): ContourPolyline[] {
+  const valid = rows
+    .filter((r) => r.us.length > 0)
+    .map((r) => ({ v: r.v, lo: Math.min(...r.us), hi: Math.max(...r.us) }))
+    .sort((a, b) => a.v - b.v);
+  if (valid.length === 0) return [];
+  if (valid.length === 1) {
+    const r = valid[0];
+    return [
+      {
+        points: [
+          { u: r.lo, v: r.v },
+          { u: r.hi, v: r.v },
+        ],
+        closed: false,
+      },
+    ];
+  }
+  const left = valid.map((r) => ({ u: r.lo, v: r.v }));
+  const right = valid.map((r) => ({ u: r.hi, v: r.v })).reverse();
+  return [{ points: [...left, ...right], closed: true }];
+}
+
+/** Perpendicular distance from `p` to the line through `a` and `b`. */
+function perpDistance(p: PlanePoint, a: PlanePoint, b: PlanePoint): number {
+  const dx = b.u - a.u;
+  const dy = b.v - a.v;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return Math.hypot(p.u - a.u, p.v - a.v);
+  return Math.abs((p.u - a.u) * dy - (p.v - a.v) * dx) / len;
+}
+
+/**
+ * Ramer–Douglas–Peucker simplification: drop points that stray less than
+ * `tolerance` from the line between their kept neighbours. Halves the point count
+ * of dense contour loops with no visible change, cutting projection + SVG cost.
+ */
+export function decimate(points: readonly PlanePoint[], tolerance: number): PlanePoint[] {
+  const n = points.length;
+  if (n <= 2 || tolerance <= 0) return points.slice();
+  const keep = new Uint8Array(n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+  const stack: [number, number][] = [[0, n - 1]];
+  while (stack.length) {
+    const [lo, hi] = stack.pop()!;
+    let maxD = -1;
+    let idx = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = perpDistance(points[i], points[lo], points[hi]);
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (maxD > tolerance && idx > 0) {
+      keep[idx] = 1;
+      stack.push([lo, idx], [idx, hi]);
+    }
+  }
+  const out: PlanePoint[] = [];
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(points[i]);
+  return out;
 }

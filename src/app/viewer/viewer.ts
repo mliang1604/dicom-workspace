@@ -90,7 +90,13 @@ import { axisMarkers } from '../../render/axis-indicator';
 import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
-import { contourOnPlane } from '../../render/contours';
+import {
+  contourPlaneResult,
+  crossSectionOutline,
+  decimate,
+  type ContourPolyline,
+  type CrossSectionRow,
+} from '../../render/contours';
 import {
   modalityUnit,
   Orientation,
@@ -202,6 +208,23 @@ interface ContourPaneOverlay {
   /** The contour shapes drawn on this pane. */
   readonly shapes: readonly ContourShape[];
 }
+
+/** One ROI's contour geometry for a pane, in plane `(u, v)` — pan/zoom-independent. */
+interface RoiPlaneShapes {
+  /** ROI key (see {@link roiKeyOf}); the `@for` track and the per-shape key prefix. */
+  readonly key: string;
+  readonly color: string;
+  readonly opacity: number;
+  /** Loops and the cross-section outline, in plane `(u, v)` coordinates. */
+  readonly polylines: readonly ContourPolyline[];
+}
+
+/** Decimation tolerance for coplanar loops, in plane `(u, v)` units (~0.15% of a pane). */
+const CONTOUR_DECIMATE_UV = 0.0015;
+/** Decimation tolerance for 3D contour polylines, in pane pixels. */
+const CONTOUR_DECIMATE_PX = 0.75;
+/** Cap on contour loops drawn per ROI in the 3D pane (evenly spaced through the stack). */
+const MAX_3D_CONTOUR_LOOPS = 64;
 
 /** All visible ROI contours projected into the 3D pane, for one SVG overlay. */
 interface Contour3dOverlay {
@@ -1045,14 +1068,24 @@ export class Viewer {
         if (hidden.has(key)) continue;
         const color = overrides.get(key) ?? rgbColor(roi.color);
         const opacity = opacities.get(key) ?? 1;
-        for (let ci = 0; ci < roi.contours.length; ci++) {
+        // Draw at most MAX_3D_CONTOUR_LOOPS evenly-spaced loops so a deep stack
+        // reads as discrete rings rather than a solid mass (and stays fast to
+        // orbit); decimate each projected loop to drop near-collinear points.
+        const step = Math.max(1, Math.ceil(roi.contours.length / MAX_3D_CONTOUR_LOOPS));
+        for (let ci = 0; ci < roi.contours.length; ci += step) {
           const contour = roi.contours[ci];
           if (contour.points.length < 2) continue; // a single POINT can't form a polyline
           const closed =
             contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
-          const points = projectPolyline(basis, contour.points, mip.rect.width, mip.rect.height)
-            .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
-            .join(' ');
+          const projected = projectPolyline(
+            basis,
+            contour.points,
+            mip.rect.width,
+            mip.rect.height,
+          ).map((p) => ({ u: p.x, v: p.y }));
+          const simplified = decimate(projected, CONTOUR_DECIMATE_PX);
+          if (simplified.length < 2) continue;
+          const points = simplified.map((p) => `${p.u.toFixed(1)},${p.v.toFixed(1)}`).join(' ');
           shapes.push({ key: `${setIndex}:${roi.number}:${ci}`, points, closed, color, opacity });
         }
       }
@@ -1331,56 +1364,48 @@ export class Viewer {
   });
 
   /**
-   * RTSTRUCT ROI contours projected onto each MPR pane for the SVG overlay,
-   * mirroring {@link measurementOverlays}. Every visible ROI's contours run
-   * through {@link contourOnPlane} — drawn as a closed loop on the slice they lie
-   * in, or as cross-section segments where they cut an orthogonal/oblique pane —
-   * then projected to pane pixels with {@link planePointToPane}, the same forward
-   * map the measurements and crosshair use, so the contours track pan, zoom,
-   * scroll, oblique tilt and the sagittal flip. Recomputed only from the panes,
-   * zoom, pan, flip, slice, oblique and ROI-visibility state — never the
-   * window/level or 3D camera.
+   * Plane-space ROI contour geometry per MPR orientation — the expensive half of
+   * the contour overlay, split out so panning/zooming never re-runs it. Each
+   * visible ROI's contours are projected into the pane's `(u, v)` frame once
+   * ({@link contourPlaneResult}): coplanar loops are kept whole (decimated), and
+   * the contours that cut an orthogonal/oblique pane are folded into a single
+   * cross-section *outline* ({@link crossSectionOutline}) — a silhouette, not the
+   * per-slice interior spans that used to stack into a solid fill. Recomputed
+   * only from the volume, structure sets, slice indices, oblique tilt and ROI
+   * state — never pan, zoom, flip, window/level or the 3D camera.
    */
-  protected readonly contourOverlays = computed<ContourPaneOverlay[]>(() => {
+  private readonly contourPlaneGeometry = computed<Map<Orientation, RoiPlaneShapes[]>>(() => {
+    const out = new Map<Orientation, RoiPlaneShapes[]>();
     const volume = this.volume();
     const sets = this.structureSets();
-    if (!this.isReady() || !volume || sets.length === 0) return [];
+    if (!this.isReady() || !volume || sets.length === 0) return out;
 
-    const zooms = this.zooms();
-    const pans = this.pans();
-    const obliques = this.obliques();
-    const flipped = this.sagittalFlipped();
     const indices = this.sliceIndices();
+    const obliques = this.obliques();
     const hidden = this.hiddenRois();
     const overrides = this.roiColorOverrides();
     const opacities = this.roiOpacities();
     const selectedSet = this.selectedSetIndex();
 
-    const result: ContourPaneOverlay[] = [];
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      const orientation = pane.orientation;
-      const rect = pane.rect;
-      if (rect.width < 1 || rect.height < 1) continue;
-      const flipX = orientation === Orientation.Sagittal && flipped;
-      const zoom = zooms[orientation];
-      const pan = pans[orientation];
+    const orientations = new Set<Orientation>();
+    for (const pane of this.panes()) if (pane.kind === 'mpr') orientations.add(pane.orientation);
+
+    for (const orientation of orientations) {
       const sliceIndex = indices[orientation];
       const rotation = obliques[orientation];
-
-      const shapes: ContourShape[] = [];
+      const roiShapes: RoiPlaneShapes[] = [];
       sets.forEach((ss, setIndex) => {
         if (!setIsShown(selectedSet, setIndex)) return;
         for (const roi of ss.rois) {
           const key = roiKeyOf(setIndex, roi.number);
           if (hidden.has(key)) continue;
-          const color = overrides.get(key) ?? rgbColor(roi.color);
-          const opacity = opacities.get(key) ?? 1;
-          for (let ci = 0; ci < roi.contours.length; ci++) {
-            const contour = roi.contours[ci];
+
+          const loops: ContourPolyline[] = [];
+          const rows: CrossSectionRow[] = [];
+          for (const contour of roi.contours) {
             const closed =
               contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
-            const polylines = contourOnPlane(
+            const res = contourPlaneResult(
               volume,
               orientation,
               sliceIndex,
@@ -1388,26 +1413,77 @@ export class Viewer {
               closed,
               rotation,
             );
-            for (let pi = 0; pi < polylines.length; pi++) {
-              const polyline = polylines[pi];
-              const pixels: string[] = [];
-              for (const point of polyline.points) {
-                const screen = planePointToPane(volume, orientation, point, zoom, rect, flipX, pan);
-                if (!screen) break;
-                pixels.push(`${(screen.x - rect.x).toFixed(1)},${(screen.y - rect.y).toFixed(1)}`);
-              }
-              if (pixels.length < 2) continue;
-              shapes.push({
-                key: `${setIndex}:${roi.number}:${ci}:${pi}`,
-                points: pixels.join(' '),
-                closed: polyline.closed,
-                color,
-                opacity,
-              });
+            if (!res) continue;
+            if (res.kind === 'loop') {
+              loops.push({ points: decimate(res.points, CONTOUR_DECIMATE_UV), closed: res.closed });
+            } else {
+              rows.push(res.row);
             }
           }
+
+          const polylines = [...loops, ...crossSectionOutline(rows)];
+          if (polylines.length === 0) continue;
+          roiShapes.push({
+            key,
+            color: overrides.get(key) ?? rgbColor(roi.color),
+            opacity: opacities.get(key) ?? 1,
+            polylines,
+          });
         }
       });
+      if (roiShapes.length) out.set(orientation, roiShapes);
+    }
+    return out;
+  });
+
+  /**
+   * RTSTRUCT ROI contours mapped to each MPR pane's pixels — the cheap half. It
+   * takes the cached plane-space geometry ({@link contourPlaneGeometry}) and
+   * applies the current pan/zoom/flip with {@link planePointToPane} (the same
+   * forward map the measurements and crosshair use), so dragging to pan moves the
+   * contours in lockstep with the image without re-projecting any patient points.
+   */
+  protected readonly contourOverlays = computed<ContourPaneOverlay[]>(() => {
+    const volume = this.volume();
+    const geometry = this.contourPlaneGeometry();
+    if (!volume || geometry.size === 0) return [];
+
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const flipped = this.sagittalFlipped();
+
+    const result: ContourPaneOverlay[] = [];
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const roiShapes = geometry.get(pane.orientation);
+      if (!roiShapes) continue;
+      const orientation = pane.orientation;
+      const rect = pane.rect;
+      if (rect.width < 1 || rect.height < 1) continue;
+      const flipX = orientation === Orientation.Sagittal && flipped;
+      const zoom = zooms[orientation];
+      const pan = pans[orientation];
+
+      const shapes: ContourShape[] = [];
+      for (const roi of roiShapes) {
+        for (let pi = 0; pi < roi.polylines.length; pi++) {
+          const polyline = roi.polylines[pi];
+          const pixels: string[] = [];
+          for (const point of polyline.points) {
+            const screen = planePointToPane(volume, orientation, point, zoom, rect, flipX, pan);
+            if (!screen) break;
+            pixels.push(`${(screen.x - rect.x).toFixed(1)},${(screen.y - rect.y).toFixed(1)}`);
+          }
+          if (pixels.length < 2) continue;
+          shapes.push({
+            key: `${roi.key}:${pi}`,
+            points: pixels.join(' '),
+            closed: polyline.closed,
+            color: roi.color,
+            opacity: roi.opacity,
+          });
+        }
+      }
       if (shapes.length) result.push({ key: this.paneKey(pane), rect, shapes });
     }
     return result;

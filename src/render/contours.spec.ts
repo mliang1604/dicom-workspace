@@ -1,5 +1,14 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
-import { contourOnPlane, patientToPlane, sliceCrossings, sliceSegments } from './contours';
+import {
+  contourOnPlane,
+  contourPlaneResult,
+  crossSectionOutline,
+  decimate,
+  patientToPlane,
+  sliceCrossings,
+  sliceSegments,
+  type CrossSectionRow,
+} from './contours';
 import type { PlaneCoords } from './reslice';
 
 /** An identity-geometry cube whose patient coordinates equal voxel indices. */
@@ -173,5 +182,115 @@ describe('contourOnPlane', () => {
   it('ignores degenerate contours with fewer than two points', () => {
     const volume = makeVolume(dim);
     expect(contourOnPlane(volume, Orientation.Axial, 4, [[1, 1, 1]], true)).toHaveLength(0);
+  });
+});
+
+describe('crossSectionOutline', () => {
+  it('joins per-slice spans into a closed left/right silhouette', () => {
+    // Three stacked rows (slices) with widening then narrowing spans → a closed
+    // outline that traces min-u down one side and max-u up the other.
+    const rows: CrossSectionRow[] = [
+      { v: 0.2, us: [0.4, 0.6] },
+      { v: 0.5, us: [0.3, 0.7] },
+      { v: 0.8, us: [0.45, 0.55] },
+    ];
+    const out = crossSectionOutline(rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].closed).toBe(true);
+    // left envelope (v ascending) then right envelope (v descending).
+    expect(out[0].points).toEqual([
+      { u: 0.4, v: 0.2 },
+      { u: 0.3, v: 0.5 },
+      { u: 0.45, v: 0.8 },
+      { u: 0.55, v: 0.8 },
+      { u: 0.7, v: 0.5 },
+      { u: 0.6, v: 0.2 },
+    ]);
+  });
+
+  it('takes the outer envelope when a row has multiple spans (concave)', () => {
+    const rows: CrossSectionRow[] = [
+      { v: 0.3, us: [0.2, 0.4, 0.6, 0.8] }, // two spans → outer extent 0.2..0.8
+      { v: 0.6, us: [0.3, 0.7] },
+    ];
+    const out = crossSectionOutline(rows);
+    expect(out[0].closed).toBe(true);
+    expect(out[0].points).toContainEqual({ u: 0.2, v: 0.3 });
+    expect(out[0].points).toContainEqual({ u: 0.8, v: 0.3 });
+  });
+
+  it('draws a single row as an open span, and nothing for no rows', () => {
+    expect(crossSectionOutline([{ v: 0.5, us: [0.2, 0.8] }])).toEqual([
+      {
+        points: [
+          { u: 0.2, v: 0.5 },
+          { u: 0.8, v: 0.5 },
+        ],
+        closed: false,
+      },
+    ]);
+    expect(crossSectionOutline([])).toEqual([]);
+  });
+});
+
+describe('decimate', () => {
+  it('drops near-collinear points but keeps the shape corners', () => {
+    const line = [
+      { u: 0, v: 0 },
+      { u: 0.25, v: 0.001 }, // ~on the line → dropped
+      { u: 0.5, v: 0 },
+      { u: 0.75, v: 0.001 }, // ~on the line → dropped
+      { u: 1, v: 0 },
+    ];
+    expect(decimate(line, 0.01)).toEqual([
+      { u: 0, v: 0 },
+      { u: 1, v: 0 },
+    ]);
+  });
+
+  it('keeps a real corner that exceeds the tolerance', () => {
+    const corner = [
+      { u: 0, v: 0 },
+      { u: 0.5, v: 0.5 }, // far from the 0,0–1,0 line → kept
+      { u: 1, v: 0 },
+    ];
+    expect(decimate(corner, 0.01)).toHaveLength(3);
+  });
+
+  it('returns the input unchanged for two or fewer points', () => {
+    const pts = [
+      { u: 0, v: 0 },
+      { u: 1, v: 1 },
+    ];
+    expect(decimate(pts, 0.1)).toEqual(pts);
+  });
+});
+
+describe('contourPlaneResult', () => {
+  const dim = 8;
+  // A square loop in the z = 4 plane, spanning x,y ∈ [2, 5].
+  const loop: Vec3[] = [
+    [2, 2, 4],
+    [5, 2, 4],
+    [5, 5, 4],
+    [2, 5, 4],
+  ];
+
+  it('classifies a coplanar loop on its own axial slice', () => {
+    const res = contourPlaneResult(makeVolume(dim), Orientation.Axial, 4, loop, true);
+    expect(res?.kind).toBe('loop');
+  });
+
+  it('returns null for a coplanar loop scrolled to another slice', () => {
+    expect(contourPlaneResult(makeVolume(dim), Orientation.Axial, 6, loop, true)).toBeNull();
+  });
+
+  it('returns a constant-v crossing row when cut edge-on in coronal', () => {
+    const res = contourPlaneResult(makeVolume(dim), Orientation.Coronal, 3, loop, true);
+    expect(res?.kind).toBe('cross');
+    if (res?.kind === 'cross') {
+      expect(res.row.us.length).toBeGreaterThanOrEqual(2);
+      expect(res.row.v).toBeCloseTo(1 - 4.5 / 8, 6);
+    }
   });
 });
