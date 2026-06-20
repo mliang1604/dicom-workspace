@@ -1,9 +1,25 @@
-import { baseImageLayer, type Volume } from '../dicom/types';
+import { baseImageLayer, type Volume, type VolumeGeometry } from '../dicom/types';
 import type { Series } from '../dicom/series';
 import { mergeLoad, type LoadResult } from './volume-loader';
 
-/** A minimal volume; the merge only reads it through the layer it wraps. */
-function fakeVolume(modality: string | null): Volume {
+/** A unit index→patient affine; real loads always carry one (see buildVolume). */
+const FAKE_GEOMETRY: VolumeGeometry = {
+  iStep: [1, 0, 0],
+  jStep: [0, 1, 0],
+  kStep: [0, 0, 1],
+  origin: [0, 0, 0],
+};
+
+/**
+ * A minimal volume; the merge reads it through the layer it wraps and, for the
+ * overlay-eligibility check, its {@link VolumeGeometry}. Pass `geometry: null` to
+ * model a series with no spatial metadata (`null`, not `undefined`, so the
+ * default isn't re-applied).
+ */
+function fakeVolume(
+  modality: string | null,
+  geometry: VolumeGeometry | null = FAKE_GEOMETRY,
+): Volume {
   return {
     dims: [1, 1, 1],
     spacing: [1, 1, 1],
@@ -15,6 +31,7 @@ function fakeVolume(modality: string | null): Volume {
     rescaleSlope: 1,
     rescaleIntercept: 0,
     modality,
+    geometry: geometry ?? undefined,
   };
 }
 
@@ -34,12 +51,17 @@ function fakeSeries(uid: string, frameOfReferenceUid: string | null, modality = 
 }
 
 /** A one-layer load of a single series, as {@link VolumeLoader.loadFromFiles} returns. */
-function fakeLoad(uid: string, frameOfReferenceUid: string | null, modality = 'CT'): LoadResult {
+function fakeLoad(
+  uid: string,
+  frameOfReferenceUid: string | null,
+  modality = 'CT',
+  geometry: VolumeGeometry | null = FAKE_GEOMETRY,
+): LoadResult {
   const series = fakeSeries(uid, frameOfReferenceUid, modality);
   return {
     series: [series],
     selectedUid: uid,
-    layers: [baseImageLayer(uid, fakeVolume(modality))],
+    layers: [baseImageLayer(uid, fakeVolume(modality, geometry))],
     structureSets: [],
     allStructureSets: [],
     fileCount: 1,
@@ -78,6 +100,19 @@ describe('mergeLoad', () => {
     expect(mergeLoad(fakeLoad('a', null), fakeLoad('b', null)).added).toBe(false);
     expect(mergeLoad(fakeLoad('a', 'frame-1'), fakeLoad('b', null)).added).toBe(false);
     expect(mergeLoad(fakeLoad('a', null), fakeLoad('b', 'frame-1')).added).toBe(false);
+  });
+
+  it('replaces when a volume lacks geometry, even with matching frames', () => {
+    // Without an index→patient affine the grids can't be co-sampled, so an
+    // overlay would mis-register: fall back to replacing rather than guessing.
+    const noGeom = mergeLoad(fakeLoad('ct', 'frame-1'), fakeLoad('mr', 'frame-1', 'MR', null));
+    expect(noGeom.added).toBe(false);
+
+    const baseNoGeom = mergeLoad(
+      fakeLoad('ct', 'frame-1', 'CT', null),
+      fakeLoad('mr', 'frame-1', 'MR'),
+    );
+    expect(baseNoGeom.added).toBe(false);
   });
 
   it('stacks a third same-frame series above the existing overlay', () => {

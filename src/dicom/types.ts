@@ -301,6 +301,18 @@ export function baseLayer(layers: readonly Layer[]): Layer | undefined {
 }
 
 /**
+ * Whether two DICOM Frame of Reference UIDs (0020,0052) name the same spatial
+ * frame. A null UID never matches — not even another null — because an absent
+ * frame gives nothing to align against, so callers must fall back to another
+ * association (e.g. referenced series UID) or refuse to co-register rather than
+ * guess. The single source of truth for "same frame", shared by RTSTRUCT↔series
+ * association and layer overlay/compare eligibility.
+ */
+export function framesMatch(a: string | null, b: string | null): boolean {
+  return a !== null && a === b;
+}
+
+/**
  * The unit of a volume's rescaled voxel values, given its DICOM modality.
  *
  * CT values rescaled through the modality LUT are Hounsfield Units (HU). Other

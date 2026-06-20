@@ -1,6 +1,6 @@
 import * as dicomParser from 'dicom-parser';
 import type { Series } from './series';
-import type { Contour, Roi, StructureSet, Vec3 } from './types';
+import { framesMatch, type Contour, type Roi, type StructureSet, type Vec3 } from './types';
 
 /** SOP Class UID identifying an RT Structure Set Storage object. */
 const RTSTRUCT_SOP_CLASS = '1.2.840.10008.5.1.4.1.1.481.3';
@@ -129,9 +129,7 @@ export function structureSetsForSeries(
 
 /** Whether a structure set annotates a series by frame of reference or, failing that, by referenced series UID. */
 function associates(ss: StructureSet, series: Series): boolean {
-  if (ss.frameOfReferenceUid && series.frameOfReferenceUid) {
-    if (ss.frameOfReferenceUid === series.frameOfReferenceUid) return true;
-  }
+  if (framesMatch(ss.frameOfReferenceUid, series.frameOfReferenceUid)) return true;
   return series.uid !== '' && ss.referencedSeriesUids.includes(series.uid);
 }
 

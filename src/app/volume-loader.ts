@@ -5,6 +5,7 @@ import { structureSetsForSeries } from '../dicom/structure-set';
 import {
   baseImageLayer,
   baseLayer,
+  framesMatch,
   overlayImageLayer,
   type Layer,
   type StructureSet,
@@ -141,10 +142,20 @@ export interface MergedLoad {
 export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad {
   if (!sameFrameOfReference(current, incoming)) return { result: incoming, added: false };
 
-  const volume = baseLayer(incoming.layers)?.volume;
-  if (!volume) return { result: incoming, added: false };
+  // Co-sampling an overlay in the base's patient frame maps each pane pixel
+  // through both grids' index→patient affines, so both volumes need geometry;
+  // without it (a series with no spatial metadata) they can't be aligned and we
+  // fall back to replacing rather than stacking a mis-registered overlay.
+  const baseVolume = baseLayer(current.layers)?.volume;
+  const overlayVolume = baseLayer(incoming.layers)?.volume;
+  if (!baseVolume?.geometry || !overlayVolume?.geometry) {
+    return { result: incoming, added: false };
+  }
 
-  const overlay = overlayImageLayer(uniqueLayerId(current.layers, incoming.selectedUid), volume);
+  const overlay = overlayImageLayer(
+    uniqueLayerId(current.layers, incoming.selectedUid),
+    overlayVolume,
+  );
   return { result: { ...current, layers: [...current.layers, overlay] }, added: true };
 }
 
@@ -154,8 +165,10 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
  * never matches, even another null, since it gives nothing to align against.
  */
 function sameFrameOfReference(a: LoadResult, b: LoadResult): boolean {
-  const frame = selectedSeries(a)?.frameOfReferenceUid ?? null;
-  return frame !== null && frame === (selectedSeries(b)?.frameOfReferenceUid ?? null);
+  return framesMatch(
+    selectedSeries(a)?.frameOfReferenceUid ?? null,
+    selectedSeries(b)?.frameOfReferenceUid ?? null,
+  );
 }
 
 /** The series a load currently shows (its base layer's source), or undefined. */
