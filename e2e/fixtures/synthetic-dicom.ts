@@ -89,6 +89,9 @@ export interface SyntheticFile {
   readonly buffer: Buffer;
 }
 
+/** Frame of Reference UID shared by the CT and any RTSTRUCT that annotates it. */
+export const SYNTHETIC_FRAME_OF_REFERENCE = '1.2.826.0.1.3680043.2.smoke.for.1';
+
 /**
  * Build a single-series CT stack of `count` axial slices (`size`×`size`) as
  * in-memory DICOM files suitable for Playwright's `setInputFiles`.
@@ -104,6 +107,7 @@ export function syntheticCtSeries(count = 12, size = 32): SyntheticFile[] {
       element(0x0020, 0x0013, 'IS', numbers([z + 1])), // InstanceNumber
       element(0x0020, 0x0032, 'DS', numbers([0, 0, z])), // ImagePositionPatient
       element(0x0020, 0x0037, 'DS', numbers([1, 0, 0, 0, 1, 0])), // ImageOrientationPatient
+      element(0x0020, 0x0052, 'UI', uid(SYNTHETIC_FRAME_OF_REFERENCE)), // FrameOfReferenceUID
       element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
       element(0x0028, 0x0010, 'US', u16le(size)), // Rows
       element(0x0028, 0x0011, 'US', u16le(size)), // Columns
