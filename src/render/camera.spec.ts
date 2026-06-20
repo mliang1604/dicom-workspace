@@ -4,6 +4,7 @@ import {
   eyeDirection,
   intersectUnitBox,
   projectToPane,
+  rezoomCameraPan,
   type OrbitCamera,
 } from './camera';
 import { add, scale } from '../dicom/vec3';
@@ -40,7 +41,7 @@ function applyPatientToTex(m: Float32Array, p: Vec3): Vec3 {
   ];
 }
 
-const LEVEL: OrbitCamera = { azimuth: 0, elevation: 0, zoom: 1 };
+const LEVEL: OrbitCamera = { azimuth: 0, elevation: 0, zoom: 1, panX: 0, panY: 0 };
 
 describe('eyeDirection', () => {
   it('looks from anterior (LPS −y) with superior up at the default angles', () => {
@@ -114,6 +115,62 @@ describe('projectToPane', () => {
     expect(b.u).toBeCloseTo(a.u, 6);
     expect(b.v).toBeCloseTo(a.v, 6);
     expect(b.depth - a.depth).toBeCloseTo(5, 6);
+  });
+});
+
+describe('rezoomCameraPan', () => {
+  // The world point under the cursor before the zoom must still project to the
+  // same pane uv after — the 3D twin of the MPR rezoomPan anchoring.
+  function projectionUnderCursor(
+    camera: OrbitCamera,
+    ndcX: number,
+    ndcY: number,
+    width: number,
+    height: number,
+  ) {
+    const volume = makeVolume([4, 6, 8]); // non-cubic so U and V differ
+    const basis = cameraBasis(volume, camera, width, height);
+    // The world point the raycaster builds for this cursor ndc on the image plane.
+    const point = add(add(basis.eye, scale(basis.axisU, ndcX)), scale(basis.axisV, ndcY));
+    return { volume, point };
+  }
+
+  it('keeps the cursor world point fixed when zooming in', () => {
+    const start: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1, panX: 0, panY: 0 };
+    const [w, h, ndcX, ndcY] = [200, 100, 0.6, -0.3];
+    const { volume, point } = projectionUnderCursor(start, ndcX, ndcY, w, h);
+    const before = projectToPane(cameraBasis(volume, start, w, h), point);
+
+    const toZoom = 1.8;
+    const { panX, panY } = rezoomCameraPan(volume, start, w, h, toZoom, ndcX, ndcY);
+    const zoomed: OrbitCamera = { ...start, zoom: toZoom, panX, panY };
+    const after = projectToPane(cameraBasis(volume, zoomed, w, h), point);
+
+    expect(after.u).toBeCloseTo(before.u, 6);
+    expect(after.v).toBeCloseTo(before.v, 6);
+  });
+
+  it('keeps the cursor world point fixed when zooming out from a panned camera', () => {
+    const start: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 2, panX: 1.5, panY: -0.7 };
+    const [w, h, ndcX, ndcY] = [120, 160, -0.5, 0.45];
+    const { volume, point } = projectionUnderCursor(start, ndcX, ndcY, w, h);
+    const before = projectToPane(cameraBasis(volume, start, w, h), point);
+
+    const toZoom = 1.1;
+    const { panX, panY } = rezoomCameraPan(volume, start, w, h, toZoom, ndcX, ndcY);
+    const zoomed: OrbitCamera = { ...start, zoom: toZoom, panX, panY };
+    const after = projectToPane(cameraBasis(volume, zoomed, w, h), point);
+
+    expect(after.u).toBeCloseTo(before.u, 6);
+    expect(after.v).toBeCloseTo(before.v, 6);
+  });
+
+  it('leaves the pan unchanged when the cursor is at the pane centre', () => {
+    const start: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1, panX: 0.3, panY: 0.2 };
+    const next = rezoomCameraPan(makeVolume([4, 4, 4]), start, 100, 100, 2, 0, 0);
+
+    expect(next.panX).toBeCloseTo(0.3, 6);
+    expect(next.panY).toBeCloseTo(0.2, 6);
   });
 });
 

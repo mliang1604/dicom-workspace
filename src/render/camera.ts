@@ -1,5 +1,5 @@
 import type { Vec3, Volume } from '../dicom/types';
-import { cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
+import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
 import { volumeBounds } from './reslice';
 
 /**
@@ -29,6 +29,14 @@ export interface OrbitCamera {
   readonly elevation: number;
   /** Magnification; 1 fits the volume's bounding sphere, >1 zooms in. */
   readonly zoom: number;
+  /**
+   * In-plane pan along the camera's screen-right axis, in patient mm; shifts the
+   * eye (and so the whole orthographic image plane) sideways. 0 keeps the volume
+   * centred. Lets the 3D pane anchor a wheel-zoom on the cursor, like the MPR pan.
+   */
+  readonly panX: number;
+  /** In-plane pan along the camera's screen-up axis, in patient mm (see {@link panX}). */
+  readonly panY: number;
 }
 
 /** The camera placed in patient space, with orthographic image-plane axes. */
@@ -101,13 +109,39 @@ export function cameraBasis(
   const halfW = aspect >= 1 ? (radius / zoom) * aspect : radius / zoom;
 
   // Place the eye outside the box; orthographic depth is irrelevant, the
-  // ray/box intersection finds the real entry/exit.
-  const eye: Vec3 = [
-    center[0] + eyeDir[0] * radius * 2,
-    center[1] + eyeDir[1] * radius * 2,
-    center[2] + eyeDir[2] * radius * 2,
-  ];
+  // ray/box intersection finds the real entry/exit. The in-plane pan slides the
+  // eye along right/up so the whole image plane shifts, panning the projection.
+  const center3 = add(center, scale(eyeDir, radius * 2));
+  const eye = add(add(center3, scale(right, camera.panX)), scale(up, camera.panY));
   return { eye, forward, axisU: scale(right, halfW), axisV: scale(up, halfH) };
+}
+
+/**
+ * Cursor-anchored pan for a wheel-zoom over the 3D pane — the camera-space twin of
+ * `rezoomPan` for the MPR panes. Given the cursor in centred device coords (ndc,
+ * +y up, as the raycaster and {@link pickProjection} use) and the magnification
+ * about to change to `toZoom`, return the new {@link OrbitCamera.panX}/`panY` that
+ * keeps the world point currently under the cursor projecting to the same pixel.
+ *
+ * The orthographic half-extents are the lengths of `axisU`/`axisV`; holding the
+ * cursor's `ndc = (P − eye)·axis / |axis|²` fixed across the zoom means shifting
+ * the eye by `ndc·(halfExtentBefore − halfExtentAfter)` along each screen axis.
+ */
+export function rezoomCameraPan(
+  volume: Volume,
+  camera: OrbitCamera,
+  viewWidth: number,
+  viewHeight: number,
+  toZoom: number,
+  ndcX: number,
+  ndcY: number,
+): { panX: number; panY: number } {
+  const before = cameraBasis(volume, camera, viewWidth, viewHeight);
+  const after = cameraBasis(volume, { ...camera, zoom: toZoom }, viewWidth, viewHeight);
+  return {
+    panX: camera.panX + ndcX * (length(before.axisU) - length(after.axisU)),
+    panY: camera.panY + ndcY * (length(before.axisV) - length(after.axisV)),
+  };
 }
 
 /** A patient point projected onto the 3D pane: pane-fraction uv plus view depth. */
