@@ -15,6 +15,12 @@ export interface RecentEntry {
   readonly label: string;
   /** Which `<input>` a re-pick should open: the directory picker or the file picker. */
   readonly kind: 'folder' | 'files';
+  /**
+   * True when this load was *added* as an overlay layer above an existing one
+   * (same frame of reference) rather than replacing it. Surfaced in the recent
+   * list so a layered load reads apart from a fresh one. Absent for normal loads.
+   */
+  readonly overlay?: boolean;
 }
 
 /**

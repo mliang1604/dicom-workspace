@@ -3376,17 +3376,36 @@ export class Viewer {
   }
 
   private async loadFiles(files: readonly File[], entry: RecentEntry | null): Promise<void> {
+    // The load already showing; a same-frame-of-reference series adds atop it.
+    const previous = this.load();
     this.load.set({ status: 'loading', loaded: 0, total: files.length });
     try {
       const result = await this.loader.loadFromFiles(files, (loaded, total) => {
         // Ignore stragglers from a superseded load (a new load already started).
         if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
       });
-      this.applyVolume(result);
-      if (entry) this.recentStore.record(entry); // remember it once it loaded cleanly
+      const merged =
+        previous.status === 'ready'
+          ? this.loader.merge(previous.result, result)
+          : { result, added: false };
+      if (merged.added) this.addLayer(merged.result);
+      else this.applyVolume(merged.result);
+      // Remember it once it loaded cleanly, flagging an overlay so the recent
+      // list shows a layered load apart from a fresh one.
+      if (entry) this.recentStore.record(merged.added ? { ...entry, overlay: true } : entry);
     } catch (error) {
       this.load.set({ status: 'error', message: messageOf(error) });
     }
+  }
+
+  /**
+   * Adopt a registry that *added* an overlay layer above the current base. The
+   * base layer and its volume are unchanged, so — unlike {@link applyVolume} —
+   * the view state (zoom, pan, window/level, slice indices) is preserved and the
+   * renderer's base volume isn't re-uploaded.
+   */
+  private addLayer(result: LoadResult): void {
+    this.load.set({ status: 'ready', result });
   }
 
   private applyVolume(result: LoadResult): void {
