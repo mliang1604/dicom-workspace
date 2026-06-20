@@ -4,6 +4,7 @@ import {
   clipTRange,
   orientTowardRay,
   planeExtentMm,
+  planePixelDims,
   planeToTex,
   slabTRange,
   sliceClipPlaneTex,
@@ -102,6 +103,18 @@ describe('sliceCountFor / planeExtentMm', () => {
     expect(sliceCountFor(volume, Orientation.Sagittal)).toBe(6); // walks +X = k
     expect(sliceCountFor(volume, Orientation.Axial)).toBe(4); // walks +Z = -j
     expect(sliceCountFor(volume, Orientation.Coronal)).toBe(4); // walks +Y = i
+  });
+});
+
+describe('planePixelDims', () => {
+  it('gives each plane the through-plane counts of the other two orientations', () => {
+    const volume = makeVolume([5, 4, 3]); // x=5, y=4, z=3
+    // Axial spans x (5, sagittal's walk) × y (4, coronal's walk).
+    expect(planePixelDims(volume, Orientation.Axial)).toEqual([5, 4]);
+    // Coronal spans x (5) × z (3, axial's walk).
+    expect(planePixelDims(volume, Orientation.Coronal)).toEqual([5, 3]);
+    // Sagittal spans y (4) × z (3).
+    expect(planePixelDims(volume, Orientation.Sagittal)).toEqual([4, 3]);
   });
 });
 

@@ -77,6 +77,31 @@
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
   </button>
 
+  <span
+    class="measure-palette"
+    title="Measurement tools — click an MPR pane to place points; Esc cancels"
+  >
+    @for (tool of measureTools; track tool.value) {
+      <button
+        type="button"
+        (click)="setTool(tool.value)"
+        [disabled]="!isReady() || !hasMprPane()"
+        [class.active]="activeTool() === tool.value"
+        [title]="tool.label"
+      >
+        {{ tool.glyph }} {{ tool.label }}
+      </button>
+    }
+    <button
+      type="button"
+      (click)="clearMeasurements()"
+      [disabled]="!isReady() || !hasMeasurements()"
+      title="Clear all measurements"
+    >
+      Clear ✕
+    </button>
+  </span>
+
   <button
     type="button"
     (click)="toggleInfoPanel()"
@@ -277,6 +302,61 @@
     >
       @for (plane of sp.planes; track plane.orientation) {
         <polygon class="slice-plane" [attr.points]="plane.points" [style.stroke]="plane.color" />
+      }
+    </svg>
+  }
+
+  <!-- Interactive measurements (distance/angle/ROI), one SVG per measurement, clipped to its pane. -->
+  @for (mo of measurementOverlays(); track mo.key) {
+    <svg
+      class="measurement"
+      [class.pending]="mo.pending"
+      [style.left.px]="mo.rect.x"
+      [style.top.px]="mo.rect.y"
+      [attr.width]="mo.rect.width"
+      [attr.height]="mo.rect.height"
+    >
+      @if (mo.polyline) {
+        <polyline class="measure-shape" [attr.points]="mo.polyline" />
+      }
+      @if (mo.ellipse; as e) {
+        <ellipse
+          class="measure-shape"
+          [attr.cx]="e.cx"
+          [attr.cy]="e.cy"
+          [attr.rx]="e.rx"
+          [attr.ry]="e.ry"
+        />
+      }
+      @if (mo.box; as b) {
+        <rect
+          class="measure-shape"
+          [attr.x]="b.x"
+          [attr.y]="b.y"
+          [attr.width]="b.w"
+          [attr.height]="b.h"
+        />
+      }
+      @if (!mo.pending) {
+        @for (handle of mo.handles; track $index; let i = $index) {
+          <circle
+            class="measure-handle"
+            [attr.cx]="handle.x"
+            [attr.cy]="handle.y"
+            r="5"
+            (pointerdown)="onMeasureHandleDown(mo.id, i, $event)"
+            (pointermove)="onMeasureHandleMove($event)"
+            (pointerup)="onMeasureHandleUp($event)"
+            (pointercancel)="onMeasureHandleUp($event)"
+          />
+        }
+      }
+      @if (mo.lines.length) {
+        <text class="measure-label" [attr.x]="mo.labelX" [attr.y]="mo.labelY">
+          @for (line of mo.lines; track $index; let i = $index) {
+            <tspan [attr.x]="mo.labelX" [attr.dy]="i === 0 ? 0 : 13">{{ line }}</tspan>
+          }
+        </text>
       }
     </svg>
   }

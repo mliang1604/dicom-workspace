@@ -252,6 +252,55 @@ button.active {
   filter: drop-shadow(0 0 2px #000);
 }
 
+/* Measurement palette buttons cluster tightly in the toolbar. */
+.measure-palette {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Interactive measurements (distance/angle/ROI) drawn over each MPR pane. */
+.measurement {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.measure-shape {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.measurement.pending .measure-shape {
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+/* Draggable endpoint / ROI-corner handles: the only pointer-active overlay bit. */
+.measure-handle {
+  fill: var(--accent);
+  stroke: #000;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.measure-handle:hover {
+  fill: var(--text);
+}
+
+.measure-label {
+  fill: var(--text);
+  font:
+    600 11px/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  text-anchor: start;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.7);
+  stroke-width: 3px;
+}
+
 /* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
 .slice-planes {
   position: absolute;

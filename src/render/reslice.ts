@@ -352,6 +352,35 @@ export function planeAxisDirs(orientation: Orientation): { right: Vec3; down: Ve
   return { right: normalize(basis.axisU), down: normalize(basis.axisV) };
 }
 
+/**
+ * In-plane pixel dimensions `[nu, nv]` of an orientation's resliced slice: how
+ * many resampled samples span the pane's horizontal (u) and vertical (v) axes.
+ * These are the through-plane slice counts of the two *other* orientations,
+ * since each orientation's in-plane axes are the through-plane axes of the other
+ * two (axial's u=x is sagittal's walk, its v=y is coronal's walk, etc.). Used to
+ * iterate the slice's voxel grid for ROI statistics at the displayed resolution.
+ */
+export function planePixelDims(volume: Volume, orientation: Orientation): [number, number] {
+  switch (orientation) {
+    case Orientation.Axial:
+      return [
+        sliceCountFor(volume, Orientation.Sagittal),
+        sliceCountFor(volume, Orientation.Coronal),
+      ];
+    case Orientation.Coronal:
+      return [
+        sliceCountFor(volume, Orientation.Sagittal),
+        sliceCountFor(volume, Orientation.Axial),
+      ];
+    case Orientation.Sagittal:
+      return [sliceCountFor(volume, Orientation.Coronal), sliceCountFor(volume, Orientation.Axial)];
+    default: {
+      const exhaustive: never = orientation;
+      return exhaustive;
+    }
+  }
+}
+
 /** Number of output slices walking an orientation's through-plane patient axis. */
 export function sliceCountFor(volume: Volume, orientation: Orientation): number {
   const [cx, cy, cz] = sliceCounts(volume);

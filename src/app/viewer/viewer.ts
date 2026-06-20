@@ -38,6 +38,21 @@ import {
   type PaneEdgeLabels,
 } from '../../render/pane-annotations';
 import {
+  paneToPlanePoint,
+  planePointToPane,
+  type PanePoint,
+  type PlanePoint,
+} from '../../render/pane-coords';
+import {
+  measureAngleDeg,
+  measureDistanceMm,
+  roiAreaMm2,
+  roiBounds,
+  roiStats,
+  type HuStats,
+  type RoiShape,
+} from '../../render/measure';
+import {
   windowLevelDrag,
   windowLevelSensitivity,
   windowPresets,
@@ -138,6 +153,78 @@ interface PaneAnnotation {
   readonly scale: ScaleBarOverlay | null;
 }
 
+/** An interactive measurement tool, or `none` for the default pan/orbit gestures. */
+type MeasureTool = 'distance' | 'angle' | 'ellipse' | 'rectangle';
+type ToolMode = 'none' | MeasureTool;
+
+/** How many points define each tool: a segment, a vertex pair of rays, or a box. */
+const TOOL_POINTS: Readonly<Record<MeasureTool, number>> = {
+  distance: 2,
+  angle: 3,
+  ellipse: 2,
+  rectangle: 2,
+};
+
+/**
+ * A completed measurement, pinned to the orientation and slice it was drawn on
+ * (so it hides when scrolled off). Points are stored as in-plane
+ * {@link PlanePoint}s, which track pan/zoom/flip for free — only the projection
+ * to a pane pixel applies the live view transform.
+ */
+interface Measurement {
+  readonly id: number;
+  readonly tool: MeasureTool;
+  readonly orientation: Orientation;
+  readonly sliceIndex: number;
+  readonly points: readonly PlanePoint[];
+}
+
+/** A measurement being placed: the same shape, fewer than its full set of points. */
+interface PendingMeasurement {
+  readonly tool: MeasureTool;
+  readonly orientation: Orientation;
+  readonly sliceIndex: number;
+  readonly points: readonly PlanePoint[];
+}
+
+/** An in-progress drag of one measurement point (an endpoint or an ROI corner). */
+interface MeasureDrag {
+  readonly id: number;
+  readonly pointIndex: number;
+}
+
+/** A measurement projected into its pane for the SVG overlay, in pane-local pixels. */
+interface MeasurementOverlay {
+  readonly key: string;
+  readonly id: number;
+  readonly tool: MeasureTool;
+  readonly rect: PaneRect;
+  /** Endpoint/corner handles in pane-local pixels; draggable only when committed. */
+  readonly handles: readonly PanePoint[];
+  /** Polyline `points` for distance/angle, in pane-local pixels; '' otherwise. */
+  readonly polyline: string;
+  /** Axis-aligned ellipse for an ellipse ROI, in pane-local pixels; null otherwise. */
+  readonly ellipse: {
+    readonly cx: number;
+    readonly cy: number;
+    readonly rx: number;
+    readonly ry: number;
+  } | null;
+  /** Box for a rectangle ROI, in pane-local pixels; null otherwise. */
+  readonly box: {
+    readonly x: number;
+    readonly y: number;
+    readonly w: number;
+    readonly h: number;
+  } | null;
+  /** Readout lines (length / angle / area + HU stats). */
+  readonly lines: readonly string[];
+  readonly labelX: number;
+  readonly labelY: number;
+  /** True while still being placed: rendered dashed, with no drag handles. */
+  readonly pending: boolean;
+}
+
 /** A value per orientation, indexed by the orientation's numeric value. */
 type PerOrientation = readonly [number, number, number];
 
@@ -217,6 +304,9 @@ const SCALE_BAR_MAX_FRACTION = 0.3;
 /** …capped in absolute CSS pixels so it stays a discreet ruler on large panes. */
 const SCALE_BAR_MAX_PX = 160;
 
+/** Pixels a measurement readout sits above its anchor point. */
+const MEASURE_LABEL_OFFSET = 8;
+
 /**
  * How long after the last wheel-zoom or window/level change the 3D MIP keeps
  * rendering at reduced quality before snapping back to a full-quality frame.
@@ -235,6 +325,7 @@ const MIP_SETTLE_MS = 200;
     '(window:keydown.c)': 'onCrosshairKey($event)',
     '(window:keydown.l)': 'onLayoutKey($event)',
     '(window:keydown.i)': 'onInfoKey($event)',
+    '(window:keydown.escape)': 'onEscapeKey($event)',
   },
 })
 export class Viewer {
@@ -301,6 +392,27 @@ export class Viewer {
   private readonly focusVoxel = signal<readonly [number, number, number] | null>(null);
   /** When true (default), draw the linked crosshair at the focus voxel in each MPR pane. */
   protected readonly crosshairsEnabled = signal(true);
+  /** The active measurement tool, or `none` for the default pan/orbit gestures. */
+  protected readonly activeTool = signal<ToolMode>('none');
+  /** Completed measurements, each pinned to its orientation + slice. */
+  private readonly measurements = signal<readonly Measurement[]>([]);
+  /** The measurement currently being placed (awaiting its remaining points), or null. */
+  private readonly pending = signal<PendingMeasurement | null>(null);
+  /** The measurement point being dragged (an endpoint or ROI corner), or null. */
+  private readonly measureDrag = signal<MeasureDrag | null>(null);
+  /** Monotonic id source for new measurements. */
+  private nextMeasureId = 0;
+  /** The measurement tools offered in the palette, in display order. */
+  protected readonly measureTools = [
+    { value: 'distance', label: 'Distance', glyph: '╱' },
+    { value: 'angle', label: 'Angle', glyph: '∠' },
+    { value: 'ellipse', label: 'Ellipse', glyph: '◯' },
+    { value: 'rectangle', label: 'Rectangle', glyph: '▭' },
+  ] as const;
+  /** Whether any measurement (placed or in-progress) exists, for the Clear button. */
+  protected readonly hasMeasurements = computed(
+    () => this.measurements().length > 0 || this.pending() !== null,
+  );
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
   /** True while files are being dragged over the viewport, for the drop overlay. */
@@ -505,6 +617,88 @@ export class Viewer {
         edges: paneEdgeLabels(pane.orientation, flipX),
         scale: bar ? { lengthPx: bar.lengthPx, label: bar.label } : null,
       });
+    }
+    return result;
+  });
+
+  /**
+   * Cached ROI readout lines (area + HU stats) keyed by measurement id. ROI stats
+   * sweep the slice's voxels, but depend only on the volume and the measurement's
+   * own points/slice — never the pan or zoom — so memoising them here keeps a pan
+   * or zoom drag from re-sweeping every region each frame. Recomputed only when a
+   * measurement is added, edited, or the volume changes.
+   */
+  private readonly measurementStats = computed<ReadonlyMap<number, readonly string[]>>(() => {
+    const volume = this.volume();
+    const stats = new Map<number, readonly string[]>();
+    if (!volume) return stats;
+    const unit = modalityUnit(volume.modality);
+    for (const m of this.measurements()) {
+      if ((m.tool !== 'ellipse' && m.tool !== 'rectangle') || m.points.length < 2) continue;
+      const res = roiStats(volume, m.orientation, m.sliceIndex, m.tool, m.points[0], m.points[1]);
+      stats.set(m.id, roiLines(res.areaMm2, res.stats, unit));
+    }
+    return stats;
+  });
+
+  /**
+   * Measurements (and the in-progress one) projected into their panes for the SVG
+   * overlay. Each is pinned to its orientation and slice: it is dropped when that
+   * orientation isn't currently shown, or when the pane has scrolled to another
+   * slice. Stored as in-plane points, the screen geometry is re-derived here from
+   * the live zoom/pan/flip, so annotations track the view. Recomputed only from
+   * the panes, zoom, pan, flip, slice and measurement state — never the
+   * window/level or 3D camera.
+   */
+  protected readonly measurementOverlays = computed<MeasurementOverlay[]>(() => {
+    const volume = this.volume();
+    if (!this.isReady() || !volume) return [];
+    const panes = this.panes();
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const flipped = this.sagittalFlipped();
+    const indices = this.sliceIndices();
+
+    const result: MeasurementOverlay[] = [];
+    for (const m of this.measurements()) {
+      const overlay = this.buildOverlay(
+        volume,
+        panes,
+        zooms,
+        pans,
+        flipped,
+        indices,
+        m,
+        m.points,
+        false,
+      );
+      if (overlay) result.push(overlay);
+    }
+
+    // The in-progress measurement, previewed with a provisional point under the
+    // cursor so the segment/box is visible as it's drawn. Reading the cursor only
+    // while placing keeps the overlay from recomputing on every idle pointer move.
+    const pending = this.pending();
+    if (pending) {
+      const preview = this.previewPoint(volume, panes, zooms, pans, flipped, pending.orientation);
+      const points = preview ? [...pending.points, preview] : pending.points;
+      const overlay = this.buildOverlay(
+        volume,
+        panes,
+        zooms,
+        pans,
+        flipped,
+        indices,
+        {
+          id: -1,
+          orientation: pending.orientation,
+          sliceIndex: pending.sliceIndex,
+          tool: pending.tool,
+        },
+        points,
+        true,
+      );
+      if (overlay) result.push(overlay);
     }
     return result;
   });
@@ -850,6 +1044,273 @@ export class Viewer {
     ]);
   }
 
+  /** Activate a measurement tool, or toggle it off if it's already active. */
+  protected setTool(tool: MeasureTool): void {
+    this.activeTool.update((current) => (current === tool ? 'none' : tool));
+    this.pending.set(null); // abandon any half-placed measurement when the tool changes
+  }
+
+  /** Remove every placed measurement and any in-progress one. */
+  protected clearMeasurements(): void {
+    this.measurements.set([]);
+    this.pending.set(null);
+  }
+
+  /** Escape cancels an in-progress measurement, then deactivates the tool. */
+  protected onEscapeKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement) return;
+    if (this.pending()) {
+      this.pending.set(null);
+      return;
+    }
+    if (this.activeTool() !== 'none') this.activeTool.set('none');
+  }
+
+  /**
+   * Add the next point of the active measurement from a click on an MPR pane.
+   * Points accumulate on the pane's current slice; once the tool's full set is
+   * placed the measurement is committed and the pending state cleared. Clicking a
+   * different pane or slice mid-measurement starts a fresh one.
+   */
+  private placeMeasurePoint(
+    placement: Extract<PanePlacement, { kind: 'mpr' }>,
+    event: PointerEvent,
+  ): void {
+    const volume = this.volume();
+    const tool = this.activeTool();
+    if (!volume || tool === 'none') return;
+    const orientation = placement.orientation;
+    const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
+    if (!point) return; // clicked the letterbox margin outside the image
+
+    const sliceIndex = this.sliceIndices()[orientation];
+    const pending = this.pending();
+    const continuing =
+      pending !== null &&
+      pending.tool === tool &&
+      pending.orientation === orientation &&
+      pending.sliceIndex === sliceIndex;
+    const points = continuing ? [...pending.points, point] : [point];
+    if (points.length >= TOOL_POINTS[tool]) {
+      this.measurements.update((list) => [
+        ...list,
+        { id: this.nextMeasureId++, tool, orientation, sliceIndex, points },
+      ]);
+      this.pending.set(null);
+    } else {
+      this.pending.set({ tool, orientation, sliceIndex, points });
+    }
+  }
+
+  /** Begin dragging a placed measurement's endpoint or ROI corner. */
+  protected onMeasureHandleDown(id: number, pointIndex: number, event: PointerEvent): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.target as Element;
+    target.setPointerCapture?.(event.pointerId);
+    this.measureDrag.set({ id, pointIndex });
+  }
+
+  /** Move the dragged measurement point to follow the cursor. */
+  protected onMeasureHandleMove(event: PointerEvent): void {
+    const drag = this.measureDrag();
+    if (!drag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const volume = this.volume();
+    if (!volume) return;
+    const measurement = this.measurements().find((m) => m.id === drag.id);
+    if (!measurement) return;
+    const orientation = measurement.orientation;
+    const placement = this.mprPlacement(orientation);
+    if (!placement) return;
+    const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
+    if (!point) return;
+    this.measurements.update((list) =>
+      list.map((m) =>
+        m.id === drag.id ? { ...m, points: withIndex(m.points, drag.pointIndex, point) } : m,
+      ),
+    );
+  }
+
+  /** End a measurement-point drag. */
+  protected onMeasureHandleUp(event: PointerEvent): void {
+    if (!this.measureDrag()) return;
+    event.stopPropagation();
+    const target = event.target as Element;
+    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    this.measureDrag.set(null);
+  }
+
+  /** Map a pointer event to the in-plane point it covers on a given MPR pane. */
+  private eventPlanePoint(
+    volume: Volume,
+    orientation: Orientation,
+    rect: PaneRect,
+    event: PointerEvent,
+  ): PlanePoint | null {
+    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
+    return paneToPlanePoint(
+      volume,
+      orientation,
+      this.zooms()[orientation],
+      rect,
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+      orientation === Orientation.Sagittal && this.sagittalFlipped(),
+      this.pans()[orientation],
+    );
+  }
+
+  /** The MPR placement currently showing an orientation, or null when it isn't shown. */
+  private mprPlacement(orientation: Orientation): Extract<PanePlacement, { kind: 'mpr' }> | null {
+    return (
+      this.panes().find(
+        (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
+          pane.kind === 'mpr' && pane.orientation === orientation,
+      ) ?? null
+    );
+  }
+
+  /** A provisional point under the cursor for previewing the pending measurement. */
+  private previewPoint(
+    volume: Volume,
+    panes: readonly PanePlacement[],
+    zooms: PerOrientation,
+    pans: PerOrientationPan,
+    flipped: boolean,
+    orientation: Orientation,
+  ): PlanePoint | null {
+    const cursor = this.cursor();
+    if (!cursor) return null;
+    const placement = panes.find(
+      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
+        pane.kind === 'mpr' && pane.orientation === orientation,
+    );
+    if (!placement) return null;
+    return paneToPlanePoint(
+      volume,
+      orientation,
+      zooms[orientation],
+      placement.rect,
+      cursor.x,
+      cursor.y,
+      orientation === Orientation.Sagittal && flipped,
+      pans[orientation],
+    );
+  }
+
+  /** Project one measurement into its pane, or null if it's hidden (wrong slice/pane). */
+  private buildOverlay(
+    volume: Volume,
+    panes: readonly PanePlacement[],
+    zooms: PerOrientation,
+    pans: PerOrientationPan,
+    flipped: boolean,
+    indices: PerOrientation,
+    m: { id: number; tool: MeasureTool; orientation: Orientation; sliceIndex: number },
+    points: readonly PlanePoint[],
+    pending: boolean,
+  ): MeasurementOverlay | null {
+    const orientation = m.orientation;
+    const placement = panes.find(
+      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
+        pane.kind === 'mpr' && pane.orientation === orientation,
+    );
+    if (!placement) return null;
+    if (indices[orientation] !== m.sliceIndex) return null; // scrolled off its slice
+    const rect = placement.rect;
+    if (rect.width < 1 || rect.height < 1 || points.length === 0) return null;
+
+    const flipX = orientation === Orientation.Sagittal && flipped;
+    const zoom = zooms[orientation];
+    const pan = pans[orientation];
+    const local: PanePoint[] = [];
+    for (const p of points) {
+      const screen = planePointToPane(volume, orientation, p, zoom, rect, flipX, pan);
+      if (!screen) return null;
+      local.push({ x: screen.x - rect.x, y: screen.y - rect.y });
+    }
+
+    const [widthMm, heightMm] = planeExtentMm(volume, orientation);
+    const scale = { widthMm, heightMm };
+    const full = points.length >= TOOL_POINTS[m.tool];
+
+    let polyline = '';
+    let ellipse: MeasurementOverlay['ellipse'] = null;
+    let box: MeasurementOverlay['box'] = null;
+    let lines: readonly string[] = [];
+    let labelX = local[0].x;
+    let labelY = local[0].y - MEASURE_LABEL_OFFSET;
+
+    switch (m.tool) {
+      case 'distance': {
+        polyline = polylineOf(local);
+        const mid = midpoint(local);
+        labelX = mid.x;
+        labelY = mid.y - MEASURE_LABEL_OFFSET;
+        if (full) lines = [`${measureDistanceMm(points[0], points[1], scale).toFixed(1)} mm`];
+        break;
+      }
+      case 'angle': {
+        polyline = polylineOf(local);
+        labelX = local[1].x;
+        labelY = local[1].y - MEASURE_LABEL_OFFSET;
+        if (full) {
+          lines = [`${measureAngleDeg(points[0], points[1], points[2], scale).toFixed(1)}°`];
+        }
+        break;
+      }
+      case 'ellipse':
+      case 'rectangle': {
+        if (local.length >= 2) {
+          const [a, b] = local;
+          const x = Math.min(a.x, b.x);
+          const y = Math.min(a.y, b.y);
+          const w = Math.abs(a.x - b.x);
+          const h = Math.abs(a.y - b.y);
+          if (m.tool === 'ellipse') {
+            ellipse = { cx: x + w / 2, cy: y + h / 2, rx: w / 2, ry: h / 2 };
+          } else {
+            box = { x, y, w, h };
+          }
+          labelX = x;
+          labelY = y - MEASURE_LABEL_OFFSET;
+          const shape: RoiShape = m.tool;
+          if (pending) {
+            // Live preview shows the area only (cheap); committed ROIs add HU stats
+            // from the memoised, pan-independent sweep in measurementStats.
+            const area = roiAreaMm2(shape, roiBounds(points[0], points[1]), scale);
+            lines = [`${area.toFixed(0)} mm²`];
+          } else {
+            lines = this.measurementStats().get(m.id) ?? [];
+          }
+        }
+        break;
+      }
+      default: {
+        const exhaustive: never = m.tool;
+        return exhaustive;
+      }
+    }
+
+    return {
+      key: pending ? 'pending' : `measure-${m.id}`,
+      id: m.id,
+      tool: m.tool,
+      rect,
+      handles: local,
+      polyline,
+      ellipse,
+      box,
+      lines,
+      labelX,
+      labelY,
+      pending,
+    };
+  }
+
   /** Switch the displayed series, rebuilding its volume from the parsed slices. */
   protected onSeriesChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
@@ -956,6 +1417,13 @@ export class Viewer {
     if (event.shiftKey) {
       if (placement.kind === 'mpr') this.setFocus(placement, event);
       else this.setFocusFromMip(placement, event);
+      return;
+    }
+
+    // With a measurement tool active, a left-click on an MPR pane places the next
+    // point instead of starting a pan; the 3D pane keeps its orbit gesture.
+    if (this.activeTool() !== 'none' && placement.kind === 'mpr') {
+      this.placeMeasurePoint(placement, event);
       return;
     }
 
@@ -1243,6 +1711,10 @@ export class Viewer {
     this.mainOrientation.set(Orientation.Axial);
     this.sagittalFlipped.set(false);
     this.focusVoxel.set(null);
+    this.activeTool.set('none');
+    this.measurements.set([]);
+    this.pending.set(null);
+    this.measureDrag.set(null);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
@@ -1353,6 +1825,37 @@ function formatProbe(name: string, probe: VoxelProbe, volume: Volume): string {
 
 function formatValue(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+/** Join pane-local points into an SVG polyline `points` string. */
+function polylineOf(points: readonly PanePoint[]): string {
+  return points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+}
+
+/** Midpoint of a point list's first and last points. */
+function midpoint(points: readonly PanePoint[]): PanePoint {
+  const a = points[0];
+  const b = points[points.length - 1];
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+/** Readout lines for an ROI: its area, then the HU statistics when available. */
+function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): string[] {
+  const u = unit ? ` ${unit}` : '';
+  const lines = [`${areaMm2.toFixed(0)} mm²`];
+  if (stats) {
+    lines.push(`mean ${formatValue(stats.mean)}${u}`);
+    lines.push(`SD ${formatValue(stats.sd)}`);
+    lines.push(`min ${formatValue(stats.min)} · max ${formatValue(stats.max)}`);
+  }
+  return lines;
+}
+
+/** Immutably replace the element at `index` of a readonly array. */
+function withIndex<T>(values: readonly T[], index: number, value: T): readonly T[] {
+  const next = [...values];
+  next[index] = value;
+  return next;
 }
 
 function withValue<T>(
