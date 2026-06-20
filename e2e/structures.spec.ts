@@ -48,14 +48,13 @@ test('RTSTRUCT loads, lists ROIs, and the tools pane fits without scrolling', as
   expect(overflow.rail).toBe(0);
   expect(overflow.doc).toBe(0);
 
-  // Long ROI names ellipsis-truncate rather than widening the pane.
-  const truncates = await page.evaluate(() => {
-    const el = Array.from(document.querySelectorAll('.roi-legend .roi-name')).find(
-      (e) => (e.textContent ?? '').length > 12,
-    ) as HTMLElement | undefined;
-    return el ? el.scrollWidth > el.clientWidth : false;
-  });
-  expect(truncates).toBe(true);
+  // The pane is wide enough to show the full ROI names (no truncation).
+  const anyTruncated = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.roi-legend .roi-name')).some(
+      (e) => e.scrollWidth > e.clientWidth + 1,
+    ),
+  );
+  expect(anyTruncated).toBe(false);
 
   // When WebGPU is available the contours render as SVG overlays on the panes.
   if (await hasWebGpu(page)) {
