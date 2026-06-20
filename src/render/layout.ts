@@ -101,14 +101,20 @@ export function singleLayout(width: number, height: number): PaneRect {
   return { x: 0, y: 0, width: clampNonNegative(width), height: clampNonNegative(height) };
 }
 
-/** Scale a rect by a factor (e.g. CSS pixels to device pixels), rounding to whole pixels. */
+/**
+ * Scale a rect by a factor (e.g. CSS pixels to device pixels), snapping to whole
+ * pixels by its edges. Deriving width/height from rounded right/bottom edges —
+ * rather than rounding width/height independently — makes adjacent panes share
+ * an exact device-pixel edge and makes a pane that fills the viewport scale to
+ * exactly `round(size * factor)`. Rounding each component on its own instead
+ * leaves 1px seams, overlaps, or clamping between panes at fractional DPRs.
+ */
 export function scaleRect(rect: PaneRect, factor: number): PaneRect {
-  return {
-    x: Math.round(rect.x * factor),
-    y: Math.round(rect.y * factor),
-    width: Math.round(rect.width * factor),
-    height: Math.round(rect.height * factor),
-  };
+  const x = Math.round(rect.x * factor);
+  const y = Math.round(rect.y * factor);
+  const right = Math.round((rect.x + rect.width) * factor);
+  const bottom = Math.round((rect.y + rect.height) * factor);
+  return { x, y, width: clampNonNegative(right - x), height: clampNonNegative(bottom - y) };
 }
 
 function clampNonNegative(value: number): number {
