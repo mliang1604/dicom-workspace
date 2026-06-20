@@ -100,8 +100,10 @@ import {
   type CrossSectionRow,
 } from '../../render/contours';
 import {
+  baseLayer,
   modalityUnit,
   Orientation,
+  type Layer,
   type MissingSlices,
   type StructureSet,
   type Vec3,
@@ -1557,10 +1559,22 @@ export class Viewer {
     }
   });
 
-  private readonly volume = computed<Volume | null>(() => {
+  /**
+   * The loaded layer registry, or empty until a load succeeds. The base entry
+   * backs every single-layer consumer (see {@link volume}); fusion overlays will
+   * sit above it.
+   */
+  private readonly layers = computed<readonly Layer[]>(() => {
     const state = this.load();
-    return state.status === 'ready' ? state.result.volume : null;
+    return state.status === 'ready' ? state.result.layers : [];
   });
+
+  /**
+   * The base layer's volume — what reslice, probe, contours, crosshair and
+   * capture all read. Routing through {@link baseLayer} keeps one-layer behaviour
+   * identical to the pre-registry single volume while overlays are added above.
+   */
+  private readonly volume = computed<Volume | null>(() => baseLayer(this.layers())?.volume ?? null);
 
   /**
    * The volume's full depth (mm): the upper bound and default for the slab
@@ -3381,16 +3395,18 @@ export class Viewer {
       this.load.set({ status: 'error', message: 'GPU is not ready yet — try again.' });
       return;
     }
+    // The base layer backs the single-layer view; honour its volume's defaults.
+    const volume = baseLayer(result.layers)!.volume;
     this.stopCine(); // a fresh volume resets the view; don't keep cining the old one
-    renderer.setVolume(result.volume);
+    renderer.setVolume(volume);
     // Persisted view preferences (layout, projection mode, sagittal flip) are kept
     // across loads, so they aren't reset here — the signals already hold them.
     // Window/level and slab thickness depend on the volume, so honour a stored
     // preference when present, else fall back to the volume's own default.
     const prefs = this.preferencesStore.preferences();
-    const fullDepthMm = Math.round(2 * volumeBounds(result.volume).radius);
-    this.windowCenter.set(prefs.windowCenter ?? Math.round(result.volume.windowCenter));
-    this.windowWidth.set(prefs.windowWidth ?? Math.max(1, Math.round(result.volume.windowWidth)));
+    const fullDepthMm = Math.round(2 * volumeBounds(volume).radius);
+    this.windowCenter.set(prefs.windowCenter ?? Math.round(volume.windowCenter));
+    this.windowWidth.set(prefs.windowWidth ?? Math.max(1, Math.round(volume.windowWidth)));
     this.slabThicknessMm.set(
       prefs.slabThicknessMm !== null ? clamp(prefs.slabThicknessMm, 1, fullDepthMm) : fullDepthMm,
     );
@@ -3733,7 +3749,7 @@ export function nextCineIndex(current: number, count: number, step: number): num
 }
 
 function describeVolume(result: LoadResult): string {
-  const [x, y, z] = result.volume.dims;
+  const [x, y, z] = baseLayer(result.layers)!.volume.dims;
   return `Loaded ${result.sliceCount} slice(s) — volume ${x} × ${y} × ${z}.`;
 }
 
