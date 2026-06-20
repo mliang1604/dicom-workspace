@@ -82,6 +82,34 @@ kbd {
   width: 84px;
 }
 
+/* Window/level cluster in the top bar: Preset + WL + WW stay on one line and
+   wrap together. Compact number inputs and a capped preset width keep the whole
+   toolbar on a single row at typical widths (≥1024px). */
+.wl-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.wl-group input[type='number'] {
+  width: 60px;
+}
+
+.wl-group select {
+  max-width: 150px;
+}
+
+/* Info/Help pinned to the right edge; the pair is its own flex unit so it wraps
+   together — never leaving a single lonely control on a second row. */
+.toolbar-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
 .spacer {
   flex: 1;
   min-width: 12px;

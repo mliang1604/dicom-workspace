@@ -49,68 +49,75 @@
     Layout ▦ <kbd>L</kbd> {{ layoutLabel() }}
   </button>
 
-  <label class="ctrl" title="Apply a window/level preset">
-    Preset
-    <select
-      aria-label="Window/level preset"
-      (change)="onPresetChange($event)"
-      [disabled]="!isReady()"
+  <!-- Window/level cluster: kept together so it wraps as one unit, never splitting
+       Preset/WL/WW across rows. Compact number inputs keep the bar on one row. -->
+  <div class="wl-group">
+    <label class="ctrl" title="Apply a window/level preset">
+      Preset
+      <select
+        aria-label="Window/level preset"
+        (change)="onPresetChange($event)"
+        [disabled]="!isReady()"
+      >
+        <option value="" disabled selected>Preset…</option>
+        @for (preset of wlPresets(); track preset.label; let i = $index) {
+          <option [value]="i">{{ preset.label }} ({{ preset.center }} / {{ preset.width }})</option>
+        }
+      </select>
+    </label>
+
+    <label class="ctrl" title="Window centre (level); right-drag a pane to adjust">
+      WL
+      <input
+        type="number"
+        step="1"
+        aria-label="Window level (centre)"
+        [value]="windowCenter()"
+        (input)="onWindowCenterInput($event)"
+        [disabled]="!isReady()"
+      />
+    </label>
+
+    <label class="ctrl">
+      WW
+      <input
+        type="number"
+        step="1"
+        min="1"
+        aria-label="Window width"
+        [value]="windowWidth()"
+        (input)="onWindowWidthInput($event)"
+        [disabled]="!isReady()"
+      />
+    </label>
+  </div>
+
+  <!-- Pinned to the right; the pair wraps together so row 2 never holds a lone control. -->
+  <div class="toolbar-end">
+    <button
+      type="button"
+      (click)="toggleInfoPanel()"
+      [disabled]="!isReady() || !metadata()"
+      [class.active]="infoPanelOpen()"
+      [attr.aria-pressed]="infoPanelOpen()"
+      aria-haspopup="dialog"
+      title="Show DICOM metadata and a searchable raw-tag inspector (I)"
     >
-      <option value="" disabled selected>Preset…</option>
-      @for (preset of wlPresets(); track preset.label; let i = $index) {
-        <option [value]="i">{{ preset.label }} ({{ preset.center }} / {{ preset.width }})</option>
-      }
-    </select>
-  </label>
+      Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
+    </button>
 
-  <label class="ctrl" title="Window centre (level); right-drag a pane to adjust">
-    WL
-    <input
-      type="number"
-      step="1"
-      aria-label="Window level (centre)"
-      [value]="windowCenter()"
-      (input)="onWindowCenterInput($event)"
+    <button
+      type="button"
+      (click)="toggleHelp()"
       [disabled]="!isReady()"
-    />
-  </label>
-
-  <label class="ctrl">
-    WW
-    <input
-      type="number"
-      step="1"
-      min="1"
-      aria-label="Window width"
-      [value]="windowWidth()"
-      (input)="onWindowWidthInput($event)"
-      [disabled]="!isReady()"
-    />
-  </label>
-
-  <button
-    type="button"
-    (click)="toggleInfoPanel()"
-    [disabled]="!isReady() || !metadata()"
-    [class.active]="infoPanelOpen()"
-    [attr.aria-pressed]="infoPanelOpen()"
-    aria-haspopup="dialog"
-    title="Show DICOM metadata and a searchable raw-tag inspector (I)"
-  >
-    Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
-  </button>
-
-  <button
-    type="button"
-    (click)="toggleHelp()"
-    [disabled]="!isReady()"
-    [class.active]="helpOpen()"
-    [attr.aria-pressed]="helpOpen()"
-    aria-haspopup="dialog"
-    title="Show the keyboard & mouse shortcut overlay (?)"
-  >
-    Help <kbd>?</kbd>
-  </button>
+      [class.active]="helpOpen()"
+      [attr.aria-pressed]="helpOpen()"
+      aria-haspopup="dialog"
+      title="Show the keyboard & mouse shortcut overlay (?)"
+    >
+      Help <kbd>?</kbd>
+    </button>
+  </div>
 </header>
 
 <div class="workspace">
