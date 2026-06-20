@@ -2,6 +2,10 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* Full-screen viewer: never let transient child overflow (overlays near a
+     pane edge, the toolbar hint) raise a document scrollbar. A scrollbar would
+     steal width/height, re-fire the canvas ResizeObserver, and oscillate. */
+  overflow: hidden;
 }
 
 .toolbar {
@@ -81,6 +85,9 @@ kbd {
 .spacer {
   flex: 1;
   min-width: 12px;
+  /* Hold the help hint, which can be long: clip it to the space the toolbar can
+     spare instead of letting it push the toolbar past the window width. */
+  overflow: hidden;
 }
 
 .hint {
@@ -92,6 +99,10 @@ kbd {
   flex: 1;
   min-height: 0;
   background: #000;
+  /* Clip the canvas and its absolutely-positioned overlays (pane tags, edge
+     labels, crosshairs, gizmos) to the imaging area — they must never extend
+     past it and scroll the page. */
+  overflow: hidden;
 }
 
 canvas {
