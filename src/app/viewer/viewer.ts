@@ -80,6 +80,7 @@ import {
 } from '../../render/window-level';
 import {
   cameraBasis,
+  projectPolyline,
   projectToPane,
   rezoomCameraPan,
   viewBasis,
@@ -198,6 +199,14 @@ interface ContourPaneOverlay {
   /** The pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
   readonly rect: PaneRect;
   /** The contour shapes drawn on this pane. */
+  readonly shapes: readonly ContourShape[];
+}
+
+/** All visible ROI contours projected into the 3D pane, for one SVG overlay. */
+interface Contour3dOverlay {
+  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  /** The contour shapes drawn over the 3D pane, projected through the orbit camera. */
   readonly shapes: readonly ContourShape[];
 }
 
@@ -977,6 +986,45 @@ export class Viewer {
       return { orientation, points, color: SLICE_PLANE_COLORS[orientation] };
     });
     return { rect: mip.rect, planes };
+  });
+
+  /**
+   * RTSTRUCT ROI contours projected into the 3D pane, mirroring {@link slicePlanes}:
+   * every visible ROI's contour loops are projected point-by-point through the orbit
+   * camera ({@link projectToPane} via {@link projectPolyline}) and drawn as
+   * colour-coded polylines, so they rotate and zoom with the volume. Coloured by ROI
+   * display colour and gated by the same {@link hiddenRois} visibility as the MPR
+   * overlay; the SVG's overflow clips them to the pane rect. Recomputed only from the
+   * camera, structure sets and ROI visibility — never the slice indices or
+   * window/level.
+   */
+  protected readonly contours3d = computed<Contour3dOverlay | null>(() => {
+    const volume = this.volume();
+    const sets = this.structureSets();
+    if (!this.isReady() || !volume || sets.length === 0) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!mip || mip.rect.width < 1 || mip.rect.height < 1) return null;
+
+    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
+    const hidden = this.hiddenRois();
+    const shapes: ContourShape[] = [];
+    sets.forEach((ss, setIndex) => {
+      for (const roi of ss.rois) {
+        if (hidden.has(this.roiKey(setIndex, roi))) continue;
+        const color = rgbColor(roi.color);
+        for (let ci = 0; ci < roi.contours.length; ci++) {
+          const contour = roi.contours[ci];
+          if (contour.points.length < 2) continue; // a single POINT can't form a polyline
+          const closed =
+            contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
+          const points = projectPolyline(basis, contour.points, mip.rect.width, mip.rect.height)
+            .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+            .join(' ');
+          shapes.push({ key: `${setIndex}:${roi.number}:${ci}`, points, closed, color });
+        }
+      }
+    });
+    return shapes.length ? { rect: mip.rect, shapes } : null;
   });
 
   /**

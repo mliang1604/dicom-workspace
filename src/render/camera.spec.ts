@@ -3,6 +3,7 @@ import {
   cameraBasis,
   eyeDirection,
   intersectUnitBox,
+  projectPolyline,
   projectToPane,
   rezoomCameraPan,
   type OrbitCamera,
@@ -115,6 +116,39 @@ describe('projectToPane', () => {
     expect(b.u).toBeCloseTo(a.u, 6);
     expect(b.v).toBeCloseTo(a.v, 6);
     expect(b.depth - a.depth).toBeCloseTo(5, 6);
+  });
+});
+
+describe('projectPolyline', () => {
+  it('scales each projected point to the pane pixel size, origin at top-left', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const basis = cameraBasis(volume, LEVEL, 200, 100);
+
+    // Two world points at known ndc; their projected uv scales to pane pixels.
+    const a = add(add(basis.eye, scale(basis.axisU, 0.5)), scale(basis.axisV, -0.5));
+    const b = basis.eye; // ndc (0, 0) → pane centre
+    const pixels = projectPolyline(basis, [a, b], 200, 100);
+
+    const pa = projectToPane(basis, a);
+    expect(pixels[0].x).toBeCloseTo(pa.u * 200, 6);
+    expect(pixels[0].y).toBeCloseTo(pa.v * 100, 6);
+    expect(pixels[1].x).toBeCloseTo(100, 6); // pane centre x
+    expect(pixels[1].y).toBeCloseTo(50, 6); // pane centre y
+  });
+
+  it('rotates with the orbit camera', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const point: Vec3 = [3.5, 1.5, 1.5]; // patient-left edge of the box
+    const front = projectPolyline(cameraBasis(volume, LEVEL, 100, 100), [point], 100, 100)[0];
+    const orbited = projectPolyline(
+      cameraBasis(volume, { ...LEVEL, azimuth: Math.PI / 2 }, 100, 100),
+      [point],
+      100,
+      100,
+    )[0];
+
+    // A 90° azimuth swings the patient-left edge off its level-view position.
+    expect(Math.hypot(orbited.x - front.x, orbited.y - front.y)).toBeGreaterThan(1);
   });
 });
 

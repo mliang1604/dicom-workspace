@@ -172,6 +172,25 @@ export function projectToPane(basis: CameraBasis, point: Vec3): PaneProjection {
   return { u: (ndcX + 1) / 2, v: (1 - ndcY) / 2, depth: dot(rel, basis.forward) };
 }
 
+/**
+ * Project a patient-space polyline onto the 3D pane as pane-local pixel points,
+ * for the SVG overlays (the MPR cut-plane outlines and the RTSTRUCT contours).
+ * Each point goes through {@link projectToPane} — the orthographic forward map —
+ * and is scaled to the pane's pixel size with the origin at the pane's top-left,
+ * so the polyline rotates and zooms with the orbit camera exactly like the volume.
+ */
+export function projectPolyline(
+  basis: CameraBasis,
+  points: readonly Vec3[],
+  width: number,
+  height: number,
+): { x: number; y: number }[] {
+  return points.map((point) => {
+    const { u, v } = projectToPane(basis, point);
+    return { x: u * width, y: v * height };
+  });
+}
+
 /** Entry/exit parameters of a ray against the unit box; `hit` is false if it misses. */
 export interface BoxHit {
   readonly tEntry: number;
