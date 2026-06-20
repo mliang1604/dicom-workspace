@@ -1,4 +1,6 @@
-import { parseStructureSet } from './structure-set';
+import type { Series } from './series';
+import { parseStructureSet, structureSetsForSeries } from './structure-set';
+import type { StructureSet } from './types';
 
 // --- Minimal Explicit-VR-Little-Endian DICOM P10 writer --------------------
 //
@@ -183,6 +185,49 @@ function structureSet(): ArrayBuffer {
   return dicomFile(body);
 }
 
+/**
+ * Referenced Frame of Reference Sequence (3006,0010): a frame of reference UID
+ * and, nested through the study/series sequences, the referenced series UIDs.
+ */
+function referencedFrameOfReference(forUid: string, seriesUids: readonly string[]): Uint8Array {
+  const seriesItems = seriesUids.map(
+    (s) => element(0x0020, 0x000e, 'UI', uid(s)), // Series Instance UID
+  );
+  const studyItem = sequence(0x3006, 0x0014, seriesItems); // RT Referenced Series Sequence
+  return sequence(0x3006, 0x0010, [
+    concat([
+      element(0x0020, 0x0052, 'UI', uid(forUid)), // Frame of Reference UID
+      sequence(0x3006, 0x0012, [studyItem]), // RT Referenced Study Sequence
+    ]),
+  ]);
+}
+
+/** An RTSTRUCT whose frame of reference and referenced series come from 3006,0010. */
+function structureSetWithReferences(forUid: string, seriesUids: readonly string[]): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0016, 'UI', uid(RTSTRUCT_SOP_CLASS)), // SOPClassUID
+    referencedFrameOfReference(forUid, seriesUids),
+    sequence(0x3006, 0x0020, [roiItem(1, 'Body')]),
+  ]);
+  return dicomFile(body);
+}
+
+/** A minimal series carrying just the fields association looks at. */
+function series(overrides: Partial<Series> = {}): Series {
+  return {
+    uid: 'series-uid',
+    seriesNumber: 1,
+    description: null,
+    modality: 'CT',
+    frameOfReferenceUid: null,
+    imageCount: 1,
+    dims: [4, 4],
+    metadata: null,
+    slices: [],
+    ...overrides,
+  };
+}
+
 /** An RTSTRUCT recognised only by Modality (no SOP Class UID anywhere). */
 function modalityOnlyStructureSet(): ArrayBuffer {
   const body = concat([
@@ -254,6 +299,22 @@ describe('parseStructureSet', () => {
     expect(ss!.rois[0].contours).toEqual([]);
   });
 
+  it('falls back to a ROI Referenced Frame of Reference UID when no reference sequence', () => {
+    // The basic fixture carries 3006,0024 on each ROI but no 3006,0010 sequence.
+    const ss = parseStructureSet('rs.dcm', structureSet())!;
+    expect(ss.frameOfReferenceUid).toBe('1.2.3.4');
+    expect(ss.referencedSeriesUids).toEqual([]);
+  });
+
+  it('reads the frame of reference and referenced series from the reference sequence', () => {
+    const ss = parseStructureSet(
+      'rs.dcm',
+      structureSetWithReferences('1.2.840.FOR', ['1.2.840.SERIES.A', '1.2.840.SERIES.B']),
+    )!;
+    expect(ss.frameOfReferenceUid).toBe('1.2.840.FOR');
+    expect(ss.referencedSeriesUids).toEqual(['1.2.840.SERIES.A', '1.2.840.SERIES.B']);
+  });
+
   it('returns null for a non-RTSTRUCT DICOM file', () => {
     // A minimal CT-ish data set: parseable, but not a structure set.
     const body = concat([
@@ -265,5 +326,51 @@ describe('parseStructureSet', () => {
 
   it('returns null for unparseable bytes', () => {
     expect(parseStructureSet('garbage.bin', new Uint8Array([1, 2, 3, 4]).buffer)).toBeNull();
+  });
+});
+
+describe('structureSetsForSeries', () => {
+  const ss = (overrides: Partial<StructureSet> = {}): StructureSet => ({
+    name: 'rs.dcm',
+    label: null,
+    frameOfReferenceUid: null,
+    referencedSeriesUids: [],
+    rois: [],
+    ...overrides,
+  });
+
+  it('associates by matching frame of reference UID', () => {
+    const matching = ss({ frameOfReferenceUid: 'for-1' });
+    const other = ss({ name: 'rs2.dcm', frameOfReferenceUid: 'for-2' });
+    const s = series({ frameOfReferenceUid: 'for-1' });
+
+    expect(structureSetsForSeries([matching, other], s)).toEqual([matching]);
+  });
+
+  it('does not associate when frames of reference differ', () => {
+    const s = series({ frameOfReferenceUid: 'for-1' });
+    expect(structureSetsForSeries([ss({ frameOfReferenceUid: 'for-2' })], s)).toEqual([]);
+  });
+
+  it('falls back to a referenced series UID when the frame of reference is absent', () => {
+    const bySeries = ss({ referencedSeriesUids: ['series-uid'] });
+    const s = series({ uid: 'series-uid', frameOfReferenceUid: null });
+    expect(structureSetsForSeries([bySeries], s)).toEqual([bySeries]);
+  });
+
+  it('falls back to a referenced series UID when the frames of reference do not match', () => {
+    const s = series({ uid: 'series-uid', frameOfReferenceUid: 'for-1' });
+    const bySeries = ss({ frameOfReferenceUid: 'for-2', referencedSeriesUids: ['series-uid'] });
+    expect(structureSetsForSeries([bySeries], s)).toEqual([bySeries]);
+  });
+
+  it('leaves a structure set with no usable reference unassociated', () => {
+    const s = series({ uid: 'series-uid', frameOfReferenceUid: 'for-1' });
+    expect(structureSetsForSeries([ss()], s)).toEqual([]);
+  });
+
+  it('does not match an empty series UID against an empty referenced UID', () => {
+    const s = series({ uid: '', frameOfReferenceUid: null });
+    expect(structureSetsForSeries([ss({ referencedSeriesUids: [] })], s)).toEqual([]);
   });
 });

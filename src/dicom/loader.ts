@@ -86,6 +86,7 @@ interface FileContext {
   readonly seriesUid: string | null;
   readonly seriesNumber: number | null;
   readonly seriesDescription: string | null;
+  readonly frameOfReferenceUid: string | null;
   readonly modality: string | null;
   /** The PixelData (7FE0,0010) element — the source of encapsulated frames. */
   readonly pixelElement: dicomParser.Element;
@@ -203,6 +204,7 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
     seriesUid: dataSet.string('x0020000e')?.trim() || null, // SeriesInstanceUID
     seriesNumber: intOrNull(dataSet, 'x00200011'), // SeriesNumber
     seriesDescription: dataSet.string('x0008103e')?.trim() || null, // SeriesDescription
+    frameOfReferenceUid: dataSet.string('x00200052')?.trim() || null, // FrameOfReferenceUID
     modality: dataSet.string('x00080060')?.trim() || null,
     pixelElement,
     codec,
@@ -278,6 +280,7 @@ function parseSingleFrame(ctx: FileContext, raw: FramePixels): Slice {
     seriesUid: ctx.seriesUid,
     seriesNumber: ctx.seriesNumber,
     seriesDescription: ctx.seriesDescription,
+    frameOfReferenceUid: ctx.frameOfReferenceUid,
     modality: ctx.modality,
     rescaleSlope: m.slope,
     rescaleIntercept: m.intercept,
@@ -328,6 +331,7 @@ function parseMultiframe(ctx: FileContext, frames: number, raw: FramePixels[]): 
       seriesUid: ctx.seriesUid,
       seriesNumber: ctx.seriesNumber,
       seriesDescription: ctx.seriesDescription,
+      frameOfReferenceUid: ctx.frameOfReferenceUid,
       modality: ctx.modality,
       rescaleSlope: m.slope,
       rescaleIntercept: m.intercept,

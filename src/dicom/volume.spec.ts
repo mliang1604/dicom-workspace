@@ -1,5 +1,5 @@
-import type { Slice } from './types';
-import { buildVolume, VolumeBuildError } from './volume';
+import type { Slice, VolumeGeometry } from './types';
+import { buildVolume, patientToVoxel, VolumeBuildError } from './volume';
 
 /** A 2×2 axial slice at the given z position, filled with a constant value. */
 function axialSlice(z: number, value: number, instanceNumber: number): Slice {
@@ -13,6 +13,7 @@ function axialSlice(z: number, value: number, instanceNumber: number): Slice {
     instanceNumber,
     seriesUid: 'series-1',
     seriesNumber: 1,
+    frameOfReferenceUid: null,
     seriesDescription: 'Axial',
     modality: 'CT',
     rescaleSlope: 1,
@@ -35,6 +36,7 @@ function sagittalSlice(x: number, value: number, instanceNumber: number): Slice 
     instanceNumber,
     seriesUid: 'series-1',
     seriesNumber: 1,
+    frameOfReferenceUid: null,
     seriesDescription: 'Sagittal',
     modality: 'CT',
     rescaleSlope: 1,
@@ -132,5 +134,58 @@ describe('buildVolume', () => {
 
   it('rejects an empty slice list', () => {
     expect(() => buildVolume([])).toThrow(VolumeBuildError);
+  });
+});
+
+describe('patientToVoxel', () => {
+  it('inverts an axis-aligned placement with spacing and origin', () => {
+    // 1×2×3 mm voxels, origin at patient (10, 20, 30).
+    const geometry: VolumeGeometry = {
+      iStep: [1, 0, 0],
+      jStep: [0, 2, 0],
+      kStep: [0, 0, 3],
+      origin: [10, 20, 30],
+    };
+    expect(patientToVoxel(geometry, [10, 20, 30])).toEqual([0, 0, 0]); // the origin voxel
+    expect(patientToVoxel(geometry, [13, 28, 45])).toEqual([3, 4, 5]);
+  });
+
+  it('round-trips the forward placement for an oblique geometry', () => {
+    // A rotated, anisotropic frame: the inverse of `origin + i·iStep + j·jStep + k·kStep`.
+    const geometry: VolumeGeometry = {
+      iStep: [0.6, 0.8, 0],
+      jStep: [-0.8, 0.6, 0],
+      kStep: [0, 0, 2.5],
+      origin: [-5, 7, 12],
+    };
+    const [i, j, k] = [4, 9, 6];
+    const patient = [
+      geometry.origin[0] + i * geometry.iStep[0] + j * geometry.jStep[0] + k * geometry.kStep[0],
+      geometry.origin[1] + i * geometry.iStep[1] + j * geometry.jStep[1] + k * geometry.kStep[1],
+      geometry.origin[2] + i * geometry.iStep[2] + j * geometry.jStep[2] + k * geometry.kStep[2],
+    ] as const;
+
+    const voxel = patientToVoxel(geometry, patient)!;
+    expect(voxel[0]).toBeCloseTo(i, 9);
+    expect(voxel[1]).toBeCloseTo(j, 9);
+    expect(voxel[2]).toBeCloseTo(k, 9);
+  });
+
+  it('agrees with the geometry buildVolume derives for a series', () => {
+    // The volume's first voxel sits at its origin; one slice up the normal is k=1.
+    const volume = buildVolume([axialSlice(0, 0, 1), axialSlice(2, 10, 2)]);
+    const geometry = volume.geometry!;
+    expect(patientToVoxel(geometry, geometry.origin)).toEqual([0, 0, 0]);
+    expect(patientToVoxel(geometry, [0, 0, 2])![2]).toBeCloseTo(1, 9); // second slice
+  });
+
+  it('returns null for a singular geometry', () => {
+    const geometry: VolumeGeometry = {
+      iStep: [1, 0, 0],
+      jStep: [2, 0, 0], // parallel to iStep — collapses the map
+      kStep: [0, 0, 1],
+      origin: [0, 0, 0],
+    };
+    expect(patientToVoxel(geometry, [1, 1, 1])).toBeNull();
   });
 });

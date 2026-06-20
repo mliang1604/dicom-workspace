@@ -15,6 +15,12 @@ export interface Series {
   readonly description: string | null;
   /** Modality of the series (taken from its first slice); null when absent. */
   readonly modality: string | null;
+  /**
+   * FrameOfReferenceUID shared by the series' slices (taken from its first
+   * slice); null when absent. An RTSTRUCT is associated to this series by
+   * matching its referenced frame of reference against this value.
+   */
+  readonly frameOfReferenceUid: string | null;
   /** Number of image slices in the series. */
   readonly imageCount: number;
   /** Representative in-plane dimensions [columns, rows] of the first slice. */
@@ -51,6 +57,7 @@ export function groupSeries(slices: readonly Slice[]): Series[] {
       seriesNumber: first.seriesNumber,
       description: first.seriesDescription,
       modality: first.modality,
+      frameOfReferenceUid: first.frameOfReferenceUid,
       imageCount: group.length,
       dims: [first.columns, first.rows],
       metadata: first.metadata ?? null,
