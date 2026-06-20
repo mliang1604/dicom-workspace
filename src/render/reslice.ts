@@ -1,5 +1,5 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
-import { add, cross, dot, length, scale, sub } from '../dicom/vec3';
+import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
 
 /**
  * Oblique multi-planar reslicing geometry.
@@ -337,6 +337,19 @@ export function planeExtentMm(volume: Volume, orientation: Orientation): [number
       return exhaustive;
     }
   }
+}
+
+/**
+ * Unit patient-space (LPS) directions of an orientation's pane axes: where the
+ * pane's +u (rightward) and +v (downward, top→bottom) screen axes point in
+ * patient space. Shares {@link planeBasis} with the reslice, so the on-screen
+ * orientation labels can never drift from the planes the shader samples. The
+ * display convention is axis-aligned and volume-independent, so a unit box gives
+ * the directions; only their signs matter.
+ */
+export function planeAxisDirs(orientation: Orientation): { right: Vec3; down: Vec3 } {
+  const basis = planeBasis(orientation, { min: [0, 0, 0], max: [1, 1, 1] });
+  return { right: normalize(basis.axisU), down: normalize(basis.axisV) };
 }
 
 /** Number of output slices walking an orientation's through-plane patient axis. */

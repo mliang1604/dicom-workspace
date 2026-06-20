@@ -225,6 +225,30 @@
     }
   </div>
 
+  <!-- Anatomical edge letters and a physical scale bar, one per MPR pane. -->
+  <div class="pane-overlay">
+    @for (ann of paneAnnotations(); track ann.key) {
+      <div
+        class="pane-annotations"
+        [style.left.px]="ann.rect.x"
+        [style.top.px]="ann.rect.y"
+        [style.width.px]="ann.rect.width"
+        [style.height.px]="ann.rect.height"
+      >
+        <span class="edge-label edge-top">{{ ann.edges.top }}</span>
+        <span class="edge-label edge-bottom">{{ ann.edges.bottom }}</span>
+        <span class="edge-label edge-left">{{ ann.edges.left }}</span>
+        <span class="edge-label edge-right">{{ ann.edges.right }}</span>
+        @if (ann.scale; as bar) {
+          <div class="scale-bar">
+            <span class="scale-bar-label">{{ bar.label }}</span>
+            <span class="scale-bar-line" [style.width.px]="bar.lengthPx"></span>
+          </div>
+        }
+      </div>
+    }
+  </div>
+
   <!-- Linked crosshairs at the shared focus voxel, one per MPR pane. -->
   <div class="pane-overlay">
     @for (mark of crosshairs(); track mark.key) {
