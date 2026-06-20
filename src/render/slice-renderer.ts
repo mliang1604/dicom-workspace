@@ -4,6 +4,7 @@ import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import type { PaneRect, Vec2 } from './layout';
 import {
+  clipPlaneTex,
   clipTRange,
   patientToTexMatrix,
   planeExtentMm,
@@ -14,6 +15,7 @@ import {
   viewClipHalfSpaces,
   volumeBounds,
   type HalfSpace,
+  type PatientPlane,
 } from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
@@ -199,6 +201,12 @@ export interface MipPaneView {
    */
   readonly sliceIndices?: readonly [number, number, number];
   /**
+   * An arbitrary handle-driven cut-plane (patient space) clipping every ray to
+   * the side its normal points into, independent of {@link clipToPlanes}. Omitted
+   * leaves the free cut-plane off.
+   */
+  readonly cutPlane?: PatientPlane;
+  /**
    * Render at a reduced level of detail (fewer march samples) for a smoother
    * frame while the view is being manipulated. Omitted/false renders the
    * full-quality image, identical to the settled output.
@@ -222,8 +230,8 @@ export type PaneView = MprPaneView | MipPaneView;
 // uniform-struct stride, with the trailing pad satisfying the mat4x4 alignment.
 const PARAMS_SIZE = 112;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
-// tfDomain, clipA, clipC, clipS, light, material (11 × vec4 = 176).
-const MIP_PARAMS_SIZE = 240;
+// tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
+const MIP_PARAMS_SIZE = 256;
 const BYTES_PER_HALF = 2;
 /** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
 const MAX_MPR_PANES = 3;
@@ -236,11 +244,13 @@ const MATRIX_FLOATS = 16;
  * march cost; the settled frame renders at full quality.
  */
 const MIP_INTERACTIVE_LOD = 0.5;
+/** A no-op half-space: a zero normal the shader ignores (its clip flag is off too). */
+const NO_HALF_SPACE: HalfSpace = { normal: [0, 0, 0], offset: 0 };
 /** A no-op cut-away: zero-normal planes the shader ignores (clip flag off too). */
 const NO_CLIP: readonly [HalfSpace, HalfSpace, HalfSpace] = [
-  { normal: [0, 0, 0], offset: 0 },
-  { normal: [0, 0, 0], offset: 0 },
-  { normal: [0, 0, 0], offset: 0 },
+  NO_HALF_SPACE,
+  NO_HALF_SPACE,
+  NO_HALF_SPACE,
 ];
 
 interface PaneSlot {
@@ -513,6 +523,11 @@ export class SliceRenderer {
           )
         : NO_CLIP;
 
+    // Arbitrary handle-driven cut-plane (patient space) as a texture-space
+    // half-space; independent of the MPR cut-away above.
+    const freeClipOn = !!view.cutPlane;
+    const clipFree = view.cutPlane ? clipPlaneTex(volume, view.cutPlane) : NO_HALF_SPACE;
+
     const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
     floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
     floats.set(basis.eye, 16);
@@ -529,12 +544,13 @@ export class SliceRenderer {
     floats[35] = clipOn ? 1 : 0;
     floats[36] = tfLo;
     floats[37] = tfHi;
-    floats[38] = 0; // unused (DVR ambient now lives in the material vec4)
+    floats[38] = freeClipOn ? 1 : 0; // arbitrary cut-plane enabled
     floats[39] = view.invert ? 1 : 0; // invert grayscale projections (ignored by DVR)
     packHalfSpace(floats, 40, clip[0]); // axial cut-plane
     packHalfSpace(floats, 44, clip[1]); // coronal cut-plane
     packHalfSpace(floats, 48, clip[2]); // sagittal cut-plane
     floats.set(light, 52); // light dir + enabled (52..55), material weights (56..59)
+    packHalfSpace(floats, 60, clipFree); // arbitrary handle-driven cut-plane
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 

@@ -3,11 +3,13 @@ import { add, scale } from '../dicom/vec3';
 import { cameraBasis, intersectUnitBox, type OrbitCamera } from './camera';
 import type { PaneRect } from './layout';
 import {
+  clipPlaneTex,
   clipTRange,
   patientToTexMatrix,
   slabTRange,
   viewClipHalfSpaces,
   volumeBounds,
+  type PatientPlane,
 } from './reslice';
 import { isDvr, mipStepScale, ProjectionMode } from './slice-renderer';
 import {
@@ -24,6 +26,8 @@ export interface PickOptions {
   readonly clipToPlanes?: boolean;
   /** Current axial/coronal/sagittal slice indices, needed for the cut-away planes. */
   readonly sliceIndices?: readonly [number, number, number];
+  /** Arbitrary handle-driven cut-plane (patient space) the pane is clipping to, if any. */
+  readonly cutPlane?: PatientPlane;
   /** Transfer function for a DVR pick. Defaults to the {@link TransferFunctionPreset.CtBone} preset. */
   readonly transferFunction?: TransferFunction;
 }
@@ -114,6 +118,11 @@ export function pickProjection(
       tEntry,
       tExit,
     );
+  }
+  // Mirror the arbitrary handle-driven cut-plane too, so a pick on the cut-away
+  // lands on the revealed interior rather than on clipped-away material.
+  if (options.cutPlane) {
+    [tEntry, tExit] = clipTRange([clipPlaneTex(volume, options.cutPlane)], ro, rd, tEntry, tExit);
   }
   if (!(tExit >= tEntry)) return null;
 

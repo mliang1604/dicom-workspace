@@ -2,9 +2,9 @@
  * WGSL for the 3D pane. Each fragment builds an orthographic camera ray (from the
  * basis computed in `camera.ts`), converts it into the volume's texture space with
  * the `patientToTex` affine (built in `reslice.ts`), intersects the unit box,
- * clamps the marched segment to the thick-slab t-range and — when the MPR cut-away
- * is enabled — to the three slice-plane half-spaces, then renders the configured
- * 3D mode:
+ * clamps the marched segment to the thick-slab t-range and — when a cut-away is
+ * enabled — to the three MPR slice-plane half-spaces and/or an arbitrary
+ * handle-driven cut-plane, then renders the configured 3D mode:
  *
  *   - a **projection** (MIP / MinIP / Average): march accumulating the maximum,
  *     the minimum, or the mean sample, then window it with the same DICOM linear
@@ -27,13 +27,14 @@ struct Params {
   axisU : vec4<f32>,          // half-width image-plane axis in .xyz, windowCenter in .w
   axisV : vec4<f32>,          // half-height image-plane axis in .xyz, windowWidth in .w
   forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz, voxels-per-t in .w
-  modeSlab : vec4<f32>,       // mode (0 max,1 min,2 mean,3 DVR) .x, slab t-range [.y,.z], clip on .w
-  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), unused .z, gray invert .w
+  modeSlab : vec4<f32>,       // mode (0 max,1 min,2 mean,3 DVR) .x, slab t-range [.y,.z], MPR clip on .w
+  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), free clip-plane on .z, gray invert .w
   clipA : vec4<f32>,          // axial cut-plane: texture-space normal .xyz, offset .w
   clipC : vec4<f32>,          // coronal cut-plane
   clipS : vec4<f32>,          // sagittal cut-plane
   light : vec4<f32>,          // DVR light direction (texture space) .xyz, shading enabled .w
   material : vec4<f32>,       // DVR Blinn-Phong: ambient .x, diffuse .y, specular .z, shininess .w
+  clipFree : vec4<f32>,       // arbitrary cut-plane: texture-space normal .xyz, offset .w
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -170,6 +171,14 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
     range = clipPlane(P.clipA.xyz, P.clipA.w, ro, rd, range);
     range = clipPlane(P.clipC.xyz, P.clipC.w, ro, rd, range);
     range = clipPlane(P.clipS.xyz, P.clipS.w, ro, rd, range);
+    tEntry = range.x;
+    tExit = range.y;
+  }
+
+  // Clip to the arbitrary handle-driven cut-plane, when enabled. Independent of
+  // the MPR cut-away above; the kept half is the side the plane normal points into.
+  if (P.tfDomain.z > 0.5) {
+    let range = clipPlane(P.clipFree.xyz, P.clipFree.w, ro, rd, vec2<f32>(tEntry, tExit));
     tEntry = range.x;
     tExit = range.y;
   }

@@ -248,6 +248,44 @@ export function orientTowardRay(plane: HalfSpace, rd: Vec3): HalfSpace {
 }
 
 /**
+ * An arbitrary clip plane placed in patient space (LPS, mm): a `point` the plane
+ * passes through and a `normal`. The kept half is the side the normal points
+ * into — `{ p : dot(normal, p − point) ≥ 0 }` — so translating `point` along
+ * `normal` slides the cut-away through the volume. Drives the interactive 3D
+ * clip-plane handle, independent of the MPR-plane cut-away.
+ */
+export interface PatientPlane {
+  /** A point the plane passes through, in patient space (LPS, mm). */
+  readonly point: Vec3;
+  /** Plane normal (patient space, need not be unit); the kept half is the side it points into. */
+  readonly normal: Vec3;
+}
+
+/**
+ * An arbitrary patient-space {@link PatientPlane} expressed as a texture-space
+ * {@link HalfSpace}, keeping the side its normal points into. The value
+ * `dot(normal_tex, tex) + offset` equals `dot(normal, p − point)` for the same
+ * physical point (same sign, same zero set), so feeding the result to
+ * {@link clipTRange} — or the raycast shader — clips a ray exactly where the
+ * plane cuts the volume. The texture-space normal is `Bᵀ·normal` for the
+ * tex→patient linear part `B` (columns `iStep·dim`), which is how a plane's
+ * coefficients transform under the affine; mirrors {@link sliceClipPlaneTex} for
+ * a freely-placed plane rather than an MPR slice.
+ */
+export function clipPlaneTex(volume: Volume, plane: PatientPlane): HalfSpace {
+  const geom = resolveGeometry(volume);
+  const [d0, d1, d2] = volume.dims;
+  const n = plane.normal;
+  // tex→patient is p = B·tex + c, with B's columns iStep·dim0, jStep·dim1,
+  // kStep·dim2 (since index = tex·dim − 0.5) and c the origin shifted by −½ voxel.
+  const normal: Vec3 = [d0 * dot(geom.iStep, n), d1 * dot(geom.jStep, n), d2 * dot(geom.kStep, n)];
+  const c = sub(geom.origin, scale(add(add(geom.iStep, geom.jStep), geom.kStep), 0.5));
+  // value(tex) = dot(Bᵀn, tex) + dot(n, c) − dot(n, point) = dot(n, p − point).
+  const offset = dot(n, c) - dot(n, plane.point);
+  return { normal, offset };
+}
+
+/**
  * The three MPR slice planes as texture-space half-spaces oriented to keep the
  * far side of a ray travelling in direction `rd` (texture space). `sliceIndices`
  * are the current axial/coronal/sagittal indices, in {@link Orientation} order;

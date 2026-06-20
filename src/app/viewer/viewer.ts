@@ -41,7 +41,12 @@ import {
   type TransferFunction,
 } from '../../render/transfer-function';
 import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
-import { planeExtentMm, slicePlaneCorners, volumeBounds } from '../../render/reslice';
+import {
+  planeExtentMm,
+  slicePlaneCorners,
+  volumeBounds,
+  type PatientPlane,
+} from '../../render/reslice';
 import {
   mmPerScreenPixel,
   paneEdgeLabels,
@@ -69,12 +74,19 @@ import {
   windowPresets,
   type WindowPreset,
 } from '../../render/window-level';
-import { cameraBasis, projectToPane, type OrbitCamera } from '../../render/camera';
+import { cameraBasis, projectToPane, viewBasis, type OrbitCamera } from '../../render/camera';
 import { axisMarkers } from '../../render/axis-indicator';
 import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
-import { modalityUnit, Orientation, type MissingSlices, type Volume } from '../../dicom/types';
+import {
+  modalityUnit,
+  Orientation,
+  type MissingSlices,
+  type Vec3,
+  type Volume,
+} from '../../dicom/types';
+import { add, cross, normalize, scale } from '../../dicom/vec3';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
@@ -133,6 +145,25 @@ interface SlicePlanesOverlay {
   /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
   readonly rect: PaneRect;
   readonly planes: readonly SlicePlaneOverlay[];
+}
+
+/**
+ * The interactive cut-plane gizmo drawn in the 3D pane: the plane as a quad
+ * outline, a draggable handle at its centre, and a stub along the kept-side
+ * normal, all projected through the orbit camera into pane-local CSS pixels.
+ */
+interface ClipPlaneGizmo {
+  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  /** SVG polygon `points` of the plane square, in pane-local CSS pixels. */
+  readonly outline: string;
+  /** Drag handle centre (the plane centre) in pane-local CSS pixels. */
+  readonly handle: { readonly x: number; readonly y: number };
+  /** Polyline `points` of the kept-side normal stub, in pane-local CSS pixels. */
+  readonly normalLine: string;
+  /** CSS pixels the handle moves per mm of offset along the normal: the drag axis. */
+  readonly axisX: number;
+  readonly axisY: number;
 }
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
@@ -258,6 +289,19 @@ type Drag =
       readonly lastY: number;
     }
   | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
+  | {
+      readonly kind: 'clipPlane';
+      /** Cut-plane offset (mm) when the drag began. */
+      readonly startOffset: number;
+      /** Pointer position when the drag began, in client pixels. */
+      readonly startX: number;
+      readonly startY: number;
+      /** Screen-space drag axis: CSS pixels the handle moves per mm of offset. */
+      readonly axisX: number;
+      readonly axisY: number;
+      /** Largest |offset| (mm) that keeps the plane within the volume. */
+      readonly maxOffset: number;
+    }
   | {
       readonly kind: 'windowLevel';
       readonly startCenter: number;
@@ -400,6 +444,24 @@ export class Viewer {
   protected readonly tfSelected = signal<number | null>(null);
   /** When true, clip the 3D pane to the MPR slice planes for a cut-away view. */
   protected readonly clipToPlanes = signal(false);
+  /** When true, an arbitrary handle-driven cut-plane clips the 3D pane (independent of {@link clipToPlanes}). */
+  protected readonly clipPlaneEnabled = signal(false);
+  /** Cut-plane normal in patient space (unit); the kept half is the side it points into. */
+  private readonly clipPlaneNormal = signal<Vec3>([0, -1, 0]);
+  /** Signed offset (mm) of the cut-plane from the volume centre along its normal. */
+  private readonly clipPlaneOffsetMm = signal(0);
+  /**
+   * The live cut-plane in patient space, or null when the handle is off. Placed
+   * at the volume centre shifted along the normal by the dragged offset; shared by
+   * the renderer (the march clip) and the 3D pick so a click tracks the cut-away.
+   */
+  protected readonly cutPlane = computed<PatientPlane | null>(() => {
+    const volume = this.volume();
+    if (!this.clipPlaneEnabled() || !volume) return null;
+    const normal = this.clipPlaneNormal();
+    const point = add(volumeBounds(volume).center, scale(normal, this.clipPlaneOffsetMm()));
+    return { point, normal };
+  });
   /** True when the 3D pane is in direct-volume-rendering mode (drives the UI). */
   protected readonly isDvrMode = computed(() => isDvr(this.projectionMode()));
   /**
@@ -676,6 +738,57 @@ export class Viewer {
       return { orientation, points, color: SLICE_PLANE_COLORS[orientation] };
     });
     return { rect: mip.rect, planes };
+  });
+
+  /**
+   * The interactive cut-plane gizmo for the 3D pane: the arbitrary clip plane
+   * (centre + normal in patient space) projected through the orbit camera into
+   * pane-local pixels — a square outline, a draggable handle at its centre, and a
+   * stub along the kept-side normal. The handle drag maps a pointer move onto the
+   * plane's offset via {@link ClipPlaneGizmo.axisX}/`axisY`, the screen projection
+   * of a 1 mm step along the normal. Null unless the handle is enabled.
+   */
+  protected readonly clipPlaneGizmo = computed<ClipPlaneGizmo | null>(() => {
+    const volume = this.volume();
+    if (!this.clipPlaneEnabled() || !this.isReady() || !volume) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    if (!mip) return null;
+
+    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
+    const { center, radius } = volumeBounds(volume);
+    const normal = this.clipPlaneNormal();
+    const point = add(center, scale(normal, this.clipPlaneOffsetMm()));
+
+    // Two in-plane axes spanning the plane square; pick a reference not parallel
+    // to the normal so the cross products stay well-conditioned.
+    const ref: Vec3 = Math.abs(normal[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    const tangent = normalize(cross(normal, ref));
+    const bitangent = normalize(cross(normal, tangent));
+    const toPx = (p: Vec3): { x: number; y: number } => {
+      const { u, v } = projectToPane(basis, p);
+      return { x: u * mip.rect.width, y: v * mip.rect.height };
+    };
+    const corner = (su: number, sv: number): { x: number; y: number } =>
+      toPx(add(point, add(scale(tangent, su * radius), scale(bitangent, sv * radius))));
+    const outline = [corner(1, 1), corner(-1, 1), corner(-1, -1), corner(1, -1)]
+      .map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+      .join(' ');
+
+    const handle = toPx(point);
+    const tip = toPx(add(point, scale(normal, radius * 0.3)));
+    const normalLine = `${handle.x.toFixed(1)},${handle.y.toFixed(1)} ${tip.x.toFixed(1)},${tip.y.toFixed(1)}`;
+
+    // Screen displacement per mm of offset: where a 1 mm step along the normal
+    // lands (orthographic, so this is linear and constant across the pane).
+    const step = toPx(add(point, normal));
+    return {
+      rect: mip.rect,
+      outline,
+      handle,
+      normalLine,
+      axisX: step.x - handle.x,
+      axisY: step.y - handle.y,
+    };
   });
 
   /**
@@ -990,6 +1103,7 @@ export class Viewer {
     const transferFunction = this.transferFunction();
     const lighting = this.dvrLighting();
     const clipToPlanes = this.clipToPlanes();
+    const cutPlane = this.cutPlane();
     const slabThicknessMm = this.slabThicknessMm();
     const windowCenter = this.windowCenter();
     const windowWidth = this.windowWidth();
@@ -1012,6 +1126,7 @@ export class Viewer {
             lighting,
             clipToPlanes,
             sliceIndices: indices,
+            cutPlane: cutPlane ?? undefined,
             slabThicknessMm,
             interactive: mipInteractive,
             invert,
@@ -1470,6 +1585,7 @@ export class Viewer {
       {
         clipToPlanes: this.clipToPlanes(),
         sliceIndices: this.sliceIndices(),
+        cutPlane: this.cutPlane() ?? undefined,
         transferFunction: this.transferFunction(),
       },
     );
@@ -2193,6 +2309,70 @@ export class Viewer {
     this.markMipSettling();
   }
 
+  /** Toggle the arbitrary handle-driven cut-plane, aligning it to the view when enabling. */
+  protected toggleClipPlane(): void {
+    const enabling = !this.clipPlaneEnabled();
+    this.clipPlaneEnabled.set(enabling);
+    if (enabling) this.resetClipPlane();
+    else this.markMipSettling();
+  }
+
+  /** Re-aim the cut-plane to face the current view and recentre it on the volume. */
+  protected resetClipPlane(): void {
+    const { forward } = viewBasis(this.camera3d().azimuth, this.camera3d().elevation);
+    // The kept half is the side the normal points into; forward (eye→volume) keeps
+    // the far side, so the plane removes the near half facing the camera.
+    this.clipPlaneNormal.set(forward);
+    this.clipPlaneOffsetMm.set(0);
+    this.markMipSettling();
+  }
+
+  /** Begin dragging the cut-plane handle to translate the plane along its normal. */
+  protected onClipHandleDown(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation(); // don't start an orbit under the handle
+    const gizmo = this.clipPlaneGizmo();
+    const volume = this.volume();
+    if (!gizmo || !volume) return;
+    const target = event.target as Element;
+    target.setPointerCapture?.(event.pointerId);
+    this.drag.set({
+      kind: 'clipPlane',
+      startOffset: this.clipPlaneOffsetMm(),
+      startX: event.clientX,
+      startY: event.clientY,
+      axisX: gizmo.axisX,
+      axisY: gizmo.axisY,
+      maxOffset: volumeBounds(volume).radius,
+    });
+  }
+
+  /** Translate the cut-plane to follow the handle drag, clamped within the volume. */
+  protected onClipHandleMove(event: PointerEvent): void {
+    const drag = this.drag();
+    if (drag?.kind !== 'clipPlane') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    // Project the pointer displacement onto the screen-space normal axis to get
+    // the offset change in mm (least-squares onto the gizmo's drag direction).
+    const len2 = drag.axisX * drag.axisX + drag.axisY * drag.axisY;
+    const delta = len2 > 1e-9 ? (dx * drag.axisX + dy * drag.axisY) / len2 : 0;
+    this.clipPlaneOffsetMm.set(clamp(drag.startOffset + delta, -drag.maxOffset, drag.maxOffset));
+    this.markMipSettling();
+  }
+
+  /** End a cut-plane handle drag. */
+  protected onClipHandleUp(event: PointerEvent): void {
+    if (this.drag()?.kind !== 'clipPlane') return;
+    event.stopPropagation();
+    const target = event.target as Element;
+    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    this.drag.set(null);
+  }
+
   /** Set the 3D slab thickness (mm), clamped to [1, full volume depth]. */
   protected onSlabThicknessInput(event: Event): void {
     const max = this.slabMaxMm();
@@ -2265,6 +2445,8 @@ export class Viewer {
     this.tfSelected.set(null);
     this.dvrLighting.set(DEFAULT_DVR_LIGHTING);
     this.clipToPlanes.set(false);
+    this.clipPlaneEnabled.set(false);
+    this.clipPlaneOffsetMm.set(0);
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),
