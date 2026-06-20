@@ -1,4 +1,4 @@
-import { filterRawTags, loadingText, missingSliceWarning } from './viewer';
+import { filterRawTags, loadingText, missingSliceWarning, nextCineIndex } from './viewer';
 import type { RawTag } from '../../dicom/metadata';
 
 describe('loadingText', () => {
@@ -40,6 +40,32 @@ describe('missingSliceWarning', () => {
 
     expect(warning).toContain('1 missing slice ');
     expect(warning).not.toContain('slices');
+  });
+});
+
+describe('nextCineIndex', () => {
+  it('advances one slice at a time', () => {
+    expect(nextCineIndex(0, 10, 1)).toBe(1);
+    expect(nextCineIndex(4, 10, 1)).toBe(5);
+  });
+
+  it('loops back to the first slice past the end', () => {
+    expect(nextCineIndex(9, 10, 1)).toBe(0);
+  });
+
+  it('loops back to the last slice before the start', () => {
+    expect(nextCineIndex(0, 10, -1)).toBe(9);
+    expect(nextCineIndex(5, 10, -1)).toBe(4);
+  });
+
+  it('stays put when there is nothing to cine', () => {
+    // A single slice (or none) has nowhere to advance.
+    expect(nextCineIndex(0, 1, 1)).toBe(0);
+    expect(nextCineIndex(0, 0, 1)).toBe(0);
+  });
+
+  it('clamps an out-of-range index for a degenerate stack', () => {
+    expect(nextCineIndex(5, 1, 1)).toBe(0);
   });
 });
 

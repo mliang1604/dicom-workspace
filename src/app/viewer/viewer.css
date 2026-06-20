@@ -253,7 +253,8 @@ button.active {
 }
 
 /* Measurement palette buttons cluster tightly in the toolbar. */
-.measure-palette {
+.measure-palette,
+.cine {
   display: inline-flex;
   align-items: center;
   gap: 4px;

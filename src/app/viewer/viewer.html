@@ -77,6 +77,26 @@
     Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
   </button>
 
+  <span class="cine" title="Cine: auto-scroll through the hovered or main pane's slices">
+    <button
+      type="button"
+      (click)="toggleCine()"
+      [disabled]="!isReady() || !hasMprPane()"
+      [class.active]="cinePlaying()"
+      title="Play/pause cine through the hovered or main pane's slices (P)"
+    >
+      {{ cinePlaying() ? '⏸ Pause' : '▶ Play' }} <kbd>P</kbd>
+    </button>
+    <label class="ctrl" title="Cine speed (frames per second)">
+      fps
+      <select [value]="cineFps()" (change)="onCineFpsChange($event)" [disabled]="!isReady()">
+        @for (fps of cineFpsOptions; track fps) {
+          <option [value]="fps">{{ fps }}</option>
+        }
+      </select>
+    </label>
+  </span>
+
   <span
     class="measure-palette"
     title="Measurement tools — click an MPR pane to place points; Esc cancels"
