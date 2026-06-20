@@ -21,6 +21,7 @@ import {
 } from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
+import { SURFACE_SHADER } from './surface-shader';
 import {
   DEFAULT_DVR_LIGHTING,
   dvrLightingParams,
@@ -241,6 +242,10 @@ const PARAMS_SIZE = 112;
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 const MIP_PARAMS_SIZE = 256;
 const BYTES_PER_HALF = 2;
+/** Floats per ROI-surface vertex: position (3) + normal (3) + rgba (4). */
+const SURFACE_VERTEX_FLOATS = 10;
+/** Surface camera uniform bytes: eye, axisU+uu, axisV+vv, light (4 × vec4). */
+const SURFACE_CAMERA_SIZE = 64;
 /** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
 const MAX_MPR_PANES = 3;
 const ORIGIN: Vec2 = { x: 0, y: 0 };
@@ -271,11 +276,31 @@ interface PaneSlot {
  * orthogonal slices of it (up to {@link MAX_PANES}) into separate viewports of
  * one canvas, with GPU-side windowing and per-pane aspect correction.
  */
+/** Per-frame data for the ROI surface pass: depth-sorted indices + packed camera. */
+export interface SurfaceFrame {
+  /** Triangle vertex indices, back-to-front (painter's order). */
+  readonly indices: Uint32Array;
+  /** Packed camera uniform: eye, _, axisU, uu, axisV, vv, light, _ (16 floats). */
+  readonly camera: Float32Array;
+}
+
 export class SliceRenderer {
   private readonly device: GPUDevice;
   private readonly gpu: GpuContext;
   private readonly pipeline: GPURenderPipeline;
   private readonly mipPipeline: GPURenderPipeline;
+  /** Pipeline for the translucent RTSTRUCT ROI surfaces drawn over the 3D pane. */
+  private readonly surfacePipeline: GPURenderPipeline;
+  /** Camera uniform (eye / image-plane axes / light) for the surface pass. */
+  private readonly surfaceCameraBuffer: GPUBuffer;
+  private readonly surfaceBindGroup: GPUBindGroup;
+  /** ROI surface vertices (pos3 + normal3 + rgba4); rebuilt when structures change. */
+  private surfaceVertexBuffer: GPUBuffer | null = null;
+  private surfaceVertexBytes = 0;
+  private surfaceVertexCount = 0;
+  /** Depth-sorted triangle indices for the surface pass; reuploaded each frame. */
+  private surfaceIndexBuffer: GPUBuffer | null = null;
+  private surfaceIndexBytes = 0;
   private readonly sampler: GPUSampler;
   private readonly slots: readonly PaneSlot[];
   private readonly mipSlot: PaneSlot;
@@ -311,6 +336,47 @@ export class SliceRenderer {
       vertex: { module: mipModule, entryPoint: 'vs' },
       fragment: { module: mipModule, entryPoint: 'fs', targets: [{ format: gpu.format }] },
       primitive: { topology: 'triangle-list' },
+    });
+
+    const surfaceModule = this.device.createShaderModule({ code: SURFACE_SHADER });
+    this.surfacePipeline = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: surfaceModule,
+        entryPoint: 'vs',
+        buffers: [
+          {
+            arrayStride: SURFACE_VERTEX_FLOATS * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
+              { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
+              { shaderLocation: 2, offset: 24, format: 'float32x4' }, // rgba
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: surfaceModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: gpu.format,
+            blend: {
+              color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' }, // translucent, double-sided
+    });
+    this.surfaceCameraBuffer = this.device.createBuffer({
+      size: SURFACE_CAMERA_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.surfaceBindGroup = this.device.createBindGroup({
+      layout: this.surfacePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.surfaceCameraBuffer } }],
     });
 
     this.sampler = this.device.createSampler({
@@ -427,8 +493,28 @@ export class SliceRenderer {
     this.mipSteps = Math.ceil(Math.hypot(width, height, depth));
   }
 
-  /** Draw the given panes (MPR slices and/or the 3D MIP) into their viewports. */
-  renderPanes(panes: readonly PaneView[]): void {
+  /**
+   * Replace the ROI surface mesh (patient-space vertices: pos3 + normal3 + rgba4
+   * per vertex). Uploaded once when the structures/visibility change, then drawn
+   * each frame via {@link renderPanes}; pass an empty array to clear.
+   */
+  setSurfaceMesh(vertices: Float32Array): void {
+    this.surfaceVertexCount = Math.floor(vertices.length / SURFACE_VERTEX_FLOATS);
+    if (this.surfaceVertexCount === 0) return;
+    const bytes = vertices.byteLength;
+    if (!this.surfaceVertexBuffer || this.surfaceVertexBytes < bytes) {
+      this.surfaceVertexBuffer?.destroy();
+      this.surfaceVertexBytes = bytes;
+      this.surfaceVertexBuffer = this.device.createBuffer({
+        size: bytes,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    this.device.queue.writeBuffer(this.surfaceVertexBuffer, 0, vertices);
+  }
+
+  /** Draw the given panes (MPR slices and/or the 3D MIP), then the ROI surfaces. */
+  renderPanes(panes: readonly PaneView[], surface?: SurfaceFrame | null): void {
     const volume = this.volume;
     if (!volume) return;
 
@@ -438,6 +524,7 @@ export class SliceRenderer {
       readonly bindGroup: GPUBindGroup;
       readonly pipeline: GPURenderPipeline;
     }[] = [];
+    let mipRect: PaneRect | null = null;
     let mprIndex = 0;
     for (const pane of panes) {
       const rect = clampRect(pane.rect, canvas.width, canvas.height);
@@ -446,6 +533,7 @@ export class SliceRenderer {
         if (!this.mipSlot.bindGroup) continue;
         this.writeMipParams(this.mipSlot.buffer, pane, rect, volume);
         draws.push({ rect, bindGroup: this.mipSlot.bindGroup, pipeline: this.mipPipeline });
+        mipRect = rect;
         continue;
       }
       const slot = this.slots[mprIndex++];
@@ -453,6 +541,8 @@ export class SliceRenderer {
       this.writeParams(slot.buffer, pane, rect, volume);
       draws.push({ rect, bindGroup: slot.bindGroup, pipeline: this.pipeline });
     }
+
+    const drawSurface = this.prepareSurface(mipRect, surface);
 
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
@@ -473,8 +563,41 @@ export class SliceRenderer {
       pass.setBindGroup(0, draw.bindGroup);
       pass.draw(3);
     }
+    // Translucent ROI surfaces, last, blended over the volume in the 3D pane.
+    if (drawSurface && mipRect && this.surfaceVertexBuffer && this.surfaceIndexBuffer) {
+      pass.setPipeline(this.surfacePipeline);
+      pass.setViewport(mipRect.x, mipRect.y, mipRect.width, mipRect.height, 0, 1);
+      pass.setScissorRect(mipRect.x, mipRect.y, mipRect.width, mipRect.height);
+      pass.setBindGroup(0, this.surfaceBindGroup);
+      pass.setVertexBuffer(0, this.surfaceVertexBuffer);
+      pass.setIndexBuffer(this.surfaceIndexBuffer, 'uint32');
+      pass.drawIndexed(drawSurface);
+    }
     pass.end();
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Upload this frame's surface camera + sorted indices; returns the index count
+   * to draw, or 0 when there's nothing to draw (no 3D pane, no mesh, no frame).
+   */
+  private prepareSurface(mipRect: PaneRect | null, surface?: SurfaceFrame | null): number {
+    if (!mipRect || !surface || !this.surfaceVertexBuffer || this.surfaceVertexCount === 0)
+      return 0;
+    const { indices, camera } = surface;
+    if (indices.length === 0) return 0;
+    this.device.queue.writeBuffer(this.surfaceCameraBuffer, 0, camera);
+    const bytes = indices.byteLength;
+    if (!this.surfaceIndexBuffer || this.surfaceIndexBytes < bytes) {
+      this.surfaceIndexBuffer?.destroy();
+      this.surfaceIndexBytes = bytes;
+      this.surfaceIndexBuffer = this.device.createBuffer({
+        size: bytes,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    this.device.queue.writeBuffer(this.surfaceIndexBuffer, 0, indices);
+    return indices.length;
   }
 
   /** Pack the MIP camera basis and window into the raycast uniform buffer. */

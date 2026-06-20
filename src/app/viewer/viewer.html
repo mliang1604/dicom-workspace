@@ -625,19 +625,8 @@
       </svg>
     }
 
-    <!-- RTSTRUCT ROI surfaces over the 3D pane: translucent shaded shells drawn
-         on a 2D canvas (see drawSurfaces), rotating with the orbit. -->
-    @if (surface3dRect(); as sr) {
-      <canvas
-        #surface3d
-        class="surface-3d"
-        aria-hidden="true"
-        [style.left.px]="sr.x"
-        [style.top.px]="sr.y"
-        [style.width.px]="sr.width"
-        [style.height.px]="sr.height"
-      ></canvas>
-    }
+    <!-- RTSTRUCT ROI surfaces are drawn in the WebGPU pass (see SliceRenderer),
+         not as a DOM overlay, so they stay in sync with the volume. -->
 
     <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->
     @if (clipPlaneGizmo(); as gizmo) {
