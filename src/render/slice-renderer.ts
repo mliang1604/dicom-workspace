@@ -17,12 +17,20 @@ import {
 } from './reslice';
 import { RAYCAST_SHADER } from './raycast-shader';
 import { SLICE_SHADER } from './slice-shader';
-import { DVR_AMBIENT } from './dvr';
+import {
+  DEFAULT_DVR_LIGHTING,
+  dvrLightingParams,
+  lightToPatient,
+  lightViewDirection,
+  type DvrLighting,
+} from './dvr';
+import { normalize } from '../dicom/vec3';
 import {
   TF_LUT_SIZE,
   TransferFunctionPreset,
   transferFunction,
   transferFunctionLut,
+  type TransferFunction,
 } from './transfer-function';
 
 /**
@@ -170,10 +178,16 @@ export interface MipPaneView {
    */
   readonly slabThicknessMm?: number;
   /**
-   * Transfer-function preset for {@link ProjectionMode.Dvr}; ignored by the
-   * projection modes. Omitted defaults to {@link TransferFunctionPreset.CtBone}.
+   * Transfer function for {@link ProjectionMode.Dvr}; ignored by the projection
+   * modes. A preset's table (see {@link transferFunction}) or a live-edited copy
+   * of one. Omitted defaults to the {@link TransferFunctionPreset.CtBone} preset.
    */
-  readonly transferFunction?: TransferFunctionPreset;
+  readonly transferFunction?: TransferFunction;
+  /**
+   * Lighting/shading for {@link ProjectionMode.Dvr}; ignored by the projection
+   * modes. Omitted defaults to {@link DEFAULT_DVR_LIGHTING} (a plain headlight).
+   */
+  readonly lighting?: DvrLighting;
   /**
    * Clip the 3D pane to the current MPR slice planes for a cut-away view. Needs
    * {@link sliceIndices}; applies to every mode (projection and DVR alike).
@@ -208,8 +222,8 @@ export type PaneView = MprPaneView | MipPaneView;
 // uniform-struct stride, with the trailing pad satisfying the mat4x4 alignment.
 const PARAMS_SIZE = 112;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
-// tfDomain, clipA, clipC, clipS (9 × vec4 = 144).
-const MIP_PARAMS_SIZE = 208;
+// tfDomain, clipA, clipC, clipS, light, material (11 × vec4 = 176).
+const MIP_PARAMS_SIZE = 240;
 const BYTES_PER_HALF = 2;
 /** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
 const MAX_MPR_PANES = 3;
@@ -247,10 +261,10 @@ export class SliceRenderer {
   private readonly sampler: GPUSampler;
   private readonly slots: readonly PaneSlot[];
   private readonly mipSlot: PaneSlot;
-  /** 1-D RGBA LUT the DVR shader samples; contents swapped on a preset change. */
+  /** 1-D RGBA LUT the DVR shader samples; contents swapped when the TF changes. */
   private readonly tfTexture: GPUTexture;
-  /** Preset currently baked into {@link tfTexture}, to skip redundant uploads. */
-  private tfPreset: TransferFunctionPreset | null = null;
+  /** Transfer function currently baked into {@link tfTexture}, to skip redundant uploads. */
+  private tfBaked: TransferFunction | null = null;
 
   private volume: Volume | null = null;
   private texture: GPUTexture | null = null;
@@ -313,20 +327,20 @@ export class SliceRenderer {
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    this.uploadTransferFunction(TransferFunctionPreset.CtBone);
+    this.uploadTransferFunction(transferFunction(TransferFunctionPreset.CtBone));
   }
 
-  /** Bake a transfer-function preset into the 1-D LUT texture, once per change. */
-  private uploadTransferFunction(preset: TransferFunctionPreset): void {
-    if (preset === this.tfPreset) return;
-    const lut = transferFunctionLut(transferFunction(preset), TF_LUT_SIZE);
+  /** Bake a transfer function into the 1-D LUT texture, once per change. */
+  private uploadTransferFunction(tf: TransferFunction): void {
+    if (tf === this.tfBaked) return;
+    const lut = transferFunctionLut(tf, TF_LUT_SIZE);
     this.device.queue.writeTexture(
       { texture: this.tfTexture },
       floatsToHalf(lut),
       { bytesPerRow: TF_LUT_SIZE * 4 * BYTES_PER_HALF, rowsPerImage: 1 },
       { width: TF_LUT_SIZE },
     );
-    this.tfPreset = preset;
+    this.tfBaked = tf;
   }
 
   /** Number of slices available along the given orientation for the loaded volume. */
@@ -470,10 +484,22 @@ export class SliceRenderer {
     // to the data range so they stay visible as the air fraction per ray slides.
     const window = projectionWindow(mode, volume, view.windowCenter, view.windowWidth);
 
-    // DVR: keep the LUT current and pass the preset's intensity domain.
-    const preset = view.transferFunction ?? TransferFunctionPreset.CtBone;
-    if (isDvr(mode)) this.uploadTransferFunction(preset);
-    const [tfLo, tfHi] = transferFunction(preset).domain;
+    // DVR: keep the LUT current and pass the transfer function's intensity domain.
+    const tf = view.transferFunction ?? transferFunction(TransferFunctionPreset.CtBone);
+    if (isDvr(mode)) this.uploadTransferFunction(tf);
+    const [tfLo, tfHi] = tf.domain;
+
+    // DVR lighting: rotate the view-frame light into texture space (so the shader
+    // can dot it against the texture-space gradient) and pack the material weights.
+    const lighting = view.lighting ?? DEFAULT_DVR_LIGHTING;
+    const lightPatient = lightToPatient(
+      lightViewDirection(lighting),
+      normalize(basis.axisU),
+      normalize(basis.axisV),
+      basis.forward,
+    );
+    const lightTex = normalize(texDirection(this.patientToTex, lightPatient));
+    const light = dvrLightingParams(lightTex, lighting);
 
     // Cut-away: the three MPR slice planes as texture-space half-spaces oriented
     // to keep the far side of the shared view ray (rd = patientToTex·forward).
@@ -503,11 +529,12 @@ export class SliceRenderer {
     floats[35] = clipOn ? 1 : 0;
     floats[36] = tfLo;
     floats[37] = tfHi;
-    floats[38] = DVR_AMBIENT;
+    floats[38] = 0; // unused (DVR ambient now lives in the material vec4)
     floats[39] = view.invert ? 1 : 0; // invert grayscale projections (ignored by DVR)
     packHalfSpace(floats, 40, clip[0]); // axial cut-plane
     packHalfSpace(floats, 44, clip[1]); // coronal cut-plane
     packHalfSpace(floats, 48, clip[2]); // sagittal cut-plane
+    floats.set(light, 52); // light dir + enabled (52..55), material weights (56..59)
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 

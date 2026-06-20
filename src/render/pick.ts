@@ -14,6 +14,7 @@ import {
   sampleTransferFunction,
   transferFunction,
   TransferFunctionPreset,
+  type TransferFunction,
 } from './transfer-function';
 import { compositeOver } from './dvr';
 
@@ -23,8 +24,8 @@ export interface PickOptions {
   readonly clipToPlanes?: boolean;
   /** Current axial/coronal/sagittal slice indices, needed for the cut-away planes. */
   readonly sliceIndices?: readonly [number, number, number];
-  /** Transfer-function preset for a DVR pick. Defaults to {@link TransferFunctionPreset.CtBone}. */
-  readonly transferFunction?: TransferFunctionPreset;
+  /** Transfer function for a DVR pick. Defaults to the {@link TransferFunctionPreset.CtBone} preset. */
+  readonly transferFunction?: TransferFunction;
 }
 
 /** Accumulated DVR opacity at which a pick locks onto the visible surface. */
@@ -153,7 +154,7 @@ export function pickProjection(
  */
 function dvrSurfaceDepth(
   volume: Volume,
-  preset: TransferFunctionPreset | undefined,
+  override: TransferFunction | undefined,
   ro: Vec3,
   rd: Vec3,
   tEntry: number,
@@ -162,7 +163,7 @@ function dvrSurfaceDepth(
 ): number | null {
   // sampleTransferFunction clamps to the domain, so a raw sample maps directly;
   // the pick marches at the reference step (~1 voxel) so opacities pass through.
-  const tf = transferFunction(preset ?? TransferFunctionPreset.CtBone);
+  const tf = override ?? transferFunction(TransferFunctionPreset.CtBone);
   let composited: [number, number, number, number] = [0, 0, 0, 0];
   for (let i = 0; i < steps; i++) {
     const t = tEntry + (i + 0.5) * dt;

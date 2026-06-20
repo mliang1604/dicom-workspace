@@ -1,5 +1,9 @@
 import {
+  addControlPoint,
+  moveControlPoint,
+  removeControlPoint,
   sampleTransferFunction,
+  setControlPointColor,
   TF_LUT_SIZE,
   TransferFunctionPreset,
   transferFunction,
@@ -131,5 +135,101 @@ describe('transferFunctionLut', () => {
   it('clamps a tiny size up to a usable two-texel LUT', () => {
     const lut = transferFunctionLut(transferFunction(TransferFunctionPreset.CtLung), 1);
     expect(lut.length).toBe(2 * 4);
+  });
+});
+
+describe('moveControlPoint', () => {
+  const bone = transferFunction(TransferFunctionPreset.CtBone);
+
+  it('returns a new TF without mutating the original', () => {
+    const edited = moveControlPoint(bone, 2, bone.controlPoints[2].intensity, 0.9);
+    expect(edited).not.toBe(bone);
+    expect(edited.controlPoints[2].opacity).toBeCloseTo(0.9, 6);
+    expect(bone.controlPoints[2].opacity).toBe(0.18); // original untouched
+  });
+
+  it('clamps opacity into [0, 1]', () => {
+    expect(moveControlPoint(bone, 2, 0, 5).controlPoints[2].opacity).toBe(1);
+    expect(moveControlPoint(bone, 2, 0, -5).controlPoints[2].opacity).toBe(0);
+  });
+
+  it('pins the endpoints in intensity while still moving their opacity', () => {
+    const last = bone.controlPoints.length - 1;
+    const movedFirst = moveControlPoint(bone, 0, 9999, 0.5);
+    expect(movedFirst.controlPoints[0].intensity).toBe(bone.controlPoints[0].intensity);
+    expect(movedFirst.controlPoints[0].opacity).toBe(0.5);
+    const movedLast = moveControlPoint(bone, last, -9999, 0.3);
+    expect(movedLast.controlPoints[last].intensity).toBe(bone.controlPoints[last].intensity);
+  });
+
+  it('keeps an interior point strictly between its neighbours (no reorder)', () => {
+    // Point 2 sits at 300 HU between 150 (point 1) and 1000 (point 3); shoving it
+    // past 1000 clamps it just below the next point, preserving ascending order.
+    const edited = moveControlPoint(bone, 2, 5000, 0.4);
+    const xs = edited.controlPoints.map((p) => p.intensity);
+    expect(xs[2]).toBeLessThan(xs[3]);
+    expect(xs[2]).toBeGreaterThan(xs[1]);
+    for (let i = 1; i < xs.length; i++) expect(xs[i]).toBeGreaterThan(xs[i - 1]);
+  });
+
+  it('is a no-op for an out-of-range index', () => {
+    expect(moveControlPoint(bone, 99, 0, 1)).toBe(bone);
+  });
+
+  it('re-bakes a higher opacity into the LUT (the live-edit path)', () => {
+    const edited = moveControlPoint(bone, 2, bone.controlPoints[2].intensity, 0.95);
+    const at = bone.controlPoints[2].intensity;
+    expect(sampleTransferFunction(edited, at)[3]).toBeCloseTo(0.95, 6);
+    expect(sampleTransferFunction(bone, at)[3]).toBeCloseTo(0.18, 6);
+  });
+});
+
+describe('setControlPointColor', () => {
+  const bone = transferFunction(TransferFunctionPreset.CtBone);
+
+  it('replaces a point colour, clamped per channel, leaving opacity/intensity', () => {
+    const edited = setControlPointColor(bone, 3, [2, -1, 0.5]);
+    expect(edited.controlPoints[3].color).toEqual([1, 0, 0.5]);
+    expect(edited.controlPoints[3].intensity).toBe(bone.controlPoints[3].intensity);
+    expect(edited.controlPoints[3].opacity).toBe(bone.controlPoints[3].opacity);
+  });
+});
+
+describe('addControlPoint', () => {
+  const bone = transferFunction(TransferFunctionPreset.CtBone);
+
+  it('inserts a sorted stop whose colour sits on the existing ramp', () => {
+    const at = 650; // between the 300 and 1000 HU stops
+    const expectedColor = sampleTransferFunction(bone, at).slice(0, 3);
+    const edited = addControlPoint(bone, at, 0.5);
+    expect(edited.controlPoints.length).toBe(bone.controlPoints.length + 1);
+    const xs = edited.controlPoints.map((p) => p.intensity);
+    for (let i = 1; i < xs.length; i++) expect(xs[i]).toBeGreaterThanOrEqual(xs[i - 1]);
+    const inserted = edited.controlPoints.find((p) => p.intensity === at)!;
+    expect(inserted.opacity).toBe(0.5);
+    expect([...inserted.color]).toEqual(expectedColor);
+  });
+
+  it('clamps the inserted intensity into the domain', () => {
+    const edited = addControlPoint(bone, 9999, 1);
+    const xs = edited.controlPoints.map((p) => p.intensity);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(bone.domain[1]);
+  });
+});
+
+describe('removeControlPoint', () => {
+  const bone = transferFunction(TransferFunctionPreset.CtBone);
+
+  it('drops the indexed point', () => {
+    const edited = removeControlPoint(bone, 2);
+    expect(edited.controlPoints.length).toBe(bone.controlPoints.length - 1);
+    expect(edited.controlPoints.map((p) => p.intensity)).not.toContain(
+      bone.controlPoints[2].intensity,
+    );
+  });
+
+  it('refuses to drop below two points', () => {
+    const two = { ...bone, controlPoints: bone.controlPoints.slice(0, 2) };
+    expect(removeControlPoint(two, 0)).toBe(two);
   });
 });
