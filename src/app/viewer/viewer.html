@@ -49,254 +49,6 @@
     Layout ▦ <kbd>L</kbd> {{ layoutLabel() }}
   </button>
 
-  <button
-    type="button"
-    (click)="swapMain()"
-    [disabled]="!isReady() || !hasMprPane()"
-    title="Swap main view (X)"
-  >
-    Swap main ⟲ <kbd>X</kbd>
-  </button>
-
-  <button
-    type="button"
-    (click)="toggleSagittalFlip()"
-    [disabled]="!isReady() || !hasMprPane()"
-    title="Flip the sagittal view between anterior-left and anterior-right (F)"
-  >
-    Flip sagittal ⇄ <kbd>F</kbd> {{ sagittalFlipped() ? 'A▸' : '◂A' }}
-  </button>
-
-  <button
-    type="button"
-    (click)="toggleCrosshairs()"
-    [disabled]="!isReady()"
-    [class.active]="crosshairsEnabled()"
-    [attr.aria-pressed]="crosshairsEnabled()"
-    title="Show linked crosshairs and the 3D cut-planes at the Shift+clicked focus point (C)"
-  >
-    Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
-  </button>
-
-  <span class="view-controls" title="Viewport controls">
-    <button
-      type="button"
-      (click)="fitView()"
-      [disabled]="!isReady() || !hasMprPane()"
-      title="Zoom every pane to fit (0)"
-    >
-      Fit ⤢ <kbd>0</kbd>
-    </button>
-    <button
-      type="button"
-      (click)="oneToOne()"
-      [disabled]="!isReady() || !hasMprPane()"
-      title="Show panes at native voxel scale, 1:1 (1)"
-    >
-      1:1 <kbd>1</kbd>
-    </button>
-    <button
-      type="button"
-      (click)="resetView()"
-      [disabled]="!isReady()"
-      title="Reset zoom, pan and window/level to defaults (R)"
-    >
-      Reset ↺ <kbd>R</kbd>
-    </button>
-    <button
-      type="button"
-      (click)="toggleInvert()"
-      [disabled]="!isReady()"
-      [class.active]="invert()"
-      [attr.aria-pressed]="invert()"
-      title="Invert the displayed grayscale (V)"
-    >
-      Invert ◐ <kbd>V</kbd> {{ invert() ? 'on' : 'off' }}
-    </button>
-  </span>
-
-  <span class="cine" title="Cine: auto-scroll through the hovered or main pane's slices">
-    <button
-      type="button"
-      (click)="toggleCine()"
-      [disabled]="!isReady() || !hasMprPane()"
-      [class.active]="cinePlaying()"
-      [attr.aria-pressed]="cinePlaying()"
-      title="Play/pause cine through the hovered or main pane's slices (P)"
-    >
-      {{ cinePlaying() ? '⏸ Pause' : '▶ Play' }} <kbd>P</kbd>
-    </button>
-    <label class="ctrl" title="Cine speed (frames per second)">
-      fps
-      <select [value]="cineFps()" (change)="onCineFpsChange($event)" [disabled]="!isReady()">
-        @for (fps of cineFpsOptions; track fps) {
-          <option [value]="fps">{{ fps }}</option>
-        }
-      </select>
-    </label>
-  </span>
-
-  <button
-    type="button"
-    (click)="captureScreenshot()"
-    [disabled]="!isReady() || recordingRotation()"
-    title="Save a PNG of the active (hovered or main) pane"
-  >
-    Screenshot ▣
-  </button>
-
-  @if (canRecordRotation() || recordingRotation()) {
-    <button
-      type="button"
-      (click)="captureRotation()"
-      [disabled]="!canRecordRotation() || recordingRotation()"
-      [class.active]="recordingRotation()"
-      [attr.aria-pressed]="recordingRotation()"
-      title="Record a 360° spin of the 3D view to a WebM clip"
-    >
-      {{ recordingRotation() ? '● Recording…' : 'Spin ⟳' }}
-    </button>
-  }
-
-  <span
-    class="measure-palette"
-    role="group"
-    aria-label="Measurement tools"
-    title="Measurement tools — click an MPR pane to place points; Esc cancels"
-  >
-    @for (tool of measureTools; track tool.value) {
-      <button
-        type="button"
-        (click)="setTool(tool.value)"
-        [disabled]="!isReady() || !hasMprPane()"
-        [class.active]="activeTool() === tool.value"
-        [attr.aria-pressed]="activeTool() === tool.value"
-        [attr.aria-label]="tool.label"
-        [title]="tool.label"
-      >
-        {{ tool.glyph }} {{ tool.label }}
-      </button>
-    }
-    <button
-      type="button"
-      (click)="clearMeasurements()"
-      [disabled]="!isReady() || !hasMeasurements()"
-      title="Clear all measurements"
-    >
-      Clear ✕
-    </button>
-  </span>
-
-  <button
-    type="button"
-    (click)="toggleInfoPanel()"
-    [disabled]="!isReady() || !metadata()"
-    [class.active]="infoPanelOpen()"
-    [attr.aria-pressed]="infoPanelOpen()"
-    aria-haspopup="dialog"
-    title="Show DICOM metadata and a searchable raw-tag inspector (I)"
-  >
-    Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
-  </button>
-
-  <button
-    type="button"
-    (click)="toggleHelp()"
-    [disabled]="!isReady()"
-    [class.active]="helpOpen()"
-    [attr.aria-pressed]="helpOpen()"
-    aria-haspopup="dialog"
-    title="Show the keyboard & mouse shortcut overlay (?)"
-  >
-    Help <kbd>?</kbd>
-  </button>
-
-  <span class="spacer">
-    @if (isReady()) {
-      <span class="hint"
-        >Drag to pan · Shift+click any pane to link views · right-drag for W/L · scroll to change
-        slice · Ctrl+scroll to zoom · drag/scroll the 3D pane to orbit/zoom</span
-      >
-    }
-  </span>
-
-  <label
-    class="ctrl"
-    title="3D pane mode: max (MIP), min (MinIP), mean, or direct volume rendering"
-  >
-    3D
-    <select
-      [value]="projectionMode()"
-      (change)="onProjectionModeChange($event)"
-      [disabled]="!isReady() || !has3dPane()"
-    >
-      @for (mode of projectionModes; track mode.value) {
-        <option [value]="mode.value">{{ mode.label }}</option>
-      }
-    </select>
-  </label>
-
-  @if (isDvrMode()) {
-    <label class="ctrl" title="DVR transfer-function preset (seeds the TF editor)">
-      TF
-      <select
-        [value]="transferFunctionPreset()"
-        (change)="onTransferFunctionChange($event)"
-        [disabled]="!isReady() || !has3dPane()"
-      >
-        @for (tf of transferFunctions; track tf.preset) {
-          <option [value]="tf.preset">{{ tf.label }}</option>
-        }
-      </select>
-    </label>
-  } @else {
-    <label class="ctrl" title="3D slab thickness (mm); full depth projects the whole volume">
-      Slab
-      <input
-        type="number"
-        step="1"
-        min="1"
-        [max]="slabMaxMm()"
-        [value]="slabThicknessMm()"
-        (input)="onSlabThicknessInput($event)"
-        [disabled]="!isReady() || !has3dPane()"
-      />
-    </label>
-  }
-
-  <button
-    type="button"
-    (click)="toggleClipToPlanes()"
-    [disabled]="!isReady() || !has3dPane()"
-    [class.active]="clipToPlanes()"
-    [attr.aria-pressed]="clipToPlanes()"
-    title="Clip the 3D pane to the MPR slice planes for a cut-away view"
-  >
-    Cut-away ⌧ {{ clipToPlanes() ? 'on' : 'off' }}
-  </button>
-
-  <button
-    type="button"
-    (click)="toggleClipPlane()"
-    [disabled]="!isReady() || !has3dPane()"
-    [class.active]="clipPlaneEnabled()"
-    [attr.aria-pressed]="clipPlaneEnabled()"
-    title="Clip the 3D pane to a draggable plane; drag the handle to slice through the volume"
-  >
-    Clip plane ▢ {{ clipPlaneEnabled() ? 'on' : 'off' }}
-  </button>
-
-  @if (clipPlaneEnabled()) {
-    <button
-      type="button"
-      (click)="resetClipPlane()"
-      [disabled]="!isReady() || !has3dPane()"
-      title="Reset the clip plane to face the current view, centred on the volume"
-    >
-      Reset plane ⟲
-    </button>
-  }
-
   <label class="ctrl" title="Apply a window/level preset">
     Preset
     <select
@@ -335,548 +87,806 @@
       [disabled]="!isReady()"
     />
   </label>
+
+  <button
+    type="button"
+    (click)="toggleInfoPanel()"
+    [disabled]="!isReady() || !metadata()"
+    [class.active]="infoPanelOpen()"
+    [attr.aria-pressed]="infoPanelOpen()"
+    aria-haspopup="dialog"
+    title="Show DICOM metadata and a searchable raw-tag inspector (I)"
+  >
+    Info ⓘ <kbd>I</kbd> {{ infoPanelOpen() ? 'on' : 'off' }}
+  </button>
+
+  <button
+    type="button"
+    (click)="toggleHelp()"
+    [disabled]="!isReady()"
+    [class.active]="helpOpen()"
+    [attr.aria-pressed]="helpOpen()"
+    aria-haspopup="dialog"
+    title="Show the keyboard & mouse shortcut overlay (?)"
+  >
+    Help <kbd>?</kbd>
+  </button>
 </header>
 
-<main
-  class="viewport"
-  (dragenter)="onDragEnter($event)"
-  (dragover)="onDragOver($event)"
-  (dragleave)="onDragLeave($event)"
-  (drop)="onDrop($event)"
->
-  <canvas
-    #canvas
-    [class.grabbable]="isReady()"
-    [class.grabbing]="isPanning()"
-    (wheel)="onWheel($event)"
-    (pointerdown)="onPointerDown($event)"
-    (pointermove)="onPointerMove($event)"
-    (pointerup)="onPointerUp($event)"
-    (pointercancel)="onPointerUp($event)"
-    (pointerleave)="onPointerLeave($event)"
-    (contextmenu)="onContextMenu($event)"
-  ></canvas>
-
-  <div class="pane-overlay">
-    @for (pane of panes(); track paneKey(pane)) {
-      <div
-        class="pane"
-        [class.hovered]="paneKey(pane) === hoveredKey()"
-        [style.left.px]="pane.rect.x"
-        [style.top.px]="pane.rect.y"
-        [style.width.px]="pane.rect.width"
-        [style.height.px]="pane.rect.height"
+<div class="workspace">
+  <aside class="tool-rail" aria-label="Tools">
+    <div class="tool-group">
+      <span class="tool-group-label">View</span>
+      <button
+        type="button"
+        (click)="fitView()"
+        [disabled]="!isReady() || !hasMprPane()"
+        title="Zoom every pane to fit (0)"
       >
-        <span class="pane-tag">
-          @if (pane.kind === 'mip') {
-            3D {{ mode3dTag() }}
-          } @else {
-            {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
-          }
-        </span>
-      </div>
-    }
-  </div>
-
-  <!-- Anatomical edge letters and a physical scale bar, one per MPR pane. -->
-  <div class="pane-overlay">
-    @for (ann of paneAnnotations(); track ann.key) {
-      <div
-        class="pane-annotations"
-        [style.left.px]="ann.rect.x"
-        [style.top.px]="ann.rect.y"
-        [style.width.px]="ann.rect.width"
-        [style.height.px]="ann.rect.height"
+        Fit ⤢ <kbd>0</kbd>
+      </button>
+      <button
+        type="button"
+        (click)="oneToOne()"
+        [disabled]="!isReady() || !hasMprPane()"
+        title="Show panes at native voxel scale, 1:1 (1)"
       >
-        <span class="edge-label edge-top">{{ ann.edges.top }}</span>
-        <span class="edge-label edge-bottom">{{ ann.edges.bottom }}</span>
-        <span class="edge-label edge-left">{{ ann.edges.left }}</span>
-        <span class="edge-label edge-right">{{ ann.edges.right }}</span>
-        @if (ann.scale; as bar) {
-          <div class="scale-bar">
-            <span class="scale-bar-label">{{ bar.label }}</span>
-            <span class="scale-bar-line" [style.width.px]="bar.lengthPx"></span>
-          </div>
-        }
-      </div>
-    }
-  </div>
-
-  <!-- Linked crosshairs at the shared focus voxel, one per MPR pane. -->
-  <div class="pane-overlay">
-    @for (mark of crosshairs(); track mark.key) {
-      <div
-        class="crosshair"
-        [style.left.px]="mark.rect.x"
-        [style.top.px]="mark.rect.y"
-        [style.width.px]="mark.rect.width"
-        [style.height.px]="mark.rect.height"
+        1:1 <kbd>1</kbd>
+      </button>
+      <button
+        type="button"
+        (click)="resetView()"
+        [disabled]="!isReady()"
+        title="Reset zoom, pan and window/level to defaults (R)"
       >
-        <span class="crosshair-h" [style.top.px]="mark.y - mark.rect.y"></span>
-        <span class="crosshair-v" [style.left.px]="mark.x - mark.rect.x"></span>
-      </div>
-    }
-  </div>
+        Reset ↺ <kbd>R</kbd>
+      </button>
+      <button
+        type="button"
+        (click)="toggleInvert()"
+        [disabled]="!isReady()"
+        [class.active]="invert()"
+        [attr.aria-pressed]="invert()"
+        title="Invert the displayed grayscale (V)"
+      >
+        Invert ◐ <kbd>V</kbd> {{ invert() ? 'on' : 'off' }}
+      </button>
+      <button
+        type="button"
+        (click)="swapMain()"
+        [disabled]="!isReady() || !hasMprPane()"
+        title="Swap main view (X)"
+      >
+        Swap main ⟲ <kbd>X</kbd>
+      </button>
+      <button
+        type="button"
+        (click)="toggleSagittalFlip()"
+        [disabled]="!isReady() || !hasMprPane()"
+        title="Flip the sagittal view between anterior-left and anterior-right (F)"
+      >
+        Flip sagittal ⇄ <kbd>F</kbd> {{ sagittalFlipped() ? 'A▸' : '◂A' }}
+      </button>
+    </div>
 
-  <!-- Cross-pane reference lines: where each (oblique) plane crosses the others. -->
-  @for (ref of referenceLines(); track ref.key) {
-    <svg
-      class="reference-line"
-      aria-hidden="true"
-      [style.left.px]="ref.rect.x"
-      [style.top.px]="ref.rect.y"
-      [attr.width]="ref.rect.width"
-      [attr.height]="ref.rect.height"
-    >
-      <line
-        [attr.x1]="ref.x1 - ref.rect.x"
-        [attr.y1]="ref.y1 - ref.rect.y"
-        [attr.x2]="ref.x2 - ref.rect.x"
-        [attr.y2]="ref.y2 - ref.rect.y"
-        [style.stroke]="ref.color"
-      />
-    </svg>
-  }
+    <div class="tool-group">
+      <span class="tool-group-label">Crosshairs</span>
+      <button
+        type="button"
+        (click)="toggleCrosshairs()"
+        [disabled]="!isReady()"
+        [class.active]="crosshairsEnabled()"
+        [attr.aria-pressed]="crosshairsEnabled()"
+        title="Show linked crosshairs and the 3D cut-planes at the Shift+clicked focus point (C)"
+      >
+        Crosshairs ✛ <kbd>C</kbd> {{ crosshairsEnabled() ? 'on' : 'off' }}
+      </button>
+    </div>
 
-  <!-- Oblique rotation knob: drag to tilt an MPR pane's reslice plane. -->
-  @for (gizmo of obliqueGizmos(); track gizmo.key) {
-    <svg
-      class="oblique-gizmo"
-      [class.active]="gizmo.active"
-      [style.left.px]="gizmo.rect.x"
-      [style.top.px]="gizmo.rect.y"
-      [attr.width]="gizmo.rect.width"
-      [attr.height]="gizmo.rect.height"
-    >
-      <circle
-        class="oblique-ring"
-        [attr.cx]="gizmo.cx"
-        [attr.cy]="gizmo.cy"
-        [attr.r]="gizmo.radius"
-      />
-      <line
-        class="oblique-arm"
-        [attr.x1]="gizmo.cx"
-        [attr.y1]="gizmo.cy"
-        [attr.x2]="gizmo.knobX"
-        [attr.y2]="gizmo.knobY"
-      />
-      <circle
-        class="oblique-knob"
-        [attr.cx]="gizmo.knobX"
-        [attr.cy]="gizmo.knobY"
-        r="8"
-        tabindex="0"
-        role="slider"
-        [attr.aria-label]="orientationName(gizmo.orientation) + ' oblique tilt'"
-        (pointerdown)="onObliqueHandleDown($event, gizmo.orientation)"
-        (pointermove)="onObliqueHandleMove($event)"
-        (pointerup)="onObliqueHandleUp($event)"
-        (pointercancel)="onObliqueHandleUp($event)"
-        (dblclick)="resetOblique(gizmo.orientation)"
-      />
-    </svg>
-  }
-
-  <!-- MPR cut-planes projected into the 3D pane, showing where each pane slices. -->
-  @if (slicePlanes(); as sp) {
-    <svg
-      class="slice-planes"
-      aria-hidden="true"
-      [style.left.px]="sp.rect.x"
-      [style.top.px]="sp.rect.y"
-      [attr.width]="sp.rect.width"
-      [attr.height]="sp.rect.height"
-    >
-      @for (plane of sp.planes; track plane.orientation) {
-        <polygon class="slice-plane" [attr.points]="plane.points" [style.stroke]="plane.color" />
-      }
-    </svg>
-  }
-
-  <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->
-  @if (clipPlaneGizmo(); as gizmo) {
-    <svg
-      class="clip-plane-gizmo"
-      [style.left.px]="gizmo.rect.x"
-      [style.top.px]="gizmo.rect.y"
-      [attr.width]="gizmo.rect.width"
-      [attr.height]="gizmo.rect.height"
-    >
-      <polygon class="clip-plane-outline" [attr.points]="gizmo.outline" />
-      <polyline class="clip-plane-normal" [attr.points]="gizmo.normalLine" />
-      <circle
-        class="clip-plane-handle"
-        [attr.cx]="gizmo.handle.x"
-        [attr.cy]="gizmo.handle.y"
-        r="7"
-        (pointerdown)="onClipHandleDown($event)"
-        (pointermove)="onClipHandleMove($event)"
-        (pointerup)="onClipHandleUp($event)"
-        (pointercancel)="onClipHandleUp($event)"
-      />
-    </svg>
-  }
-
-  <!-- Interactive measurements (distance/angle/ROI), one SVG per measurement, clipped to its pane. -->
-  @for (mo of measurementOverlays(); track mo.key) {
-    <svg
-      class="measurement"
-      [class.pending]="mo.pending"
-      [style.left.px]="mo.rect.x"
-      [style.top.px]="mo.rect.y"
-      [attr.width]="mo.rect.width"
-      [attr.height]="mo.rect.height"
-    >
-      @if (mo.polyline) {
-        <polyline class="measure-shape" [attr.points]="mo.polyline" />
-      }
-      @if (mo.ellipse; as e) {
-        <ellipse
-          class="measure-shape"
-          [attr.cx]="e.cx"
-          [attr.cy]="e.cy"
-          [attr.rx]="e.rx"
-          [attr.ry]="e.ry"
-        />
-      }
-      @if (mo.box; as b) {
-        <rect
-          class="measure-shape"
-          [attr.x]="b.x"
-          [attr.y]="b.y"
-          [attr.width]="b.w"
-          [attr.height]="b.h"
-        />
-      }
-      @if (!mo.pending) {
-        @for (handle of mo.handles; track $index; let i = $index) {
-          <circle
-            class="measure-handle"
-            [attr.cx]="handle.x"
-            [attr.cy]="handle.y"
-            r="5"
-            (pointerdown)="onMeasureHandleDown(mo.id, i, $event)"
-            (pointermove)="onMeasureHandleMove($event)"
-            (pointerup)="onMeasureHandleUp($event)"
-            (pointercancel)="onMeasureHandleUp($event)"
-          />
-        }
-      }
-      @if (mo.lines.length) {
-        <text class="measure-label" [attr.x]="mo.labelX" [attr.y]="mo.labelY">
-          @for (line of mo.lines; track $index; let i = $index) {
-            <tspan [attr.x]="mo.labelX" [attr.dy]="i === 0 ? 0 : 13">{{ line }}</tspan>
-          }
-        </text>
-      }
-    </svg>
-  }
-
-  <!-- Anatomical orientation indicator in the 3D pane corner; rotates with the orbit. -->
-  @if (axisIndicator(); as axes) {
-    <svg
-      class="axis-indicator"
-      aria-hidden="true"
-      [style.left.px]="axes.left"
-      [style.top.px]="axes.top"
-      [attr.width]="axes.size"
-      [attr.height]="axes.size"
-    >
-      @for (axis of axes.markers; track axis.label) {
-        <line
-          class="axis-spoke"
-          [attr.x1]="axes.center"
-          [attr.y1]="axes.center"
-          [attr.x2]="axis.x"
-          [attr.y2]="axis.y"
-          [style.opacity]="axis.opacity"
-        />
-        <text class="axis-text" [attr.x]="axis.x" [attr.y]="axis.y" [style.opacity]="axis.opacity">
-          {{ axis.label }}
-        </text>
-      }
-      <circle class="axis-hub" [attr.cx]="axes.center" [attr.cy]="axes.center" r="2" />
-    </svg>
-  }
-
-  <!-- Metadata & raw-tag inspector. A pure read-only overlay; never touches rendering. -->
-  @if (isReady() && infoPanelOpen() && metadata(); as meta) {
-    <aside class="info-panel" aria-label="DICOM metadata">
-      <header class="info-header">
-        <strong>Metadata</strong>
-        <button
-          type="button"
-          class="info-close"
-          (click)="toggleInfoPanel()"
-          title="Close (I)"
-          aria-label="Close metadata panel"
-        >
-          ✕
-        </button>
-      </header>
-
-      <div class="info-body">
-        @for (group of meta.curated; track group.title) {
-          <section class="info-group">
-            <h3>{{ group.title }}</h3>
-            <dl>
-              @for (field of group.fields; track field.label) {
-                <div class="info-row">
-                  <dt>{{ field.label }}</dt>
-                  <dd>{{ field.value }}</dd>
-                </div>
-              }
-            </dl>
-          </section>
-        }
-
-        <section class="info-group">
-          <h3>Raw tags</h3>
-          <input
-            type="search"
-            class="info-search"
-            placeholder="Filter by tag, VR, or value…"
-            [value]="rawTagFilter()"
-            (input)="onRawTagFilterInput($event)"
-            aria-label="Filter raw tags"
-          />
-          <ul class="raw-tags">
-            @for (tag of filteredRawTags(); track tag.tag) {
-              <li class="raw-tag">
-                <code class="raw-tag-id">{{ tag.tag }}</code>
-                <span class="raw-tag-vr">{{ tag.vr ?? '—' }}</span>
-                <span class="raw-tag-value">{{ tag.value }}</span>
-              </li>
-            } @empty {
-              <li class="raw-tag-empty">No tags match “{{ rawTagFilter() }}”.</li>
-            }
-          </ul>
-        </section>
-      </div>
-    </aside>
-  }
-
-  <!-- DVR transfer-function editor + lighting. Only meaningful in DVR mode; edits
-       re-bake the LUT / repack the shader uniforms live. Never affects MPR panes. -->
-  @if (isReady() && isDvrMode() && has3dPane()) {
-    <aside class="dvr-panel" aria-label="DVR transfer function and lighting">
-      <header class="info-header">
-        <strong>DVR — transfer function</strong>
-      </header>
-
-      <div class="dvr-body">
-        <!-- Opacity curve. Drag a point to reshape; double-click to add a stop. -->
-        <svg
-          class="tf-editor"
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          (pointermove)="onTfPointerMove($event)"
-          (pointerup)="onTfPointerUp($event)"
-          (pointercancel)="onTfPointerUp($event)"
-          (dblclick)="onTfAddPoint($event)"
-        >
-          <polygon class="tf-area" [attr.points]="tfEditor().area" />
-          <polyline class="tf-line" [attr.points]="tfEditor().line" />
-          @for (p of tfEditor().points; track p.index) {
-            <circle
-              class="tf-point"
-              [class.selected]="p.index === tfSelected()"
-              [attr.cx]="p.x"
-              [attr.cy]="p.y"
-              r="3"
-              [attr.fill]="p.color"
-              (pointerdown)="onTfPointerDown($event, p.index)"
-            />
-          }
-        </svg>
-        <div class="tf-axis">
-          <span>{{ tfEditor().lo }} HU</span>
-          <span>opacity ↑ · drag points · dbl-click to add</span>
-          <span>{{ tfEditor().hi }} HU</span>
-        </div>
-
-        <div class="dvr-row">
-          <label class="dvr-color" title="Colour of the selected control point">
-            Colour
-            <input
-              type="color"
-              [value]="tfSelectedColor()"
-              (input)="onTfColorChange($event)"
-              [disabled]="tfSelected() === null"
-            />
-          </label>
-          <button
-            type="button"
-            class="dvr-remove"
-            (click)="onTfRemovePoint()"
-            [disabled]="!tfCanRemove()"
-            title="Remove the selected control point"
-          >
-            Remove point
-          </button>
-        </div>
-      </div>
-
-      <header class="info-header">
-        <strong>Lighting</strong>
-        <button
-          type="button"
-          class="dvr-toggle"
-          [class.active]="dvrLighting().enabled"
-          (click)="toggleShading()"
-          title="Toggle gradient shading on/off"
-        >
-          Shading {{ dvrLighting().enabled ? 'on' : 'off' }}
-        </button>
-      </header>
-
-      <div class="dvr-body">
-        <label class="dvr-slider" title="Swing the light around the view-up axis">
-          <span>Light ↔</span>
-          <input
-            type="range"
-            min="-180"
-            max="180"
-            step="1"
-            [value]="dvrLighting().azimuth"
-            (input)="onLightingInput('azimuth', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-        <label class="dvr-slider" title="Tilt the light toward the view-up axis">
-          <span>Light ↕</span>
-          <input
-            type="range"
-            min="-90"
-            max="90"
-            step="1"
-            [value]="dvrLighting().elevation"
-            (input)="onLightingInput('elevation', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-        <label class="dvr-slider" title="Ambient light floor">
-          <span>Ambient</span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            [value]="dvrLighting().ambient"
-            (input)="onLightingInput('ambient', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-        <label class="dvr-slider" title="Diffuse (Lambert) strength">
-          <span>Diffuse</span>
-          <input
-            type="range"
-            min="0"
-            max="2"
-            step="0.01"
-            [value]="dvrLighting().diffuse"
-            (input)="onLightingInput('diffuse', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-        <label class="dvr-slider" title="Specular highlight strength">
-          <span>Specular</span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            [value]="dvrLighting().specular"
-            (input)="onLightingInput('specular', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-        <label class="dvr-slider" title="Specular exponent (highlight tightness)">
-          <span>Shininess</span>
-          <input
-            type="range"
-            min="1"
-            max="128"
-            step="1"
-            [value]="dvrLighting().shininess"
-            (input)="onLightingInput('shininess', $event)"
-            [disabled]="!dvrLighting().enabled"
-          />
-        </label>
-      </div>
-    </aside>
-  }
-
-  <!-- Keyboard & mouse shortcut help. A centred modal overlay; click outside or ✕/Esc to close. -->
-  @if (helpOpen()) {
     <div
-      class="help-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Keyboard and mouse shortcuts"
-      (click)="toggleHelp()"
+      class="tool-group"
+      role="group"
+      aria-label="Measurement tools"
+      title="Measurement tools — click an MPR pane to place points; Esc cancels"
     >
-      <aside #helpPanel class="help-panel" tabindex="-1" (click)="$event.stopPropagation()">
+      <span class="tool-group-label">Measure</span>
+      @for (tool of measureTools; track tool.value) {
+        <button
+          type="button"
+          (click)="setTool(tool.value)"
+          [disabled]="!isReady() || !hasMprPane()"
+          [class.active]="activeTool() === tool.value"
+          [attr.aria-pressed]="activeTool() === tool.value"
+          [attr.aria-label]="tool.label"
+          [title]="tool.label"
+        >
+          {{ tool.glyph }} {{ tool.label }}
+        </button>
+      }
+      <button
+        type="button"
+        (click)="clearMeasurements()"
+        [disabled]="!isReady() || !hasMeasurements()"
+        title="Clear all measurements"
+      >
+        Clear ✕
+      </button>
+    </div>
+
+    <div class="tool-group">
+      <span class="tool-group-label">Cine</span>
+      <button
+        type="button"
+        (click)="toggleCine()"
+        [disabled]="!isReady() || !hasMprPane()"
+        [class.active]="cinePlaying()"
+        [attr.aria-pressed]="cinePlaying()"
+        title="Play/pause cine through the hovered or main pane's slices (P)"
+      >
+        {{ cinePlaying() ? '⏸ Pause' : '▶ Play' }} <kbd>P</kbd>
+      </button>
+      <label class="ctrl" title="Cine speed (frames per second)">
+        fps
+        <select [value]="cineFps()" (change)="onCineFpsChange($event)" [disabled]="!isReady()">
+          @for (fps of cineFpsOptions; track fps) {
+            <option [value]="fps">{{ fps }}</option>
+          }
+        </select>
+      </label>
+    </div>
+
+    <div class="tool-group">
+      <span class="tool-group-label">Capture</span>
+      <button
+        type="button"
+        (click)="captureScreenshot()"
+        [disabled]="!isReady() || recordingRotation()"
+        title="Save a PNG of the active (hovered or main) pane"
+      >
+        Screenshot ▣
+      </button>
+
+      @if (canRecordRotation() || recordingRotation()) {
+        <button
+          type="button"
+          (click)="captureRotation()"
+          [disabled]="!canRecordRotation() || recordingRotation()"
+          [class.active]="recordingRotation()"
+          [attr.aria-pressed]="recordingRotation()"
+          title="Record a 360° spin of the 3D view to a WebM clip"
+        >
+          {{ recordingRotation() ? '● Recording…' : 'Spin ⟳' }}
+        </button>
+      }
+    </div>
+
+    <div class="tool-group">
+      <span class="tool-group-label">3D</span>
+      <label
+        class="ctrl"
+        title="3D pane mode: max (MIP), min (MinIP), mean, or direct volume rendering"
+      >
+        3D
+        <select
+          [value]="projectionMode()"
+          (change)="onProjectionModeChange($event)"
+          [disabled]="!isReady() || !has3dPane()"
+        >
+          @for (mode of projectionModes; track mode.value) {
+            <option [value]="mode.value">{{ mode.label }}</option>
+          }
+        </select>
+      </label>
+
+      @if (isDvrMode()) {
+        <label class="ctrl" title="DVR transfer-function preset (seeds the TF editor)">
+          TF
+          <select
+            [value]="transferFunctionPreset()"
+            (change)="onTransferFunctionChange($event)"
+            [disabled]="!isReady() || !has3dPane()"
+          >
+            @for (tf of transferFunctions; track tf.preset) {
+              <option [value]="tf.preset">{{ tf.label }}</option>
+            }
+          </select>
+        </label>
+      } @else {
+        <label class="ctrl" title="3D slab thickness (mm); full depth projects the whole volume">
+          Slab
+          <input
+            type="number"
+            step="1"
+            min="1"
+            [max]="slabMaxMm()"
+            [value]="slabThicknessMm()"
+            (input)="onSlabThicknessInput($event)"
+            [disabled]="!isReady() || !has3dPane()"
+          />
+        </label>
+      }
+
+      <button
+        type="button"
+        (click)="toggleClipToPlanes()"
+        [disabled]="!isReady() || !has3dPane()"
+        [class.active]="clipToPlanes()"
+        [attr.aria-pressed]="clipToPlanes()"
+        title="Clip the 3D pane to the MPR slice planes for a cut-away view"
+      >
+        Cut-away ⌧ {{ clipToPlanes() ? 'on' : 'off' }}
+      </button>
+
+      <button
+        type="button"
+        (click)="toggleClipPlane()"
+        [disabled]="!isReady() || !has3dPane()"
+        [class.active]="clipPlaneEnabled()"
+        [attr.aria-pressed]="clipPlaneEnabled()"
+        title="Clip the 3D pane to a draggable plane; drag the handle to slice through the volume"
+      >
+        Clip plane ▢ {{ clipPlaneEnabled() ? 'on' : 'off' }}
+      </button>
+
+      @if (clipPlaneEnabled()) {
+        <button
+          type="button"
+          (click)="resetClipPlane()"
+          [disabled]="!isReady() || !has3dPane()"
+          title="Reset the clip plane to face the current view, centred on the volume"
+        >
+          Reset plane ⟲
+        </button>
+      }
+    </div>
+  </aside>
+
+  <main
+    class="viewport"
+    (dragenter)="onDragEnter($event)"
+    (dragover)="onDragOver($event)"
+    (dragleave)="onDragLeave($event)"
+    (drop)="onDrop($event)"
+  >
+    <canvas
+      #canvas
+      [class.grabbable]="isReady()"
+      [class.grabbing]="isPanning()"
+      (wheel)="onWheel($event)"
+      (pointerdown)="onPointerDown($event)"
+      (pointermove)="onPointerMove($event)"
+      (pointerup)="onPointerUp($event)"
+      (pointercancel)="onPointerUp($event)"
+      (pointerleave)="onPointerLeave($event)"
+      (contextmenu)="onContextMenu($event)"
+    ></canvas>
+
+    <div class="pane-overlay">
+      @for (pane of panes(); track paneKey(pane)) {
+        <div
+          class="pane"
+          [class.hovered]="paneKey(pane) === hoveredKey()"
+          [style.left.px]="pane.rect.x"
+          [style.top.px]="pane.rect.y"
+          [style.width.px]="pane.rect.width"
+          [style.height.px]="pane.rect.height"
+        >
+          <span class="pane-tag">
+            @if (pane.kind === 'mip') {
+              3D {{ mode3dTag() }}
+            } @else {
+              {{ orientationName(pane.orientation) }} · {{ paneSliceLabel(pane.orientation) }}
+            }
+          </span>
+        </div>
+      }
+    </div>
+
+    <!-- Anatomical edge letters and a physical scale bar, one per MPR pane. -->
+    <div class="pane-overlay">
+      @for (ann of paneAnnotations(); track ann.key) {
+        <div
+          class="pane-annotations"
+          [style.left.px]="ann.rect.x"
+          [style.top.px]="ann.rect.y"
+          [style.width.px]="ann.rect.width"
+          [style.height.px]="ann.rect.height"
+        >
+          <span class="edge-label edge-top">{{ ann.edges.top }}</span>
+          <span class="edge-label edge-bottom">{{ ann.edges.bottom }}</span>
+          <span class="edge-label edge-left">{{ ann.edges.left }}</span>
+          <span class="edge-label edge-right">{{ ann.edges.right }}</span>
+          @if (ann.scale; as bar) {
+            <div class="scale-bar">
+              <span class="scale-bar-label">{{ bar.label }}</span>
+              <span class="scale-bar-line" [style.width.px]="bar.lengthPx"></span>
+            </div>
+          }
+        </div>
+      }
+    </div>
+
+    <!-- Linked crosshairs at the shared focus voxel, one per MPR pane. -->
+    <div class="pane-overlay">
+      @for (mark of crosshairs(); track mark.key) {
+        <div
+          class="crosshair"
+          [style.left.px]="mark.rect.x"
+          [style.top.px]="mark.rect.y"
+          [style.width.px]="mark.rect.width"
+          [style.height.px]="mark.rect.height"
+        >
+          <span class="crosshair-h" [style.top.px]="mark.y - mark.rect.y"></span>
+          <span class="crosshair-v" [style.left.px]="mark.x - mark.rect.x"></span>
+        </div>
+      }
+    </div>
+
+    <!-- Cross-pane reference lines: where each (oblique) plane crosses the others. -->
+    @for (ref of referenceLines(); track ref.key) {
+      <svg
+        class="reference-line"
+        aria-hidden="true"
+        [style.left.px]="ref.rect.x"
+        [style.top.px]="ref.rect.y"
+        [attr.width]="ref.rect.width"
+        [attr.height]="ref.rect.height"
+      >
+        <line
+          [attr.x1]="ref.x1 - ref.rect.x"
+          [attr.y1]="ref.y1 - ref.rect.y"
+          [attr.x2]="ref.x2 - ref.rect.x"
+          [attr.y2]="ref.y2 - ref.rect.y"
+          [style.stroke]="ref.color"
+        />
+      </svg>
+    }
+
+    <!-- Oblique rotation knob: drag to tilt an MPR pane's reslice plane. -->
+    @for (gizmo of obliqueGizmos(); track gizmo.key) {
+      <svg
+        class="oblique-gizmo"
+        [class.active]="gizmo.active"
+        [style.left.px]="gizmo.rect.x"
+        [style.top.px]="gizmo.rect.y"
+        [attr.width]="gizmo.rect.width"
+        [attr.height]="gizmo.rect.height"
+      >
+        <circle
+          class="oblique-ring"
+          [attr.cx]="gizmo.cx"
+          [attr.cy]="gizmo.cy"
+          [attr.r]="gizmo.radius"
+        />
+        <line
+          class="oblique-arm"
+          [attr.x1]="gizmo.cx"
+          [attr.y1]="gizmo.cy"
+          [attr.x2]="gizmo.knobX"
+          [attr.y2]="gizmo.knobY"
+        />
+        <circle
+          class="oblique-knob"
+          [attr.cx]="gizmo.knobX"
+          [attr.cy]="gizmo.knobY"
+          r="8"
+          tabindex="0"
+          role="slider"
+          [attr.aria-label]="orientationName(gizmo.orientation) + ' oblique tilt'"
+          (pointerdown)="onObliqueHandleDown($event, gizmo.orientation)"
+          (pointermove)="onObliqueHandleMove($event)"
+          (pointerup)="onObliqueHandleUp($event)"
+          (pointercancel)="onObliqueHandleUp($event)"
+          (dblclick)="resetOblique(gizmo.orientation)"
+        />
+      </svg>
+    }
+
+    <!-- MPR cut-planes projected into the 3D pane, showing where each pane slices. -->
+    @if (slicePlanes(); as sp) {
+      <svg
+        class="slice-planes"
+        aria-hidden="true"
+        [style.left.px]="sp.rect.x"
+        [style.top.px]="sp.rect.y"
+        [attr.width]="sp.rect.width"
+        [attr.height]="sp.rect.height"
+      >
+        @for (plane of sp.planes; track plane.orientation) {
+          <polygon class="slice-plane" [attr.points]="plane.points" [style.stroke]="plane.color" />
+        }
+      </svg>
+    }
+
+    <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->
+    @if (clipPlaneGizmo(); as gizmo) {
+      <svg
+        class="clip-plane-gizmo"
+        [style.left.px]="gizmo.rect.x"
+        [style.top.px]="gizmo.rect.y"
+        [attr.width]="gizmo.rect.width"
+        [attr.height]="gizmo.rect.height"
+      >
+        <polygon class="clip-plane-outline" [attr.points]="gizmo.outline" />
+        <polyline class="clip-plane-normal" [attr.points]="gizmo.normalLine" />
+        <circle
+          class="clip-plane-handle"
+          [attr.cx]="gizmo.handle.x"
+          [attr.cy]="gizmo.handle.y"
+          r="7"
+          (pointerdown)="onClipHandleDown($event)"
+          (pointermove)="onClipHandleMove($event)"
+          (pointerup)="onClipHandleUp($event)"
+          (pointercancel)="onClipHandleUp($event)"
+        />
+      </svg>
+    }
+
+    <!-- Interactive measurements (distance/angle/ROI), one SVG per measurement, clipped to its pane. -->
+    @for (mo of measurementOverlays(); track mo.key) {
+      <svg
+        class="measurement"
+        [class.pending]="mo.pending"
+        [style.left.px]="mo.rect.x"
+        [style.top.px]="mo.rect.y"
+        [attr.width]="mo.rect.width"
+        [attr.height]="mo.rect.height"
+      >
+        @if (mo.polyline) {
+          <polyline class="measure-shape" [attr.points]="mo.polyline" />
+        }
+        @if (mo.ellipse; as e) {
+          <ellipse
+            class="measure-shape"
+            [attr.cx]="e.cx"
+            [attr.cy]="e.cy"
+            [attr.rx]="e.rx"
+            [attr.ry]="e.ry"
+          />
+        }
+        @if (mo.box; as b) {
+          <rect
+            class="measure-shape"
+            [attr.x]="b.x"
+            [attr.y]="b.y"
+            [attr.width]="b.w"
+            [attr.height]="b.h"
+          />
+        }
+        @if (!mo.pending) {
+          @for (handle of mo.handles; track $index; let i = $index) {
+            <circle
+              class="measure-handle"
+              [attr.cx]="handle.x"
+              [attr.cy]="handle.y"
+              r="5"
+              (pointerdown)="onMeasureHandleDown(mo.id, i, $event)"
+              (pointermove)="onMeasureHandleMove($event)"
+              (pointerup)="onMeasureHandleUp($event)"
+              (pointercancel)="onMeasureHandleUp($event)"
+            />
+          }
+        }
+        @if (mo.lines.length) {
+          <text class="measure-label" [attr.x]="mo.labelX" [attr.y]="mo.labelY">
+            @for (line of mo.lines; track $index; let i = $index) {
+              <tspan [attr.x]="mo.labelX" [attr.dy]="i === 0 ? 0 : 13">{{ line }}</tspan>
+            }
+          </text>
+        }
+      </svg>
+    }
+
+    <!-- Anatomical orientation indicator in the 3D pane corner; rotates with the orbit. -->
+    @if (axisIndicator(); as axes) {
+      <svg
+        class="axis-indicator"
+        aria-hidden="true"
+        [style.left.px]="axes.left"
+        [style.top.px]="axes.top"
+        [attr.width]="axes.size"
+        [attr.height]="axes.size"
+      >
+        @for (axis of axes.markers; track axis.label) {
+          <line
+            class="axis-spoke"
+            [attr.x1]="axes.center"
+            [attr.y1]="axes.center"
+            [attr.x2]="axis.x"
+            [attr.y2]="axis.y"
+            [style.opacity]="axis.opacity"
+          />
+          <text
+            class="axis-text"
+            [attr.x]="axis.x"
+            [attr.y]="axis.y"
+            [style.opacity]="axis.opacity"
+          >
+            {{ axis.label }}
+          </text>
+        }
+        <circle class="axis-hub" [attr.cx]="axes.center" [attr.cy]="axes.center" r="2" />
+      </svg>
+    }
+
+    <!-- Metadata & raw-tag inspector. A pure read-only overlay; never touches rendering. -->
+    @if (isReady() && infoPanelOpen() && metadata(); as meta) {
+      <aside class="info-panel" aria-label="DICOM metadata">
         <header class="info-header">
-          <strong>Keyboard &amp; mouse shortcuts</strong>
+          <strong>Metadata</strong>
           <button
             type="button"
             class="info-close"
-            (click)="toggleHelp()"
-            title="Close (?)"
-            aria-label="Close shortcuts help"
+            (click)="toggleInfoPanel()"
+            title="Close (I)"
+            aria-label="Close metadata panel"
           >
             ✕
           </button>
         </header>
-        <dl class="info-body">
-          @for (shortcut of shortcuts; track shortcut.label) {
-            <div class="info-row">
-              <dt>
-                <kbd>{{ shortcut.keys }}</kbd>
-              </dt>
-              <dd>{{ shortcut.label }}</dd>
-            </div>
+
+        <div class="info-body">
+          @for (group of meta.curated; track group.title) {
+            <section class="info-group">
+              <h3>{{ group.title }}</h3>
+              <dl>
+                @for (field of group.fields; track field.label) {
+                  <div class="info-row">
+                    <dt>{{ field.label }}</dt>
+                    <dd>{{ field.value }}</dd>
+                  </div>
+                }
+              </dl>
+            </section>
           }
-        </dl>
+
+          <section class="info-group">
+            <h3>Raw tags</h3>
+            <input
+              type="search"
+              class="info-search"
+              placeholder="Filter by tag, VR, or value…"
+              [value]="rawTagFilter()"
+              (input)="onRawTagFilterInput($event)"
+              aria-label="Filter raw tags"
+            />
+            <ul class="raw-tags">
+              @for (tag of filteredRawTags(); track tag.tag) {
+                <li class="raw-tag">
+                  <code class="raw-tag-id">{{ tag.tag }}</code>
+                  <span class="raw-tag-vr">{{ tag.vr ?? '—' }}</span>
+                  <span class="raw-tag-value">{{ tag.value }}</span>
+                </li>
+              } @empty {
+                <li class="raw-tag-empty">No tags match “{{ rawTagFilter() }}”.</li>
+              }
+            </ul>
+          </section>
+        </div>
       </aside>
-    </div>
-  }
-
-  @if (isReady() && interpolationWarning(); as warning) {
-    <div class="warning" role="status">⚠ {{ warning }}</div>
-  }
-
-  <div
-    class="status"
-    [class.error]="statusIsError()"
-    role="status"
-    aria-live="polite"
-    aria-atomic="true"
-  >
-    {{ statusText() }}
-    @if (isLoading()) {
-      <span
-        class="progress"
-        role="progressbar"
-        aria-label="Loading DICOM files"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        [attr.aria-valuenow]="loadPercent()"
-      >
-        <span class="progress-fill" [style.width.%]="loadProgress() * 100"></span>
-      </span>
     }
-  </div>
 
-  @if (probeText(); as probe) {
-    <div class="probe">{{ probe }}</div>
-  }
+    <!-- DVR transfer-function editor + lighting. Only meaningful in DVR mode; edits
+       re-bake the LUT / repack the shader uniforms live. Never affects MPR panes. -->
+    @if (isReady() && isDvrMode() && has3dPane()) {
+      <aside class="dvr-panel" aria-label="DVR transfer function and lighting">
+        <header class="info-header">
+          <strong>DVR — transfer function</strong>
+        </header>
 
-  @if (isDraggingFiles()) {
-    <div class="drop-overlay" role="status">
-      <div class="drop-message">Drop a DICOM folder or files to load</div>
+        <div class="dvr-body">
+          <!-- Opacity curve. Drag a point to reshape; double-click to add a stop. -->
+          <svg
+            class="tf-editor"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            (pointermove)="onTfPointerMove($event)"
+            (pointerup)="onTfPointerUp($event)"
+            (pointercancel)="onTfPointerUp($event)"
+            (dblclick)="onTfAddPoint($event)"
+          >
+            <polygon class="tf-area" [attr.points]="tfEditor().area" />
+            <polyline class="tf-line" [attr.points]="tfEditor().line" />
+            @for (p of tfEditor().points; track p.index) {
+              <circle
+                class="tf-point"
+                [class.selected]="p.index === tfSelected()"
+                [attr.cx]="p.x"
+                [attr.cy]="p.y"
+                r="3"
+                [attr.fill]="p.color"
+                (pointerdown)="onTfPointerDown($event, p.index)"
+              />
+            }
+          </svg>
+          <div class="tf-axis">
+            <span>{{ tfEditor().lo }} HU</span>
+            <span>opacity ↑ · drag points · dbl-click to add</span>
+            <span>{{ tfEditor().hi }} HU</span>
+          </div>
+
+          <div class="dvr-row">
+            <label class="dvr-color" title="Colour of the selected control point">
+              Colour
+              <input
+                type="color"
+                [value]="tfSelectedColor()"
+                (input)="onTfColorChange($event)"
+                [disabled]="tfSelected() === null"
+              />
+            </label>
+            <button
+              type="button"
+              class="dvr-remove"
+              (click)="onTfRemovePoint()"
+              [disabled]="!tfCanRemove()"
+              title="Remove the selected control point"
+            >
+              Remove point
+            </button>
+          </div>
+        </div>
+
+        <header class="info-header">
+          <strong>Lighting</strong>
+          <button
+            type="button"
+            class="dvr-toggle"
+            [class.active]="dvrLighting().enabled"
+            (click)="toggleShading()"
+            title="Toggle gradient shading on/off"
+          >
+            Shading {{ dvrLighting().enabled ? 'on' : 'off' }}
+          </button>
+        </header>
+
+        <div class="dvr-body">
+          <label class="dvr-slider" title="Swing the light around the view-up axis">
+            <span>Light ↔</span>
+            <input
+              type="range"
+              min="-180"
+              max="180"
+              step="1"
+              [value]="dvrLighting().azimuth"
+              (input)="onLightingInput('azimuth', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+          <label class="dvr-slider" title="Tilt the light toward the view-up axis">
+            <span>Light ↕</span>
+            <input
+              type="range"
+              min="-90"
+              max="90"
+              step="1"
+              [value]="dvrLighting().elevation"
+              (input)="onLightingInput('elevation', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+          <label class="dvr-slider" title="Ambient light floor">
+            <span>Ambient</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              [value]="dvrLighting().ambient"
+              (input)="onLightingInput('ambient', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+          <label class="dvr-slider" title="Diffuse (Lambert) strength">
+            <span>Diffuse</span>
+            <input
+              type="range"
+              min="0"
+              max="2"
+              step="0.01"
+              [value]="dvrLighting().diffuse"
+              (input)="onLightingInput('diffuse', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+          <label class="dvr-slider" title="Specular highlight strength">
+            <span>Specular</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              [value]="dvrLighting().specular"
+              (input)="onLightingInput('specular', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+          <label class="dvr-slider" title="Specular exponent (highlight tightness)">
+            <span>Shininess</span>
+            <input
+              type="range"
+              min="1"
+              max="128"
+              step="1"
+              [value]="dvrLighting().shininess"
+              (input)="onLightingInput('shininess', $event)"
+              [disabled]="!dvrLighting().enabled"
+            />
+          </label>
+        </div>
+      </aside>
+    }
+
+    <!-- Keyboard & mouse shortcut help. A centred modal overlay; click outside or ✕/Esc to close. -->
+    @if (helpOpen()) {
+      <div
+        class="help-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard and mouse shortcuts"
+        (click)="toggleHelp()"
+      >
+        <aside #helpPanel class="help-panel" tabindex="-1" (click)="$event.stopPropagation()">
+          <header class="info-header">
+            <strong>Keyboard &amp; mouse shortcuts</strong>
+            <button
+              type="button"
+              class="info-close"
+              (click)="toggleHelp()"
+              title="Close (?)"
+              aria-label="Close shortcuts help"
+            >
+              ✕
+            </button>
+          </header>
+          <dl class="info-body">
+            @for (shortcut of shortcuts; track shortcut.label) {
+              <div class="info-row">
+                <dt>
+                  <kbd>{{ shortcut.keys }}</kbd>
+                </dt>
+                <dd>{{ shortcut.label }}</dd>
+              </div>
+            }
+          </dl>
+        </aside>
+      </div>
+    }
+
+    @if (isReady() && interpolationWarning(); as warning) {
+      <div class="warning" role="status">⚠ {{ warning }}</div>
+    }
+
+    <div
+      class="status"
+      [class.error]="statusIsError()"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      {{ statusText() }}
+      @if (isLoading()) {
+        <span
+          class="progress"
+          role="progressbar"
+          aria-label="Loading DICOM files"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          [attr.aria-valuenow]="loadPercent()"
+        >
+          <span class="progress-fill" [style.width.%]="loadProgress() * 100"></span>
+        </span>
+      }
     </div>
-  }
-</main>
+
+    @if (probeText(); as probe) {
+      <div class="probe">{{ probe }}</div>
+    }
+
+    @if (isDraggingFiles()) {
+      <div class="drop-overlay" role="status">
+        <div class="drop-message">Drop a DICOM folder or files to load</div>
+      </div>
+    }
+  </main>
+</div>
