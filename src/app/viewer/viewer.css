@@ -124,12 +124,15 @@ kbd {
 
 .tool-rail {
   flex: 0 0 auto;
-  width: 200px;
+  width: 220px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 10px;
   overflow-y: auto;
+  /* Never scroll sideways: long ROI names ellipsis-truncate (the min-width:0
+     chain below lets them), so the pane fits its contents at this width. */
+  overflow-x: hidden;
   border-right: 1px solid var(--glass-border);
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
@@ -140,6 +143,9 @@ kbd {
    group (including 3D) reachable without scrolling at short window heights. */
 .tool-group {
   flex: 0 0 auto;
+  /* Allow the group (a flex item of the rail) to shrink so its contents — long
+     ROI names in particular — truncate instead of widening the whole pane. */
+  min-width: 0;
 }
 
 .tool-group-body {
@@ -418,6 +424,11 @@ button.active {
 /* Structures panel: per-ROI colour, type, visibility and opacity controls. */
 .roi-panel {
   flex-direction: column;
+  /* Override the button groups' flex-wrap: a wrapping column container won't
+     stretch its rows to its width, so the ROI list would size to the longest
+     name and overflow. nowrap keeps rows at the pane width, letting names
+     ellipsis-truncate. */
+  flex-wrap: nowrap;
   align-items: stretch;
   gap: 6px;
 }
@@ -437,6 +448,7 @@ button.active {
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
+  min-width: 0;
   max-height: 220px;
   overflow-y: auto;
 }
@@ -449,6 +461,7 @@ button.active {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .roi-color {
