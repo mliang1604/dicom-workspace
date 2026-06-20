@@ -49,7 +49,7 @@ import { VolumeLoader, type LoadResult } from '../volume-loader';
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
   | { readonly status: 'idle' }
-  | { readonly status: 'loading' }
+  | { readonly status: 'loading'; readonly loaded: number; readonly total: number }
   | { readonly status: 'ready'; readonly result: LoadResult }
   | { readonly status: 'error'; readonly message: string };
 
@@ -416,6 +416,19 @@ export class Viewer {
     () => this.gpuError() !== null || this.load().status === 'error',
   );
 
+  /** True while a load is in flight, gating the progress bar. */
+  protected readonly isLoading = computed(() => this.load().status === 'loading');
+
+  /**
+   * Progress of an in-flight load as a 0–1 fraction for the progress bar. Reports
+   * 0 when not loading or before the file count is known (the bar's empty state).
+   */
+  protected readonly loadProgress = computed<number>(() => {
+    const state = this.load();
+    if (state.status !== 'loading' || state.total <= 0) return 0;
+    return state.loaded / state.total;
+  });
+
   /** Warns that reconstructed planes are interpolated across significant gaps. */
   protected readonly interpolationWarning = computed<string | null>(() => {
     const volume = this.volume();
@@ -430,7 +443,7 @@ export class Viewer {
       case 'idle':
         return 'Open a DICOM folder or files to begin.';
       case 'loading':
-        return 'Loading…';
+        return loadingText(state.loaded, state.total);
       case 'ready':
         return describeVolume(state.result);
       case 'error':
@@ -1036,9 +1049,12 @@ export class Viewer {
   }
 
   private async loadFiles(files: readonly File[]): Promise<void> {
-    this.load.set({ status: 'loading' });
+    this.load.set({ status: 'loading', loaded: 0, total: files.length });
     try {
-      const result = await this.loader.loadFromFiles(files);
+      const result = await this.loader.loadFromFiles(files, (loaded, total) => {
+        // Ignore stragglers from a superseded load (a new load already started).
+        if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
+      });
       this.applyVolume(result);
     } catch (error) {
       this.load.set({ status: 'error', message: messageOf(error) });
@@ -1181,6 +1197,16 @@ function middleSlice(renderer: SliceRenderer, orientation: Orientation): number 
 function describeVolume(result: LoadResult): string {
   const [x, y, z] = result.volume.dims;
   return `Loaded ${result.sliceCount} slice(s) — volume ${x} × ${y} × ${z}.`;
+}
+
+/**
+ * Status line for an in-flight load: files parsed of the total with a percentage
+ * once the count is known. Exported for unit testing the wording and rounding.
+ */
+export function loadingText(loaded: number, total: number): string {
+  if (total <= 0) return 'Loading…';
+  const percent = Math.round((loaded / total) * 100);
+  return `Loading… ${loaded} / ${total} files (${percent}%)`;
 }
 
 function intValue(event: Event): number {

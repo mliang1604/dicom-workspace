@@ -257,7 +257,14 @@
     <div class="warning" role="status">⚠ {{ warning }}</div>
   }
 
-  <div class="status" [class.error]="statusIsError()">{{ statusText() }}</div>
+  <div class="status" [class.error]="statusIsError()">
+    {{ statusText() }}
+    @if (isLoading()) {
+      <span class="progress" role="progressbar" aria-label="Loading DICOM files">
+        <span class="progress-fill" [style.width.%]="loadProgress() * 100"></span>
+      </span>
+    }
+  </div>
 
   @if (probeText(); as probe) {
     <div class="probe">{{ probe }}</div>

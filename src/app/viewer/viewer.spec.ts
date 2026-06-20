@@ -1,4 +1,20 @@
-import { missingSliceWarning } from './viewer';
+import { loadingText, missingSliceWarning } from './viewer';
+
+describe('loadingText', () => {
+  it('falls back to an indeterminate label before the file count is known', () => {
+    expect(loadingText(0, 0)).toBe('Loading…');
+  });
+
+  it('reports files parsed of the total with a percentage', () => {
+    expect(loadingText(0, 200)).toBe('Loading… 0 / 200 files (0%)');
+    expect(loadingText(50, 200)).toBe('Loading… 50 / 200 files (25%)');
+    expect(loadingText(200, 200)).toBe('Loading… 200 / 200 files (100%)');
+  });
+
+  it('rounds the percentage to a whole number', () => {
+    expect(loadingText(1, 3)).toBe('Loading… 1 / 3 files (33%)');
+  });
+});
 
 describe('missingSliceWarning', () => {
   it('is silent when no slices were interpolated', () => {

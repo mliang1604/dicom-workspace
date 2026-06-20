@@ -1,8 +1,8 @@
 import { Injectable } from '@angular/core';
-import { parseFileAsync } from '../dicom/loader';
 import { buildVolume } from '../dicom/volume';
 import { groupSeries, largestSeries, type Series } from '../dicom/series';
-import type { Slice, Volume } from '../dicom/types';
+import type { Volume } from '../dicom/types';
+import { parseFilesInWorkers, type LoadProgress } from './parse-pool';
 
 /**
  * Outcome of loading a batch of files: the series found across them and the one
@@ -29,12 +29,14 @@ export interface LoadResult {
  */
 @Injectable({ providedIn: 'root' })
 export class VolumeLoader {
-  async loadFromFiles(files: readonly File[]): Promise<LoadResult> {
-    const slices: Slice[] = [];
-    for (const file of files) {
-      const buffer = await file.arrayBuffer();
-      slices.push(...(await parseFileAsync(file.name, buffer)));
-    }
+  /**
+   * Parse and assemble a batch of files. Parsing runs off the main thread in a
+   * worker pool (see {@link parseFilesInWorkers}) so a large folder doesn't
+   * freeze the UI; {@link onProgress} reports files parsed / total as it goes.
+   * Assembly (grouping + {@link buildVolume}) stays on the main thread.
+   */
+  async loadFromFiles(files: readonly File[], onProgress?: LoadProgress): Promise<LoadResult> {
+    const slices = await parseFilesInWorkers(files, onProgress);
 
     const series = groupSeries(slices);
     if (series.length === 0) buildVolume(slices); // throws the canonical "no slices" error
