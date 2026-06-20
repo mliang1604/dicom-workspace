@@ -1,6 +1,17 @@
 import * as dicomParser from 'dicom-parser';
 import { decodeRleFrame } from './rle';
 import { decodeWasmFrame, isWasmTransferSyntax } from './wasm-codecs';
+import {
+  asRgb,
+  buildPaletteLut,
+  colorFrameToLuma,
+  constrainFrame,
+  isYbr,
+  paletteFrameToLuma,
+  type PaletteLut,
+  type StoredFrame,
+  ybrFullToRgb,
+} from './photometric';
 import type { Slice } from './types';
 
 /** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
@@ -53,7 +64,24 @@ interface FileContext {
   readonly rows: number;
   readonly columns: number;
   readonly bitsAllocated: number;
+  readonly bitsStored: number;
   readonly pixelRepresentation: number;
+  /**
+   * How PixelData turns into displayed grayscale: a plain single-sample
+   * grayscale image (`mono`), palette-indexed colour reduced to luminance
+   * (`palette`), or a multi-sample RGB/YBR frame reduced to luminance (`color`).
+   */
+  readonly kind: 'mono' | 'palette' | 'color';
+  /** Photometric Interpretation (0028,0004), e.g. MONOCHROME1/2, RGB, YBR_FULL. */
+  readonly photometric: string;
+  /** PlanarConfiguration (0028,0006): 0 interleaved (R,G,B…), 1 planar (RR…GG…BB…). */
+  readonly planarConfiguration: number;
+  /** True for MONOCHROME1, whose display sense is inverted (minimum = white). */
+  readonly invert: boolean;
+  /** PixelPaddingValue (0028,0120) in stored units, or null when absent. */
+  readonly pixelPadding: number | null;
+  /** R/G/B palette LUTs for a PALETTE COLOR image, or null. */
+  readonly palette: PaletteLut | null;
   readonly seriesUid: string | null;
   readonly seriesNumber: number | null;
   readonly seriesDescription: string | null;
@@ -68,8 +96,12 @@ interface FileContext {
   readonly pixelOffset: number;
 }
 
-/** Raw, pre-modality-LUT samples for one frame. */
-type RawFrame = Int16Array | Uint16Array | Uint8Array;
+/**
+ * One frame's decoded pixel values, ready for the modality LUT: stored integer
+ * samples for grayscale, or a per-pixel luminance {@link Float32Array} for
+ * palette/colour frames (already reduced to a single channel at decode time).
+ */
+type FramePixels = StoredFrame | Float32Array;
 
 /** What {@link setupFile} resolves from a file: geometry context + frame count. */
 interface FileSetup {
@@ -95,7 +127,7 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
     );
   }
   const count = ctx.rows * ctx.columns;
-  const raw: RawFrame[] = [];
+  const raw: FramePixels[] = [];
   for (let f = 0; f < frames; f++) raw.push(readFrameSamples(ctx, f, count));
   return assemble(ctx, frames, raw);
 }
@@ -110,7 +142,7 @@ export async function parseFileAsync(name: string, buffer: ArrayBuffer): Promise
   if (!setup) return [];
   const { ctx, frames } = setup;
   const count = ctx.rows * ctx.columns;
-  const raw: RawFrame[] = [];
+  const raw: FramePixels[] = [];
   for (let f = 0; f < frames; f++) raw.push(await readFrameSamplesAsync(ctx, f, count));
   return assemble(ctx, frames, raw);
 }
@@ -139,14 +171,18 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
     throw new UnsupportedDicomError(`Unsupported transfer syntax ${transferSyntax} (${name}).`);
   }
 
-  const samplesPerPixel = dataSet.uint16('x00280002') ?? 1;
-  if (samplesPerPixel !== 1) {
-    return null; // Color image; out of scope for the grayscale volume viewer.
-  }
-
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
   if (!rows || !columns) return null;
+
+  const bitsAllocated = dataSet.uint16('x00280100') ?? 16;
+  const pixelRepresentation = dataSet.uint16('x00280103') ?? 0; // 0 unsigned, 1 signed
+  const samplesPerPixel = dataSet.uint16('x00280002') ?? 1;
+  const photometric = dataSet.string('x00280004')?.trim().toUpperCase() || 'MONOCHROME2';
+  const palette = photometric === 'PALETTE COLOR' ? readPalette(dataSet) : null;
+  // Reduce colour to a single luminance channel: a multi-sample frame (RGB/YBR)
+  // or a palette-indexed one. Anything else is plain single-sample grayscale.
+  const kind: FileContext['kind'] = samplesPerPixel >= 3 ? 'color' : palette ? 'palette' : 'mono';
 
   const ctx: FileContext = {
     name,
@@ -154,8 +190,15 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
     dataSet,
     rows,
     columns,
-    bitsAllocated: dataSet.uint16('x00280100') ?? 16,
-    pixelRepresentation: dataSet.uint16('x00280103') ?? 0, // 0 unsigned, 1 signed
+    bitsAllocated,
+    bitsStored: dataSet.uint16('x00280101') ?? bitsAllocated, // BitsStored
+    pixelRepresentation,
+    kind,
+    photometric,
+    planarConfiguration: dataSet.uint16('x00280006') ?? 0, // PlanarConfiguration
+    invert: photometric === 'MONOCHROME1',
+    pixelPadding: readPadding(dataSet, pixelRepresentation),
+    palette,
     seriesUid: dataSet.string('x0020000e')?.trim() || null, // SeriesInstanceUID
     seriesNumber: intOrNull(dataSet, 'x00200011'), // SeriesNumber
     seriesDescription: dataSet.string('x0008103e')?.trim() || null, // SeriesDescription
@@ -171,15 +214,52 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
 }
 
 /** Assemble the decoded raw frames into one Slice per frame. */
-function assemble(ctx: FileContext, frames: number, raw: RawFrame[]): Slice[] {
+function assemble(ctx: FileContext, frames: number, raw: FramePixels[]): Slice[] {
   return frames > 1 ? parseMultiframe(ctx, frames, raw) : [parseSingleFrame(ctx, raw[0])];
 }
 
+/** A frame's modality LUT and suggested display window, before photometric folding. */
+interface ModalityTransform {
+  readonly slope: number;
+  readonly intercept: number;
+  readonly windowCenter: number | null;
+  readonly windowWidth: number | null;
+}
+
+/**
+ * Fold the photometric interpretation into a frame's modality LUT and window.
+ *
+ * - **Colour / palette** frames are reduced to luminance at decode time, so they
+ *   carry no modality LUT: slope/intercept collapse to 1/0 and any stored
+ *   grayscale window is dropped in favour of the data-derived one.
+ * - **MONOCHROME1** inverts the display sense (the minimum value is white).
+ *   Negating the modality LUT — and the window centre — reflects the values about
+ *   zero, which reproduces the inversion through the unchanged MONOCHROME2 shader
+ *   and keeps `data = raw·slope + intercept` true, so the voxel probe still
+ *   recovers the original stored value.
+ */
+function photometricTransform(ctx: FileContext, m: ModalityTransform): ModalityTransform {
+  if (ctx.kind !== 'mono') {
+    return { slope: 1, intercept: 0, windowCenter: null, windowWidth: null };
+  }
+  if (!ctx.invert) return m;
+  return {
+    slope: -m.slope,
+    intercept: -m.intercept,
+    windowCenter: m.windowCenter === null ? null : -m.windowCenter,
+    windowWidth: m.windowWidth,
+  };
+}
+
 /** Classic single-frame object: all geometry lives in top-level tags. */
-function parseSingleFrame(ctx: FileContext, raw: RawFrame): Slice {
+function parseSingleFrame(ctx: FileContext, raw: FramePixels): Slice {
   const { dataSet } = ctx;
-  const rescaleSlope = num(dataSet, 'x00281053', 1);
-  const rescaleIntercept = num(dataSet, 'x00281052', 0);
+  const m = photometricTransform(ctx, {
+    slope: num(dataSet, 'x00281053', 1),
+    intercept: num(dataSet, 'x00281052', 0),
+    windowCenter: readFirstFloat(dataSet, 'x00281050'),
+    windowWidth: readFirstFloat(dataSet, 'x00281051'),
+  });
 
   return {
     name: ctx.name,
@@ -193,11 +273,11 @@ function parseSingleFrame(ctx: FileContext, raw: RawFrame): Slice {
     seriesNumber: ctx.seriesNumber,
     seriesDescription: ctx.seriesDescription,
     modality: ctx.modality,
-    rescaleSlope,
-    rescaleIntercept,
-    windowCenter: readFirstFloat(dataSet, 'x00281050'),
-    windowWidth: readFirstFloat(dataSet, 'x00281051'),
-    pixels: rescale(raw, rescaleSlope, rescaleIntercept),
+    rescaleSlope: m.slope,
+    rescaleIntercept: m.intercept,
+    windowCenter: m.windowCenter,
+    windowWidth: m.windowWidth,
+    pixels: rescale(raw, m.slope, m.intercept),
   };
 }
 
@@ -206,7 +286,7 @@ function parseSingleFrame(ctx: FileContext, raw: RawFrame): Slice {
  * the Per-Frame Functional Groups Sequence (5200,9230), falling back to the
  * Shared Functional Groups Sequence (5200,9229) and then to top-level tags.
  */
-function parseMultiframe(ctx: FileContext, frames: number, raw: RawFrame[]): Slice[] {
+function parseMultiframe(ctx: FileContext, frames: number, raw: FramePixels[]): Slice[] {
   const { dataSet } = ctx;
   const shared = firstItem(dataSet, 'x52009229');
   const perFrameSeq = dataSet.elements['x52009230'];
@@ -216,11 +296,15 @@ function parseMultiframe(ctx: FileContext, frames: number, raw: RawFrame[]): Sli
     const fg = perFrameSeq?.items?.[f]?.dataSet ?? null;
     const groups: FunctionalGroups = { fg, shared, top: dataSet };
 
-    // Pixel Value Transformation Sequence (0028,9145) -> Rescale Slope/Intercept.
-    const rescaleSlope =
-      readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281053')) ?? 1;
-    const rescaleIntercept =
-      readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281052')) ?? 0;
+    // Pixel Value Transformation Sequence (0028,9145) -> Rescale Slope/Intercept,
+    // and Frame VOI LUT Sequence (0028,9132) -> Window Center/Width, folded
+    // through the photometric interpretation (MONOCHROME1 invert, colour/palette).
+    const m = photometricTransform(ctx, {
+      slope: readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281053')) ?? 1,
+      intercept: readGroupValue(groups, 'x00289145', (ds) => readFirstFloat(ds, 'x00281052')) ?? 0,
+      windowCenter: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281050')),
+      windowWidth: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281051')),
+    });
 
     // Pixel Measures Sequence (0028,9110) -> PixelSpacing (0028,0030).
     const spacing = readGroupValue(groups, 'x00289110', (ds) => readFloats(ds, 'x00280030', 2));
@@ -239,12 +323,11 @@ function parseMultiframe(ctx: FileContext, frames: number, raw: RawFrame[]): Sli
       seriesNumber: ctx.seriesNumber,
       seriesDescription: ctx.seriesDescription,
       modality: ctx.modality,
-      rescaleSlope,
-      rescaleIntercept,
-      // Frame VOI LUT Sequence (0028,9132) -> Window Center/Width.
-      windowCenter: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281050')),
-      windowWidth: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281051')),
-      pixels: rescale(raw[f], rescaleSlope, rescaleIntercept),
+      rescaleSlope: m.slope,
+      rescaleIntercept: m.intercept,
+      windowCenter: m.windowCenter,
+      windowWidth: m.windowWidth,
+      pixels: rescale(raw[f], m.slope, m.intercept),
     });
   }
   return slices;
@@ -291,7 +374,7 @@ function firstItem(
 }
 
 /** Apply the modality LUT (raw * slope + intercept) into real units. */
-function rescale(raw: RawFrame, rescaleSlope: number, rescaleIntercept: number): Float32Array {
+function rescale(raw: FramePixels, rescaleSlope: number, rescaleIntercept: number): Float32Array {
   const pixels = new Float32Array(raw.length);
   for (let i = 0; i < raw.length; i++) {
     pixels[i] = raw[i] * rescaleSlope + rescaleIntercept;
@@ -299,15 +382,43 @@ function rescale(raw: RawFrame, rescaleSlope: number, rescaleIntercept: number):
   return pixels;
 }
 
-/** Read one frame's raw samples synchronously (uncompressed or pure-JS codec). */
-function readFrameSamples(ctx: FileContext, frameIndex: number, count: number): RawFrame {
-  if (ctx.codec) {
-    const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
-    return ctx.codec(frame, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+/**
+ * Reduce one frame's decoded samples to the single-channel pixels the volume
+ * stores: stored grayscale values (BitsStored/sign/padding applied) for `mono`,
+ * or a per-pixel luminance for `palette`/`color`.
+ */
+function convertFrame(ctx: FileContext, raw: StoredFrame, count: number): FramePixels {
+  switch (ctx.kind) {
+    case 'color': {
+      const convert = isYbr(ctx.photometric) ? ybrFullToRgb : asRgb;
+      return colorFrameToLuma(raw, count, ctx.planarConfiguration === 1, convert);
+    }
+    case 'palette': {
+      const indices = constrainFrame(raw, ctx.bitsStored, 0, ctx.pixelPadding);
+      return paletteFrameToLuma(indices, count, ctx.palette!);
+    }
+    default:
+      return constrainFrame(raw, ctx.bitsStored, ctx.pixelRepresentation, ctx.pixelPadding);
   }
+}
+
+/** Read one frame's raw samples synchronously (uncompressed or pure-JS codec). */
+function readFrameSamples(ctx: FileContext, frameIndex: number, count: number): FramePixels {
+  if (ctx.codec) {
+    // The pure-JS codecs (RLE) decode grayscale frames only.
+    const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
+    return convertFrame(
+      ctx,
+      ctx.codec(frame, count, ctx.bitsAllocated, ctx.pixelRepresentation),
+      count,
+    );
+  }
+  const samplesPerPixel = ctx.kind === 'color' ? 3 : 1;
+  const total = count * samplesPerPixel;
   const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
-  const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
-  return readRawPixels(ctx.buffer, offset, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+  const offset = ctx.pixelOffset + frameIndex * total * bytesPerSample;
+  const raw = readRawPixels(ctx.buffer, offset, total, ctx.bitsAllocated, ctx.pixelRepresentation);
+  return convertFrame(ctx, raw, count);
 }
 
 /** Read one frame's raw samples, awaiting a wasm codec for compressed syntaxes. */
@@ -315,11 +426,17 @@ async function readFrameSamplesAsync(
   ctx: FileContext,
   frameIndex: number,
   count: number,
-): Promise<RawFrame> {
+): Promise<FramePixels> {
   if (!ctx.wasmTransferSyntax) return readFrameSamples(ctx, frameIndex, count);
   const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
   const decoded = await decodeWasmFrame(ctx.wasmTransferSyntax, frame);
-  return reinterpretSamples(decoded.bytes, ctx.bitsAllocated, ctx.pixelRepresentation);
+  // A colour codec output (componentCount ≥ 3) is interleaved 8-bit RGB after the
+  // decoder's own colour transform; reduce it to luminance like the colour path.
+  if (decoded.componentCount >= 3) {
+    return colorFrameToLuma(decoded.bytes, count, false, asRgb);
+  }
+  const raw = reinterpretSamples(decoded.bytes, ctx.bitsAllocated, ctx.pixelRepresentation);
+  return convertFrame(ctx, raw, count);
 }
 
 /** Interpret wasm-decoded bytes as 8- or 16-bit samples per the DICOM header. */
@@ -327,7 +444,7 @@ function reinterpretSamples(
   bytes: Uint8Array,
   bitsAllocated: number,
   pixelRepresentation: number,
-): RawFrame {
+): StoredFrame {
   if (bitsAllocated <= 8) return bytes;
   const count = bytes.length >> 1;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
@@ -411,4 +528,52 @@ function readFirstFloat(dataSet: dicomParser.DataSet, tag: string): number | nul
   if (!el || el.length === 0) return null;
   const v = dataSet.floatString(tag, 0);
   return v === undefined || Number.isNaN(v) ? null : v;
+}
+
+/**
+ * PixelPaddingValue (0028,0120), read in the pixel's representation (US or SS),
+ * or null when absent — the stored value marking out-of-FOV background pixels.
+ */
+function readPadding(dataSet: dicomParser.DataSet, pixelRepresentation: number): number | null {
+  const el = dataSet.elements['x00280120'];
+  if (!el || el.length === 0) return null;
+  const v = pixelRepresentation === 1 ? dataSet.int16('x00280120') : dataSet.uint16('x00280120');
+  return v === undefined ? null : v;
+}
+
+/** Assemble the R/G/B Palette Color LUTs of a PALETTE COLOR image, or null. */
+function readPalette(dataSet: dicomParser.DataSet): PaletteLut | null {
+  const descriptor = readPaletteDescriptor(dataSet, 'x00281101');
+  if (!descriptor) return null;
+  const r = readLutData(dataSet, 'x00281201');
+  const g = readLutData(dataSet, 'x00281202');
+  const b = readLutData(dataSet, 'x00281203');
+  if (!r || !g || !b) return null;
+  return buildPaletteLut(descriptor, r, g, b);
+}
+
+/** Palette Color LUT Descriptor: [numberOfEntries, firstValueMapped, bitsPerEntry]. */
+function readPaletteDescriptor(
+  dataSet: dicomParser.DataSet,
+  tag: string,
+): [number, number, number] | null {
+  const el = dataSet.elements[tag];
+  if (!el || el.length < 6) return null;
+  const entries = dataSet.uint16(tag, 0);
+  const first = dataSet.uint16(tag, 1);
+  const bits = dataSet.uint16(tag, 2);
+  if (entries === undefined || first === undefined || bits === undefined) return null;
+  return [entries, first, bits];
+}
+
+/** Read a Palette Color LUT Data element (0028,120x) as little-endian 16-bit words. */
+function readLutData(dataSet: dicomParser.DataSet, tag: string): Uint16Array | null {
+  const el = dataSet.elements[tag];
+  if (!el || el.length === 0) return null;
+  const n = el.length >> 1;
+  const bytes = dataSet.byteArray;
+  const view = new DataView(bytes.buffer, bytes.byteOffset + el.dataOffset, n * 2);
+  const out = new Uint16Array(n);
+  for (let i = 0; i < n; i++) out[i] = view.getUint16(i * 2, true);
+  return out;
 }
