@@ -80,7 +80,6 @@ import {
 } from '../../render/window-level';
 import {
   cameraBasis,
-  projectPolyline,
   projectToPane,
   rezoomCameraPan,
   viewBasis,
@@ -107,7 +106,8 @@ import {
   type Vec3,
   type Volume,
 } from '../../dicom/types';
-import { add, cross, normalize, scale } from '../../dicom/vec3';
+import { add, cross, dot, normalize, scale, sub } from '../../dicom/vec3';
+import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
@@ -235,17 +235,16 @@ const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sa
 
 /** Decimation tolerance for coplanar loops, in plane `(u, v)` units (~0.15% of a pane). */
 const CONTOUR_DECIMATE_UV = 0.0015;
-/** Decimation tolerance for 3D contour polylines, in pane pixels. */
-const CONTOUR_DECIMATE_PX = 0.75;
-/** Cap on contour loops drawn per ROI in the 3D pane (evenly spaced through the stack). */
-const MAX_3D_CONTOUR_LOOPS = 64;
+/** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
+const SURFACE_ALPHA = 0.4;
 
-/** All visible ROI contours projected into the 3D pane, for one SVG overlay. */
-interface Contour3dOverlay {
-  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
-  readonly rect: PaneRect;
-  /** The contour shapes drawn over the 3D pane, projected through the orbit camera. */
-  readonly shapes: readonly ContourShape[];
+/** One ROI's 3D surface mesh: triangles in patient mm, coloured by the ROI. */
+interface RoiSurfaceMesh {
+  readonly setIndex: number;
+  readonly roiNumber: number;
+  /** ROI display colour as [r, g, b] in 0–255, for shading. */
+  readonly baseColor: readonly [number, number, number];
+  readonly triangles: readonly Triangle[];
 }
 
 /** One ROI listed in the structures panel, with its display controls. */
@@ -568,6 +567,8 @@ export class Viewer {
   private readonly initialPrefs = this.preferencesStore.preferences();
 
   private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
+  /** The 2D overlay canvas for the 3D ROI surfaces (present only while shown). */
+  private readonly surface3dRef = viewChild<ElementRef<HTMLCanvasElement>>('surface3d');
 
   private readonly renderer = signal<SliceRenderer | null>(null);
   private readonly load = signal<LoadState>({ status: 'idle' });
@@ -1053,58 +1054,36 @@ export class Viewer {
   });
 
   /**
-   * RTSTRUCT ROI contours projected into the 3D pane, mirroring {@link slicePlanes}:
-   * every visible ROI's contour loops are projected point-by-point through the orbit
-   * camera ({@link projectToPane} via {@link projectPolyline}) and drawn as
-   * colour-coded polylines, so they rotate and zoom with the volume. Coloured by ROI
-   * display colour and gated by the same {@link hiddenRois} visibility as the MPR
-   * overlay; the SVG's overflow clips them to the pane rect. Recomputed only from the
-   * camera, structure sets and ROI visibility — never the slice indices or
-   * window/level.
+   * Per-ROI 3D surface meshes, lofted from each ROI's contour stack
+   * ({@link loftContours}) in patient space. The 3D pane draws these as
+   * translucent shaded shells (see {@link drawSurfaces}) instead of a busy stack
+   * of wireframe rings, so the volume stays visible through them. Camera- and
+   * visibility-independent — recomputed only when the structure sets change.
    */
-  protected readonly contours3d = computed<Contour3dOverlay | null>(() => {
-    const volume = this.volume();
+  private readonly surfaceMeshes = computed<RoiSurfaceMesh[]>(() => {
     const sets = this.structureSets();
-    if (!this.isReady() || !volume || sets.length === 0) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!mip || mip.rect.width < 1 || mip.rect.height < 1) return null;
-
-    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
-    const hidden = this.hiddenRois();
-    const overrides = this.roiColorOverrides();
-    const opacities = this.roiOpacities();
-    const selectedSet = this.selectedSetIndex();
-    const shapes: ContourShape[] = [];
+    if (!this.isReady() || sets.length === 0) return [];
+    const meshes: RoiSurfaceMesh[] = [];
     sets.forEach((ss, setIndex) => {
-      if (!setIsShown(selectedSet, setIndex)) return;
       for (const roi of ss.rois) {
-        const key = roiKeyOf(setIndex, roi.number);
-        if (hidden.has(key)) continue;
-        const color = overrides.get(key) ?? rgbColor(roi.color);
-        const opacity = opacities.get(key) ?? 1;
-        // Draw at most MAX_3D_CONTOUR_LOOPS evenly-spaced loops so a deep stack
-        // reads as discrete rings rather than a solid mass (and stays fast to
-        // orbit); decimate each projected loop to drop near-collinear points.
-        const step = Math.max(1, Math.ceil(roi.contours.length / MAX_3D_CONTOUR_LOOPS));
-        for (let ci = 0; ci < roi.contours.length; ci += step) {
-          const contour = roi.contours[ci];
-          if (contour.points.length < 2) continue; // a single POINT can't form a polyline
-          const closed =
-            contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
-          const projected = projectPolyline(
-            basis,
-            contour.points,
-            mip.rect.width,
-            mip.rect.height,
-          ).map((p) => ({ u: p.x, v: p.y }));
-          const simplified = decimate(projected, CONTOUR_DECIMATE_PX);
-          if (simplified.length < 2) continue;
-          const points = simplified.map((p) => `${p.u.toFixed(1)},${p.v.toFixed(1)}`).join(' ');
-          shapes.push({ key: `${setIndex}:${roi.number}:${ci}`, points, closed, color, opacity });
+        const loops = roi.contours
+          .filter((c) => c.geometricType !== 'OPEN_PLANAR' && c.geometricType !== 'POINT')
+          .map((c) => c.points);
+        const triangles = loftContours(loops);
+        if (triangles.length) {
+          const baseColor = roi.color ?? ([200, 200, 200] as const);
+          meshes.push({ setIndex, roiNumber: roi.number, baseColor, triangles });
         }
       }
     });
-    return shapes.length ? { rect: mip.rect, shapes } : null;
+    return meshes;
+  });
+
+  /** The 3D pane's rectangle (CSS px) when there are ROI surfaces to draw, else null. */
+  protected readonly surface3dRect = computed<PaneRect | null>(() => {
+    if (this.surfaceMeshes().length === 0) return null;
+    const mip = this.panes().find((pane) => pane.kind === 'mip');
+    return mip && mip.rect.width >= 1 && mip.rect.height >= 1 ? mip.rect : null;
   });
 
   /**
@@ -1628,6 +1607,8 @@ export class Viewer {
   private cineHandle: ReturnType<typeof setInterval> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
+  /** Handle of the coalesced 3D-surface redraw frame, or null when none is pending. */
+  private surfaceHandle: number | null = null;
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -1684,12 +1665,119 @@ export class Viewer {
       }
     });
 
+    // Redraw the translucent 3D ROI surfaces (a 2D-canvas overlay, drawn
+    // imperatively) whenever the meshes, camera, pane, ROI visibility/colour or
+    // device-pixel ratio change. Coalesced into one frame so an orbit drag — a
+    // stream of camera updates — repaints once per frame.
+    effect(() => {
+      this.surfaceMeshes();
+      this.surface3dRect();
+      this.surface3dRef();
+      this.camera3d();
+      this.hiddenRois();
+      this.roiColorOverrides();
+      this.roiOpacities();
+      this.selectedSetIndex();
+      this.viewport();
+      this.scheduleSurfaceDraw();
+    });
+
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
+      if (this.surfaceHandle !== null) cancelAnimationFrame(this.surfaceHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.cineHandle !== null) clearInterval(this.cineHandle);
     });
+  }
+
+  /** Coalesce surface redraws into a single animation frame. */
+  private scheduleSurfaceDraw(): void {
+    if (this.surfaceHandle !== null) return;
+    this.surfaceHandle = requestAnimationFrame(() => {
+      this.surfaceHandle = null;
+      this.drawSurfaces();
+    });
+  }
+
+  /**
+   * Paint the visible ROI surfaces onto the 3D overlay canvas: project every
+   * triangle through the orbit camera, shade it by its facing to a head-light,
+   * sort back-to-front (painter's algorithm) and alpha-fill. Drawn over — not
+   * depth-composited with — the volume, so the volume shows through the
+   * translucent shells.
+   */
+  private drawSurfaces(): void {
+    const canvas = this.surface3dRef()?.nativeElement;
+    const rect = this.surface3dRect();
+    const volume = this.volume();
+    if (!canvas || !rect || !volume) return;
+
+    const dpr = this.viewport().dpr;
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, w, h);
+
+    const camera = this.camera3d();
+    const basis = cameraBasis(volume, camera, rect.width, rect.height);
+    const light = viewBasis(camera.azimuth, camera.elevation).forward; // head-light into screen
+    const hidden = this.hiddenRois();
+    const overrides = this.roiColorOverrides();
+    const opacities = this.roiOpacities();
+    const selectedSet = this.selectedSetIndex();
+
+    interface Face {
+      readonly depth: number;
+      readonly x0: number;
+      readonly y0: number;
+      readonly x1: number;
+      readonly y1: number;
+      readonly x2: number;
+      readonly y2: number;
+      readonly fill: string;
+    }
+    const faces: Face[] = [];
+    for (const mesh of this.surfaceMeshes()) {
+      if (!setIsShown(selectedSet, mesh.setIndex)) continue;
+      const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
+      if (hidden.has(key)) continue;
+      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
+      const alpha = (opacities.get(key) ?? 1) * SURFACE_ALPHA;
+      if (alpha <= 0) continue;
+
+      for (const tri of mesh.triangles) {
+        const p0 = projectToPane(basis, tri[0]);
+        const p1 = projectToPane(basis, tri[1]);
+        const p2 = projectToPane(basis, tri[2]);
+        const normal = normalize(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])));
+        const shade = 0.45 + 0.55 * Math.abs(dot(normal, light));
+        faces.push({
+          depth: (p0.depth + p1.depth + p2.depth) / 3,
+          x0: p0.u * w,
+          y0: p0.v * h,
+          x1: p1.u * w,
+          y1: p1.v * h,
+          x2: p2.u * w,
+          y2: p2.v * h,
+          fill: `rgba(${Math.round(r * shade)},${Math.round(g * shade)},${Math.round(b * shade)},${alpha})`,
+        });
+      }
+    }
+
+    faces.sort((a, b) => b.depth - a.depth); // far first (painter's algorithm)
+    for (const f of faces) {
+      ctx.beginPath();
+      ctx.moveTo(f.x0, f.y0);
+      ctx.lineTo(f.x1, f.y1);
+      ctx.lineTo(f.x2, f.y2);
+      ctx.closePath();
+      ctx.fillStyle = f.fill;
+      ctx.fill();
+    }
   }
 
   /**
@@ -3374,6 +3462,16 @@ function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): 
 function rgbColor(color: readonly [number, number, number] | null): string {
   if (!color) return 'rgb(200, 200, 200)';
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+/** Parse a `#rrggbb` colour-input value into [r, g, b] (0–255), or null. */
+function parseHexColor(hex: string | undefined): [number, number, number] | null {
+  if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
 }
 
 /**

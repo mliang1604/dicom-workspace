@@ -625,34 +625,18 @@
       </svg>
     }
 
-    <!-- RTSTRUCT ROI contours projected into the 3D pane; rotate with the orbit. -->
-    @if (contours3d(); as c3) {
-      <svg
-        class="contours-3d"
+    <!-- RTSTRUCT ROI surfaces over the 3D pane: translucent shaded shells drawn
+         on a 2D canvas (see drawSurfaces), rotating with the orbit. -->
+    @if (surface3dRect(); as sr) {
+      <canvas
+        #surface3d
+        class="surface-3d"
         aria-hidden="true"
-        [style.left.px]="c3.rect.x"
-        [style.top.px]="c3.rect.y"
-        [attr.width]="c3.rect.width"
-        [attr.height]="c3.rect.height"
-      >
-        @for (shape of c3.shapes; track shape.key) {
-          @if (shape.closed) {
-            <polygon
-              class="contour"
-              [attr.points]="shape.points"
-              [style.stroke]="shape.color"
-              [style.opacity]="shape.opacity"
-            />
-          } @else {
-            <polyline
-              class="contour"
-              [attr.points]="shape.points"
-              [style.stroke]="shape.color"
-              [style.opacity]="shape.opacity"
-            />
-          }
-        }
-      </svg>
+        [style.left.px]="sr.x"
+        [style.top.px]="sr.y"
+        [style.width.px]="sr.width"
+        [style.height.px]="sr.height"
+      ></canvas>
     }
 
     <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->

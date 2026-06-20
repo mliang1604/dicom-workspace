@@ -124,7 +124,7 @@ kbd {
 
 .tool-rail {
   flex: 0 0 auto;
-  width: 220px;
+  width: 248px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -414,10 +414,9 @@ button.active {
   paint-order: stroke;
 }
 
-/* RTSTRUCT ROI contours projected into the 3D pane, clipped to its rectangle. */
-.contours-3d {
+/* RTSTRUCT ROI surfaces: a translucent 2D-canvas overlay on the 3D pane. */
+.surface-3d {
   position: absolute;
-  overflow: hidden;
   pointer-events: none;
 }
 
