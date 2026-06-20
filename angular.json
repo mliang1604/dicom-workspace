@@ -19,7 +19,13 @@
           "options": {
             "browser": "src/main.ts",
             "tsConfig": "tsconfig.app.json",
-            "allowedCommonJsDependencies": ["dicom-parser"],
+            "allowedCommonJsDependencies": [
+              "dicom-parser",
+              "@cornerstonejs/codec-libjpeg-turbo-8bit",
+              "@cornerstonejs/codec-charls",
+              "@cornerstonejs/codec-openjpeg"
+            ],
+            "externalDependencies": ["fs", "path", "crypto"],
             "assets": [
               {
                 "glob": "**/*",

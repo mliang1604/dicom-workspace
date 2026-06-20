@@ -1,5 +1,6 @@
 import * as dicomParser from 'dicom-parser';
 import { decodeRleFrame } from './rle';
+import { decodeWasmFrame, isWasmTransferSyntax } from './wasm-codecs';
 import type { Slice } from './types';
 
 /** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
@@ -59,10 +60,21 @@ interface FileContext {
   readonly modality: string | null;
   /** The PixelData (7FE0,0010) element — the source of encapsulated frames. */
   readonly pixelElement: dicomParser.Element;
-  /** Frame codec for a compressed transfer syntax, or null when uncompressed. */
+  /** Sync (pure-JS) frame codec for a compressed transfer syntax, or null. */
   readonly codec: FrameCodec | null;
+  /** Transfer syntax UID needing an async wasm codec (JPEG/JPEG-LS/JP2K), or null. */
+  readonly wasmTransferSyntax: string | null;
   /** Byte offset of frame 0's first sample within {@link buffer} (uncompressed only). */
   readonly pixelOffset: number;
+}
+
+/** Raw, pre-modality-LUT samples for one frame. */
+type RawFrame = Int16Array | Uint16Array | Uint8Array;
+
+/** What {@link setupFile} resolves from a file: geometry context + frame count. */
+interface FileSetup {
+  readonly ctx: FileContext;
+  readonly frames: number;
 }
 
 /**
@@ -74,33 +86,67 @@ interface FileContext {
  * that carry no grayscale image (DICOMDIR, color secondary capture, non-DICOM).
  */
 export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
+  const setup = setupFile(name, buffer);
+  if (!setup) return [];
+  const { ctx, frames } = setup;
+  if (ctx.wasmTransferSyntax) {
+    throw new UnsupportedDicomError(
+      `Transfer syntax ${ctx.wasmTransferSyntax} requires async decoding; use parseFileAsync (${name}).`,
+    );
+  }
+  const count = ctx.rows * ctx.columns;
+  const raw: RawFrame[] = [];
+  for (let f = 0; f < frames; f++) raw.push(readFrameSamples(ctx, f, count));
+  return assemble(ctx, frames, raw);
+}
+
+/**
+ * Like {@link parseFile}, but also decodes the compressed transfer syntaxes that
+ * need an async wasm codec (JPEG, JPEG-LS, JPEG 2000). Uncompressed and RLE
+ * studies take the same synchronous path and never load a wasm module.
+ */
+export async function parseFileAsync(name: string, buffer: ArrayBuffer): Promise<Slice[]> {
+  const setup = setupFile(name, buffer);
+  if (!setup) return [];
+  const { ctx, frames } = setup;
+  const count = ctx.rows * ctx.columns;
+  const raw: RawFrame[] = [];
+  for (let f = 0; f < frames; f++) raw.push(await readFrameSamplesAsync(ctx, f, count));
+  return assemble(ctx, frames, raw);
+}
+
+/**
+ * Parse a file's metadata and choose its decode path. Returns null for files
+ * that carry no grayscale image; throws {@link UnsupportedDicomError} for a
+ * transfer syntax no codec handles.
+ */
+function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
   const bytes = new Uint8Array(buffer);
   let dataSet: dicomParser.DataSet;
   try {
     dataSet = dicomParser.parseDicom(bytes);
   } catch {
-    return []; // Not a parseable DICOM file.
+    return null; // Not a parseable DICOM file.
   }
 
   const pixelElement = dataSet.elements['x7fe00010'];
-  if (!pixelElement) return []; // No image data (e.g. DICOMDIR).
+  if (!pixelElement) return null; // No image data (e.g. DICOMDIR).
 
   const transferSyntax = dataSet.string('x00020010') ?? '1.2.840.10008.1.2';
   const codec = FRAME_CODECS[transferSyntax] ?? null;
-  if (!codec && !UNCOMPRESSED_LE.has(transferSyntax)) {
-    throw new UnsupportedDicomError(
-      `Compressed transfer syntax ${transferSyntax} is not supported yet (${name}).`,
-    );
+  const wasm = isWasmTransferSyntax(transferSyntax);
+  if (!codec && !wasm && !UNCOMPRESSED_LE.has(transferSyntax)) {
+    throw new UnsupportedDicomError(`Unsupported transfer syntax ${transferSyntax} (${name}).`);
   }
 
   const samplesPerPixel = dataSet.uint16('x00280002') ?? 1;
   if (samplesPerPixel !== 1) {
-    return []; // Color image; out of scope for the grayscale volume viewer.
+    return null; // Color image; out of scope for the grayscale volume viewer.
   }
 
   const rows = dataSet.uint16('x00280010');
   const columns = dataSet.uint16('x00280011');
-  if (!rows || !columns) return [];
+  if (!rows || !columns) return null;
 
   const ctx: FileContext = {
     name,
@@ -116,15 +162,21 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
     modality: dataSet.string('x00080060')?.trim() || null,
     pixelElement,
     codec,
+    wasmTransferSyntax: wasm ? transferSyntax : null,
     pixelOffset: pixelElement.dataOffset,
   };
 
   const frames = Math.floor(num(dataSet, 'x00280008', 1)); // NumberOfFrames
-  return frames > 1 ? parseMultiframe(ctx, frames) : [parseSingleFrame(ctx)];
+  return { ctx, frames };
+}
+
+/** Assemble the decoded raw frames into one Slice per frame. */
+function assemble(ctx: FileContext, frames: number, raw: RawFrame[]): Slice[] {
+  return frames > 1 ? parseMultiframe(ctx, frames, raw) : [parseSingleFrame(ctx, raw[0])];
 }
 
 /** Classic single-frame object: all geometry lives in top-level tags. */
-function parseSingleFrame(ctx: FileContext): Slice {
+function parseSingleFrame(ctx: FileContext, raw: RawFrame): Slice {
   const { dataSet } = ctx;
   const rescaleSlope = num(dataSet, 'x00281053', 1);
   const rescaleIntercept = num(dataSet, 'x00281052', 0);
@@ -145,7 +197,7 @@ function parseSingleFrame(ctx: FileContext): Slice {
     rescaleIntercept,
     windowCenter: readFirstFloat(dataSet, 'x00281050'),
     windowWidth: readFirstFloat(dataSet, 'x00281051'),
-    pixels: readFramePixels(ctx, 0, rescaleSlope, rescaleIntercept),
+    pixels: rescale(raw, rescaleSlope, rescaleIntercept),
   };
 }
 
@@ -154,7 +206,7 @@ function parseSingleFrame(ctx: FileContext): Slice {
  * the Per-Frame Functional Groups Sequence (5200,9230), falling back to the
  * Shared Functional Groups Sequence (5200,9229) and then to top-level tags.
  */
-function parseMultiframe(ctx: FileContext, frames: number): Slice[] {
+function parseMultiframe(ctx: FileContext, frames: number, raw: RawFrame[]): Slice[] {
   const { dataSet } = ctx;
   const shared = firstItem(dataSet, 'x52009229');
   const perFrameSeq = dataSet.elements['x52009230'];
@@ -192,7 +244,7 @@ function parseMultiframe(ctx: FileContext, frames: number): Slice[] {
       // Frame VOI LUT Sequence (0028,9132) -> Window Center/Width.
       windowCenter: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281050')),
       windowWidth: readGroupValue(groups, 'x00289132', (ds) => readFirstFloat(ds, 'x00281051')),
-      pixels: readFramePixels(ctx, f, rescaleSlope, rescaleIntercept),
+      pixels: rescale(raw[f], rescaleSlope, rescaleIntercept),
     });
   }
   return slices;
@@ -238,29 +290,17 @@ function firstItem(
   return dataSet?.elements[seqTag]?.items?.[0]?.dataSet ?? null;
 }
 
-/** Read one frame's samples and apply the modality LUT into real units. */
-function readFramePixels(
-  ctx: FileContext,
-  frameIndex: number,
-  rescaleSlope: number,
-  rescaleIntercept: number,
-): Float32Array {
-  const count = ctx.rows * ctx.columns;
-  const raw = readFrameSamples(ctx, frameIndex, count);
-
-  const pixels = new Float32Array(count);
-  for (let i = 0; i < count; i++) {
+/** Apply the modality LUT (raw * slope + intercept) into real units. */
+function rescale(raw: RawFrame, rescaleSlope: number, rescaleIntercept: number): Float32Array {
+  const pixels = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
     pixels[i] = raw[i] * rescaleSlope + rescaleIntercept;
   }
   return pixels;
 }
 
-/** Read one frame's raw samples, decoding through the codec when compressed. */
-function readFrameSamples(
-  ctx: FileContext,
-  frameIndex: number,
-  count: number,
-): Int16Array | Uint16Array | Uint8Array {
+/** Read one frame's raw samples synchronously (uncompressed or pure-JS codec). */
+function readFrameSamples(ctx: FileContext, frameIndex: number, count: number): RawFrame {
   if (ctx.codec) {
     const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
     return ctx.codec(frame, count, ctx.bitsAllocated, ctx.pixelRepresentation);
@@ -268,6 +308,37 @@ function readFrameSamples(
   const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
   const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
   return readRawPixels(ctx.buffer, offset, count, ctx.bitsAllocated, ctx.pixelRepresentation);
+}
+
+/** Read one frame's raw samples, awaiting a wasm codec for compressed syntaxes. */
+async function readFrameSamplesAsync(
+  ctx: FileContext,
+  frameIndex: number,
+  count: number,
+): Promise<RawFrame> {
+  if (!ctx.wasmTransferSyntax) return readFrameSamples(ctx, frameIndex, count);
+  const frame = encapsulatedFrame(ctx.dataSet, ctx.pixelElement, frameIndex);
+  const decoded = await decodeWasmFrame(ctx.wasmTransferSyntax, frame);
+  return reinterpretSamples(decoded.bytes, ctx.bitsAllocated, ctx.pixelRepresentation);
+}
+
+/** Interpret wasm-decoded bytes as 8- or 16-bit samples per the DICOM header. */
+function reinterpretSamples(
+  bytes: Uint8Array,
+  bitsAllocated: number,
+  pixelRepresentation: number,
+): RawFrame {
+  if (bitsAllocated <= 8) return bytes;
+  const count = bytes.length >> 1;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  if (pixelRepresentation === 1) {
+    const out = new Int16Array(count);
+    for (let i = 0; i < count; i++) out[i] = view.getInt16(i * 2, true);
+    return out;
+  }
+  const out = new Uint16Array(count);
+  for (let i = 0; i < count; i++) out[i] = view.getUint16(i * 2, true);
+  return out;
 }
 
 /**
