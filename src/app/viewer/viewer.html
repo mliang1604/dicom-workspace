@@ -227,6 +227,32 @@
       </div>
     </details>
 
+    @if (hasStructures()) {
+      <details
+        class="tool-group"
+        role="group"
+        aria-label="Structure set ROIs"
+        title="Show or hide each RTSTRUCT region of interest"
+        open
+      >
+        <summary class="tool-group-label">Structures</summary>
+        <div class="tool-group-body roi-legend">
+          @for (roi of roiLegend(); track roi.key) {
+            <label class="roi-item" [title]="roi.name">
+              <input
+                type="checkbox"
+                [checked]="roi.visible"
+                (change)="toggleRoi(roi.key)"
+                [attr.aria-label]="roi.name"
+              />
+              <span class="roi-swatch" [style.background]="roi.color"></span>
+              <span class="roi-name">{{ roi.name }}</span>
+            </label>
+          }
+        </div>
+      </details>
+    }
+
     <details class="tool-group" open>
       <summary class="tool-group-label">Cine</summary>
       <div class="tool-group-body">
@@ -425,6 +451,26 @@
         </div>
       }
     </div>
+
+    <!-- RTSTRUCT ROI contours: one SVG per MPR pane, clipped to its rectangle. -->
+    @for (overlay of contourOverlays(); track overlay.key) {
+      <svg
+        class="contours"
+        aria-hidden="true"
+        [style.left.px]="overlay.rect.x"
+        [style.top.px]="overlay.rect.y"
+        [attr.width]="overlay.rect.width"
+        [attr.height]="overlay.rect.height"
+      >
+        @for (shape of overlay.shapes; track shape.key) {
+          @if (shape.closed) {
+            <polygon class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+          } @else {
+            <polyline class="contour" [attr.points]="shape.points" [style.stroke]="shape.color" />
+          }
+        }
+      </svg>
+    }
 
     <!-- Linked crosshairs at the shared focus voxel, one per MPR pane. -->
     <div class="pane-overlay">

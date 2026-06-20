@@ -394,6 +394,49 @@ button.active {
   stroke-width: 3px;
 }
 
+/* RTSTRUCT ROI contours overlaid on an MPR pane, clipped to its rectangle. */
+.contours {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.contour {
+  fill: none;
+  stroke-width: 1.5;
+  /* The stroke colour comes from each ROI's display colour, set inline. */
+  paint-order: stroke;
+}
+
+/* Structures legend: a compact list of ROI visibility toggles in the toolbar. */
+.roi-legend {
+  flex-direction: column;
+  align-items: stretch;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.roi-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.roi-swatch {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+}
+
+.roi-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
 .slice-planes {
   position: absolute;
