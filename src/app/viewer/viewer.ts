@@ -68,6 +68,7 @@ import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
+import { PreferencesStore } from '../preferences-store';
 import { readDropped } from './drop-files';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
@@ -337,7 +338,10 @@ const MIP_SETTLE_MS = 200;
 export class Viewer {
   private readonly loader = inject(VolumeLoader);
   private readonly recentStore = inject(RecentStore);
+  private readonly preferencesStore = inject(PreferencesStore);
   private readonly destroyRef = inject(DestroyRef);
+  /** Preferences restored at startup; seed the view signals and per-load defaults. */
+  private readonly initialPrefs = this.preferencesStore.preferences();
 
   private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
 
@@ -354,7 +358,7 @@ export class Viewer {
   /** Orbit/zoom state of the 3D MIP pane. */
   private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
   /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
-  protected readonly projectionMode = signal<ProjectionMode>(ProjectionMode.Max);
+  protected readonly projectionMode = signal<ProjectionMode>(this.initialPrefs.projectionMode);
   /** Transfer-function preset used when the 3D pane is in DVR mode. */
   protected readonly transferFunction = signal<TransferFunctionPreset>(
     TransferFunctionPreset.CtBone,
@@ -393,7 +397,7 @@ export class Viewer {
   protected readonly isPanning = computed(() => this.drag() !== null);
   protected readonly mainOrientation = signal<Orientation>(Orientation.Axial);
   /** When true, the sagittal view is mirrored so anterior sits on the right. */
-  protected readonly sagittalFlipped = signal(false);
+  protected readonly sagittalFlipped = signal(this.initialPrefs.sagittalFlipped);
   /** Shared focus voxel set by Shift+click, navigated to in every pane; null until set. */
   private readonly focusVoxel = signal<readonly [number, number, number] | null>(null);
   /** When true (default), draw the linked crosshair at the focus voxel in each MPR pane. */
@@ -480,7 +484,7 @@ export class Viewer {
   });
 
   /** The selected viewport layout; defaults to the classic 3-pane MPR (1+2) view. */
-  protected readonly layoutMode = signal<LayoutMode>(LayoutMode.TriMpr);
+  protected readonly layoutMode = signal<LayoutMode>(this.initialPrefs.layoutMode);
   /** The layout options the cycle button steps through, in display order. */
   protected readonly layoutModes = [
     { value: LayoutMode.TriMpr, label: '3-pane MPR' },
@@ -872,6 +876,23 @@ export class Viewer {
             },
       );
       this.scheduleFrame();
+    });
+
+    // Mirror the curated view preferences into persistent storage whenever they
+    // change. Gated on a loaded volume so the window/level and slab — which only
+    // become meaningful once a volume is shown — never persist their placeholder
+    // pre-load values. The store skips redundant writes, so re-running this on an
+    // unrelated change (or during a drag that lands on the same values) is cheap.
+    effect(() => {
+      if (!this.isReady()) return;
+      this.preferencesStore.update({
+        layoutMode: this.layoutMode(),
+        projectionMode: this.projectionMode(),
+        sagittalFlipped: this.sagittalFlipped(),
+        windowCenter: this.windowCenter(),
+        windowWidth: this.windowWidth(),
+        slabThicknessMm: this.slabThicknessMm(),
+      });
     });
 
     this.destroyRef.onDestroy(() => {
@@ -1796,24 +1817,29 @@ export class Viewer {
     }
     this.stopCine(); // a fresh volume resets the view; don't keep cining the old one
     renderer.setVolume(result.volume);
-    this.windowCenter.set(Math.round(result.volume.windowCenter));
-    this.windowWidth.set(Math.round(result.volume.windowWidth));
-    this.layoutMode.set(LayoutMode.TriMpr);
+    // Persisted view preferences (layout, projection mode, sagittal flip) are kept
+    // across loads, so they aren't reset here — the signals already hold them.
+    // Window/level and slab thickness depend on the volume, so honour a stored
+    // preference when present, else fall back to the volume's own default.
+    const prefs = this.preferencesStore.preferences();
+    const fullDepthMm = Math.round(2 * volumeBounds(result.volume).radius);
+    this.windowCenter.set(prefs.windowCenter ?? Math.round(result.volume.windowCenter));
+    this.windowWidth.set(prefs.windowWidth ?? Math.max(1, Math.round(result.volume.windowWidth)));
+    this.slabThicknessMm.set(
+      prefs.slabThicknessMm !== null ? clamp(prefs.slabThicknessMm, 1, fullDepthMm) : fullDepthMm,
+    );
     this.mainOrientation.set(Orientation.Axial);
-    this.sagittalFlipped.set(false);
     this.focusVoxel.set(null);
     this.activeTool.set('none');
     this.measurements.set([]);
     this.pending.set(null);
     this.measureDrag.set(null);
+    // Per-volume view state is per-session: always reset to volume-derived defaults.
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     this.camera3d.set(DEFAULT_CAMERA);
-    // Reset the 3D pane to the default MIP over the whole volume, like the camera.
-    this.projectionMode.set(ProjectionMode.Max);
     this.transferFunction.set(TransferFunctionPreset.CtBone);
     this.clipToPlanes.set(false);
-    this.slabThicknessMm.set(Math.round(2 * volumeBounds(result.volume).radius));
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),
