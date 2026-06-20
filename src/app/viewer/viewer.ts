@@ -1619,8 +1619,6 @@ export class Viewer {
   private cineHandle: ReturnType<typeof setInterval> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
-  /** Handle of the coalesced 3D-surface redraw frame, or null when none is pending. */
-  private surfaceHandle: number | null = null;
   /** Reusable per-frame scratch for {@link drawSurfaces}, grown as needed (no per-frame alloc). */
   private surfBuf: {
     coords: Float32Array; // 6 per triangle: x0,y0,x1,y1,x2,y2
@@ -1699,27 +1697,18 @@ export class Viewer {
       this.roiOpacities();
       this.selectedSetIndex();
       this.viewport();
-      this.scheduleSurfaceDraw();
+      this.scheduleFrame();
     });
 
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
-      if (this.surfaceHandle !== null) cancelAnimationFrame(this.surfaceHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.cineHandle !== null) clearInterval(this.cineHandle);
     });
   }
 
   /** Coalesce surface redraws into a single animation frame. */
-  private scheduleSurfaceDraw(): void {
-    if (this.surfaceHandle !== null) return;
-    this.surfaceHandle = requestAnimationFrame(() => {
-      this.surfaceHandle = null;
-      this.drawSurfaces();
-    });
-  }
-
   /**
    * Paint the visible ROI surfaces onto the 3D overlay canvas: project every
    * triangle through the orbit camera, shade it by its facing to a head-light,
@@ -1933,6 +1922,9 @@ export class Viewer {
       const renderer = this.renderer();
       const views = this.pendingViews;
       if (renderer && views) renderer.renderPanes(views);
+      // Draw the 3D ROI surfaces in the same frame as the volume, so they don't
+      // present a frame apart from the anatomy (which reads as lag while panning).
+      this.drawSurfaces();
     });
   }
 
