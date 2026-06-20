@@ -2269,7 +2269,14 @@ export class Viewer {
     this.drag.set(null);
   }
 
-  protected onPointerLeave(): void {
+  protected onPointerLeave(event: PointerEvent): void {
+    // Moving the cursor onto an in-pane overlay handle (the oblique tilt knob, a
+    // measurement handle) makes the canvas fire pointerleave even though the
+    // pointer hasn't really left the panes. Clearing the hovered pane here would
+    // unmount the at-rest oblique knob the instant it's hovered — leaving nothing
+    // under the press, so the knob can't be grabbed. Keep the hover in that case.
+    const related = event.relatedTarget as Element | null;
+    if (related?.closest?.('.oblique-knob, .measure-handle')) return;
     this.cursor.set(null);
     this.hoveredKey.set(null);
   }
