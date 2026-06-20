@@ -14,14 +14,28 @@
   <button type="button" (click)="filesInput.click()">Open files…</button>
   <input #filesInput type="file" multiple hidden (change)="onFilesSelected($event)" />
 
-  <button type="button" (click)="swapMain()" [disabled]="!isReady()" title="Swap main view (X)">
+  <button
+    type="button"
+    (click)="cycleLayout()"
+    [disabled]="!isReady()"
+    title="Cycle the viewport layout: 3-pane MPR, 4-pane, 3D-only (L)"
+  >
+    Layout ▦ <kbd>L</kbd> {{ layoutLabel() }}
+  </button>
+
+  <button
+    type="button"
+    (click)="swapMain()"
+    [disabled]="!isReady() || !hasMprPane()"
+    title="Swap main view (X)"
+  >
     Swap main ⟲ <kbd>X</kbd>
   </button>
 
   <button
     type="button"
     (click)="toggleSagittalFlip()"
-    [disabled]="!isReady()"
+    [disabled]="!isReady() || !hasMprPane()"
     title="Flip the sagittal view between anterior-left and anterior-right (F)"
   >
     Flip sagittal ⇄ <kbd>F</kbd> {{ sagittalFlipped() ? 'A▸' : '◂A' }}
@@ -54,7 +68,7 @@
     <select
       [value]="projectionMode()"
       (change)="onProjectionModeChange($event)"
-      [disabled]="!isReady()"
+      [disabled]="!isReady() || !has3dPane()"
     >
       @for (mode of projectionModes; track mode.value) {
         <option [value]="mode.value">{{ mode.label }}</option>
@@ -68,7 +82,7 @@
       <select
         [value]="transferFunction()"
         (change)="onTransferFunctionChange($event)"
-        [disabled]="!isReady()"
+        [disabled]="!isReady() || !has3dPane()"
       >
         @for (tf of transferFunctions; track tf.preset) {
           <option [value]="tf.preset">{{ tf.label }}</option>
@@ -85,7 +99,7 @@
         [max]="slabMaxMm()"
         [value]="slabThicknessMm()"
         (input)="onSlabThicknessInput($event)"
-        [disabled]="!isReady()"
+        [disabled]="!isReady() || !has3dPane()"
       />
     </label>
   }
@@ -93,7 +107,7 @@
   <button
     type="button"
     (click)="toggleClipToPlanes()"
-    [disabled]="!isReady()"
+    [disabled]="!isReady() || !has3dPane()"
     [class.active]="clipToPlanes()"
     title="Clip the 3D pane to the MPR slice planes for a cut-away view"
   >

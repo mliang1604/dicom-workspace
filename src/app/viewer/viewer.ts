@@ -11,7 +11,15 @@ import {
   viewChild,
 } from '@angular/core';
 import { initWebGpu, type GpuContext } from '../../render/device';
-import { mprLayout, scaleRect, type PaneRect, type Vec2 } from '../../render/layout';
+import {
+  LayoutMode,
+  mprLayout,
+  scaleRect,
+  singleLayout,
+  triLayout,
+  type PaneRect,
+  type Vec2,
+} from '../../render/layout';
 import {
   clampPan,
   defaultSlabThicknessMm,
@@ -190,6 +198,7 @@ const MIP_SETTLE_MS = 200;
     '(window:keydown.x)': 'onSwapKey($event)',
     '(window:keydown.f)': 'onFlipKey($event)',
     '(window:keydown.c)': 'onCrosshairKey($event)',
+    '(window:keydown.l)': 'onLayoutKey($event)',
   },
 })
 export class Viewer {
@@ -272,11 +281,29 @@ export class Viewer {
     () => this.load().status === 'ready' && this.renderer() !== null,
   );
 
+  /** The selected viewport layout; defaults to the classic 3-pane MPR (1+2) view. */
+  protected readonly layoutMode = signal<LayoutMode>(LayoutMode.TriMpr);
+  /** The layout options the cycle button steps through, in display order. */
+  protected readonly layoutModes = [
+    { value: LayoutMode.TriMpr, label: '3-pane MPR' },
+    { value: LayoutMode.Quad, label: '4-pane' },
+    { value: LayoutMode.Volume3d, label: '3D only' },
+  ] as const;
+  /** Human label for the current layout, shown on the cycle button. */
+  protected readonly layoutLabel = computed(
+    () => this.layoutModes.find((m) => m.value === this.layoutMode())?.label ?? '',
+  );
+
   /** Pane placements in CSS pixels, for the label overlay. */
   protected readonly panes = computed<PanePlacement[]>(() => {
     const { width, height } = this.viewport();
-    return placePanes(mprLayout(width, height), this.mainOrientation());
+    return placePanes(this.layoutMode(), width, height, this.mainOrientation());
   });
+
+  /** Whether the current layout includes the 3D pane (drives 3D-control enablement). */
+  protected readonly has3dPane = computed(() => this.panes().some((pane) => pane.kind === 'mip'));
+  /** Whether the current layout includes any MPR pane (drives swap/flip enablement). */
+  protected readonly hasMprPane = computed(() => this.panes().some((pane) => pane.kind === 'mpr'));
 
   /**
    * Linked crosshairs to overlay: the shared focus voxel projected into every MPR
@@ -561,6 +588,20 @@ export class Viewer {
     const renderer = this.renderer();
     const count = renderer ? renderer.sliceCount(orientation) : 0;
     return count > 0 ? `${this.sliceIndices()[orientation] + 1} / ${count}` : '–';
+  }
+
+  /** Step the viewport to the next layout (3-pane → 4-pane → 3D-only → …). */
+  protected cycleLayout(): void {
+    this.layoutMode.update((mode) => {
+      const i = this.layoutModes.findIndex((m) => m.value === mode);
+      return this.layoutModes[(i + 1) % this.layoutModes.length].value;
+    });
+  }
+
+  protected onLayoutKey(event: Event): void {
+    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
+    event.preventDefault();
+    this.cycleLayout();
   }
 
   protected swapMain(): void {
@@ -984,6 +1025,7 @@ export class Viewer {
     renderer.setVolume(result.volume);
     this.windowCenter.set(Math.round(result.volume.windowCenter));
     this.windowWidth.set(Math.round(result.volume.windowWidth));
+    this.layoutMode.set(LayoutMode.TriMpr);
     this.mainOrientation.set(Orientation.Axial);
     this.sagittalFlipped.set(false);
     this.focusVoxel.set(null);
@@ -1025,18 +1067,45 @@ export class Viewer {
 }
 
 /**
- * Lay out the four panes of the 2×2 grid: the three MPR orientations fill the
- * top-left (the "main", cycled by swap), top-right and bottom-left cells, and the
- * 3D MIP occupies the bottom-right cell.
+ * Build the pane set for the chosen {@link LayoutMode}, in CSS pixels:
+ * - `TriMpr`: the 1+2 arrangement — a tall main MPR pane (cycled by swap) with the
+ *   other two orientations stacked on the right; no 3D pane.
+ * - `Quad`: the 2×2 grid — the three MPR orientations plus the 3D MIP pane.
+ * - `Volume3d`: the 3D MIP pane filling the whole viewport.
+ * The two side orientations follow `ORIENTATION_ORDER`, skipping the main one.
  */
-function placePanes(layout: ReturnType<typeof mprLayout>, main: Orientation): PanePlacement[] {
+function placePanes(
+  mode: LayoutMode,
+  width: number,
+  height: number,
+  main: Orientation,
+): PanePlacement[] {
   const sides = ORIENTATION_ORDER.filter((orientation) => orientation !== main);
-  return [
-    { kind: 'mpr', orientation: main, rect: layout.topLeft },
-    { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
-    { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft },
-    { kind: 'mip', rect: layout.bottomRight },
-  ];
+  switch (mode) {
+    case LayoutMode.TriMpr: {
+      const layout = triLayout(width, height);
+      return [
+        { kind: 'mpr', orientation: main, rect: layout.main },
+        { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
+        { kind: 'mpr', orientation: sides[1], rect: layout.bottomRight },
+      ];
+    }
+    case LayoutMode.Quad: {
+      const layout = mprLayout(width, height);
+      return [
+        { kind: 'mpr', orientation: main, rect: layout.topLeft },
+        { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
+        { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft },
+        { kind: 'mip', rect: layout.bottomRight },
+      ];
+    }
+    case LayoutMode.Volume3d:
+      return [{ kind: 'mip', rect: singleLayout(width, height) }];
+    default: {
+      const exhaustive: never = mode;
+      return exhaustive;
+    }
+  }
 }
 
 /** The pane containing CSS-pixel point (x, y), or null. */
