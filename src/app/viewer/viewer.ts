@@ -89,10 +89,13 @@ import { axisMarkers } from '../../render/axis-indicator';
 import { pickProjection } from '../../render/pick';
 import { probeVoxel, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
+import { contourOnPlane } from '../../render/contours';
 import {
   modalityUnit,
   Orientation,
   type MissingSlices,
+  type Roi,
+  type StructureSet,
   type Vec3,
   type Volume,
 } from '../../dicom/types';
@@ -174,6 +177,40 @@ interface ClipPlaneGizmo {
   /** CSS pixels the handle moves per mm of offset along the normal: the drag axis. */
   readonly axisX: number;
   readonly axisY: number;
+}
+
+/** One ROI contour shape projected into a pane, in pane-local pixels. */
+interface ContourShape {
+  /** Stable key for the `@for` track (ROI + contour + sub-polyline indices). */
+  readonly key: string;
+  /** SVG `points` in pane-local pixels (origin at the pane's top-left). */
+  readonly points: string;
+  /** Whether to close the loop: a coplanar `CLOSED_PLANAR` contour (a `<polygon>`). */
+  readonly closed: boolean;
+  /** Stroke colour, the ROI's display colour as a CSS `rgb()`. */
+  readonly color: string;
+}
+
+/** All visible ROI contours projected onto one MPR pane, for one SVG overlay. */
+interface ContourPaneOverlay {
+  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
+  readonly key: string;
+  /** The pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  /** The contour shapes drawn on this pane. */
+  readonly shapes: readonly ContourShape[];
+}
+
+/** One ROI listed in the structures legend, with its visibility toggle. */
+interface RoiLegendEntry {
+  /** Stable key, unique across structure sets (see {@link Viewer.roiKey}). */
+  readonly key: string;
+  /** ROI Name, or a fallback when the RTSTRUCT left it blank. */
+  readonly name: string;
+  /** Display colour as a CSS `rgb()` for the swatch. */
+  readonly color: string;
+  /** Whether the ROI's contours are currently drawn. */
+  readonly visible: boolean;
 }
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
@@ -685,6 +722,12 @@ export class Viewer {
   protected readonly hasMeasurements = computed(
     () => this.measurements().length > 0 || this.pending() !== null,
   );
+  /**
+   * Keys of ROIs whose contours are hidden (see {@link roiKey}). Empty by default,
+   * so a freshly loaded structure set shows every ROI; the structures legend
+   * toggles entries in and out. Reset on each load (stale keys never match).
+   */
+  private readonly hiddenRois = signal<ReadonlySet<string>>(new Set());
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
   /** True while files are being dragged over the viewport, for the drop overlay. */
@@ -1150,6 +1193,114 @@ export class Viewer {
     return result;
   });
 
+  /** Structure sets (RTSTRUCT) annotating the displayed series; empty when none. */
+  private readonly structureSets = computed<readonly StructureSet[]>(() => {
+    const state = this.load();
+    return state.status === 'ready' ? state.result.structureSets : [];
+  });
+
+  /** Whether any structure set annotates the displayed series (gates the legend). */
+  protected readonly hasStructures = computed(() => this.structureSets().length > 0);
+
+  /**
+   * The ROIs of every structure set on the displayed series, flattened for the
+   * legend: each with a stable key, name, swatch colour, and current visibility.
+   * Recomputed only from the structure sets and the hidden-ROI set.
+   */
+  protected readonly roiLegend = computed<RoiLegendEntry[]>(() => {
+    const hidden = this.hiddenRois();
+    const entries: RoiLegendEntry[] = [];
+    this.structureSets().forEach((ss, setIndex) => {
+      for (const roi of ss.rois) {
+        if (roi.contours.length === 0) continue; // nothing to draw or toggle
+        const key = this.roiKey(setIndex, roi);
+        entries.push({
+          key,
+          name: roi.name || `ROI ${roi.number}`,
+          color: rgbColor(roi.color),
+          visible: !hidden.has(key),
+        });
+      }
+    });
+    return entries;
+  });
+
+  /**
+   * RTSTRUCT ROI contours projected onto each MPR pane for the SVG overlay,
+   * mirroring {@link measurementOverlays}. Every visible ROI's contours run
+   * through {@link contourOnPlane} — drawn as a closed loop on the slice they lie
+   * in, or as cross-section segments where they cut an orthogonal/oblique pane —
+   * then projected to pane pixels with {@link planePointToPane}, the same forward
+   * map the measurements and crosshair use, so the contours track pan, zoom,
+   * scroll, oblique tilt and the sagittal flip. Recomputed only from the panes,
+   * zoom, pan, flip, slice, oblique and ROI-visibility state — never the
+   * window/level or 3D camera.
+   */
+  protected readonly contourOverlays = computed<ContourPaneOverlay[]>(() => {
+    const volume = this.volume();
+    const sets = this.structureSets();
+    if (!this.isReady() || !volume || sets.length === 0) return [];
+
+    const zooms = this.zooms();
+    const pans = this.pans();
+    const obliques = this.obliques();
+    const flipped = this.sagittalFlipped();
+    const indices = this.sliceIndices();
+    const hidden = this.hiddenRois();
+
+    const result: ContourPaneOverlay[] = [];
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const orientation = pane.orientation;
+      const rect = pane.rect;
+      if (rect.width < 1 || rect.height < 1) continue;
+      const flipX = orientation === Orientation.Sagittal && flipped;
+      const zoom = zooms[orientation];
+      const pan = pans[orientation];
+      const sliceIndex = indices[orientation];
+      const rotation = obliques[orientation];
+
+      const shapes: ContourShape[] = [];
+      sets.forEach((ss, setIndex) => {
+        for (const roi of ss.rois) {
+          if (hidden.has(this.roiKey(setIndex, roi))) continue;
+          const color = rgbColor(roi.color);
+          for (let ci = 0; ci < roi.contours.length; ci++) {
+            const contour = roi.contours[ci];
+            const closed =
+              contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
+            const polylines = contourOnPlane(
+              volume,
+              orientation,
+              sliceIndex,
+              contour.points,
+              closed,
+              rotation,
+            );
+            for (let pi = 0; pi < polylines.length; pi++) {
+              const polyline = polylines[pi];
+              const pixels: string[] = [];
+              for (const point of polyline.points) {
+                const screen = planePointToPane(volume, orientation, point, zoom, rect, flipX, pan);
+                if (!screen) break;
+                pixels.push(`${(screen.x - rect.x).toFixed(1)},${(screen.y - rect.y).toFixed(1)}`);
+              }
+              if (pixels.length < 2) continue;
+              shapes.push({
+                key: `${setIndex}:${roi.number}:${ci}:${pi}`,
+                points: pixels.join(' '),
+                closed: polyline.closed,
+                color,
+              });
+            }
+          }
+        }
+      });
+      if (shapes.length) result.push({ key: this.paneKey(pane), rect, shapes });
+    }
+    return result;
+  });
+
   protected readonly statusIsError = computed(
     () => this.gpuError() !== null || this.load().status === 'error',
   );
@@ -1421,6 +1572,24 @@ export class Viewer {
   /** Stable identity for a placement, used for `@for` tracking and hover state. */
   protected paneKey(pane: PanePlacement): string {
     return pane.kind === 'mip' ? 'mip' : `mpr-${pane.orientation}`;
+  }
+
+  /**
+   * Stable identity for an ROI across the loaded structure sets, used by the
+   * legend and the contour overlay to share one visibility state. Qualified by
+   * the structure set's index so equal ROI Numbers in two sets don't collide.
+   */
+  protected roiKey(setIndex: number, roi: Roi): string {
+    return `${setIndex}:${roi.number}`;
+  }
+
+  /** Show or hide one ROI's contours, from the structures legend checkbox. */
+  protected toggleRoi(key: string): void {
+    this.hiddenRois.update((hidden) => {
+      const next = new Set(hidden);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   }
 
   protected paneSliceLabel(orientation: Orientation): string {
@@ -2757,6 +2926,7 @@ export class Viewer {
     this.measurements.set([]);
     this.pending.set(null);
     this.measureDrag.set(null);
+    this.hiddenRois.set(new Set()); // a fresh structure set starts fully visible
     // Per-volume view state is per-session: always reset to volume-derived defaults.
     this.invert.set(false);
     this.zooms.set([1, 1, 1]);
@@ -2938,6 +3108,15 @@ function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): 
     lines.push(`min ${formatValue(stats.min)} · max ${formatValue(stats.max)}`);
   }
   return lines;
+}
+
+/**
+ * An ROI Display Color as a CSS `rgb()` string, falling back to a neutral grey
+ * when the RTSTRUCT omitted the colour (3006,002A).
+ */
+function rgbColor(color: readonly [number, number, number] | null): string {
+  if (!color) return 'rgb(200, 200, 200)';
+  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
 }
 
 /** Immutably replace the element at `index` of a readonly array. */
