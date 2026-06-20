@@ -1,11 +1,13 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
-import { dot } from '../dicom/vec3';
+import { dot, sub } from '../dicom/vec3';
 import {
+  clipPlaneTex,
   clipTRange,
   orientTowardRay,
   planeExtentMm,
   planePixelDims,
   planeToTex,
+  patientToTexMatrix,
   slabTRange,
   sliceClipPlaneTex,
   sliceCountFor,
@@ -13,6 +15,7 @@ import {
   texCoordAt,
   viewClipHalfSpaces,
   type HalfSpace,
+  type PatientPlane,
   type VolumeBounds,
 } from './reslice';
 
@@ -188,6 +191,70 @@ describe('sliceClipPlaneTex', () => {
     // slicePos₀ = (1 + 0.5) / 4 = 0.375 along +x.
     expectVec(plane.normal, [1, 0, 0]);
     expect(plane.offset).toBeCloseTo(-0.375, 6);
+  });
+});
+
+describe('clipPlaneTex', () => {
+  // A permuted, non-unit geometry so the Bᵀ transform — not just an axis swap —
+  // is exercised: a clip plane's coefficients don't transform like a direction.
+  const geometry: VolumeGeometry = {
+    iStep: [0, 2, 0],
+    jStep: [0, 0, -1],
+    kStep: [3, 0, 0],
+    origin: [5, 6, 7],
+  };
+  const volume = makeVolume([4, 5, 6], geometry);
+  const m = patientToTexMatrix(volume);
+
+  // Texture coordinate of a patient point via the column-major affine.
+  const toTex = (p: Vec3): Vec3 => [
+    m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+    m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+  ];
+
+  it('matches the patient-space signed distance dot(normal, p − point) in texture space', () => {
+    const plane: PatientPlane = { point: [6, 7, 9], normal: [0.3, -0.5, 0.8] };
+    const hs = clipPlaneTex(volume, plane);
+    const points: Vec3[] = [
+      [5, 6, 7],
+      [8, 9, 12],
+      [6, 7, 9],
+      [10, 4, 8],
+    ];
+    for (const p of points) {
+      const valueTex = dot(hs.normal, toTex(p)) + hs.offset;
+      const valuePatient = dot(plane.normal, sub(p, plane.point));
+      expect(valueTex).toBeCloseTo(valuePatient, 6);
+    }
+  });
+
+  it('keeps the half-space the normal points into', () => {
+    const plane: PatientPlane = { point: [7, 7, 9], normal: [1, 0, 0] };
+    const hs = clipPlaneTex(volume, plane);
+    expect(dot(hs.normal, toTex([9, 7, 9])) + hs.offset).toBeGreaterThan(0); // +normal side kept
+    expect(dot(hs.normal, toTex([5, 7, 9])) + hs.offset).toBeLessThan(0); // −normal side clipped
+  });
+
+  it('clips a march to where the plane cuts the ray, via clipTRange', () => {
+    // Identity volume so the t-range is easy to reason about: a ray straight up +z.
+    const id = makeVolume([4, 4, 4]);
+    const plane: PatientPlane = { point: [1.5, 1.5, 1.5], normal: [0, 0, 1] }; // keep z ≥ 1.5 mm
+    const hs = clipPlaneTex(id, plane);
+    const ro: Vec3 = [0.5, 0.5, 0]; // tex-space ray up the central column, entering at z = 0
+    const rd: Vec3 = [0, 0, 1];
+    // The plane sits at tex.z = (1.5 + 0.5) / 4 = 0.5, so the kept entry is t = 0.5.
+    const [lo, hi] = clipTRange([hs], ro, rd, 0, 1);
+    expect(lo).toBeCloseTo(0.5, 6);
+    expect(hi).toBeCloseTo(1, 6);
+  });
+
+  it('flips which half is kept when the normal is negated', () => {
+    const id = makeVolume([4, 4, 4]);
+    const hs = clipPlaneTex(id, { point: [1.5, 1.5, 1.5], normal: [0, 0, -1] }); // keep z ≤ 1.5 mm
+    const [lo, hi] = clipTRange([hs], [0.5, 0.5, 0], [0, 0, 1], 0, 1);
+    expect(lo).toBeCloseTo(0, 6);
+    expect(hi).toBeCloseTo(0.5, 6);
   });
 });
 

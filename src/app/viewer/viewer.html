@@ -262,6 +262,27 @@
     Cut-away ⌧ {{ clipToPlanes() ? 'on' : 'off' }}
   </button>
 
+  <button
+    type="button"
+    (click)="toggleClipPlane()"
+    [disabled]="!isReady() || !has3dPane()"
+    [class.active]="clipPlaneEnabled()"
+    title="Clip the 3D pane to a draggable plane; drag the handle to slice through the volume"
+  >
+    Clip plane ▢ {{ clipPlaneEnabled() ? 'on' : 'off' }}
+  </button>
+
+  @if (clipPlaneEnabled()) {
+    <button
+      type="button"
+      (click)="resetClipPlane()"
+      [disabled]="!isReady() || !has3dPane()"
+      title="Reset the clip plane to face the current view, centred on the volume"
+    >
+      Reset plane ⟲
+    </button>
+  }
+
   <label class="ctrl" title="Apply a window/level preset">
     Preset
     <select (change)="onPresetChange($event)" [disabled]="!isReady()">
@@ -390,6 +411,30 @@
       @for (plane of sp.planes; track plane.orientation) {
         <polygon class="slice-plane" [attr.points]="plane.points" [style.stroke]="plane.color" />
       }
+    </svg>
+  }
+
+  <!-- Interactive cut-plane gizmo in the 3D pane: outline + draggable handle. -->
+  @if (clipPlaneGizmo(); as gizmo) {
+    <svg
+      class="clip-plane-gizmo"
+      [style.left.px]="gizmo.rect.x"
+      [style.top.px]="gizmo.rect.y"
+      [attr.width]="gizmo.rect.width"
+      [attr.height]="gizmo.rect.height"
+    >
+      <polygon class="clip-plane-outline" [attr.points]="gizmo.outline" />
+      <polyline class="clip-plane-normal" [attr.points]="gizmo.normalLine" />
+      <circle
+        class="clip-plane-handle"
+        [attr.cx]="gizmo.handle.x"
+        [attr.cy]="gizmo.handle.y"
+        r="7"
+        (pointerdown)="onClipHandleDown($event)"
+        (pointermove)="onClipHandleMove($event)"
+        (pointerup)="onClipHandleUp($event)"
+        (pointercancel)="onClipHandleUp($event)"
+      />
     </svg>
   }
 
