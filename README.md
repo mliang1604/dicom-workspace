@@ -25,21 +25,33 @@ WL / WW fields to adjust the display window.
 
 ## Scripts
 
-| Command         | Purpose                                  |
-| --------------- | ---------------------------------------- |
-| `npm start`     | Dev server with live reload.             |
-| `npm run build` | Production build to `dist/`.             |
+| Command         | Purpose                                    |
+| --------------- | ------------------------------------------ |
+| `npm start`     | Dev server with live reload.               |
+| `npm run build` | Production build to `dist/`.               |
 | `npm test`      | Unit tests (Vitest, via `@angular/build`). |
+| `npm run e2e`   | Browser smoke test (Playwright).           |
+
+### Browser smoke test
+
+`npm run e2e` runs a Playwright smoke test (`e2e/smoke.spec.ts`) that boots the
+app, walks the disclaimer → viewer flow, loads a small **synthetic** DICOM
+series, and asserts the panes come up without a WebGPU pipeline error. It starts
+its own dev server, so just run it after `npm ci`; on first use install the
+browser with `npx playwright install chromium`. The app is WebGPU-only — the
+test exercises the GPU path on a machine where Chromium exposes WebGPU and
+degrades to DOM-level checks where it doesn't (CI runs it non-blocking for that
+reason). Add `--headed`/`--ui`/`--debug` for local debugging.
 
 ## Architecture
 
 The framework-agnostic core is deliberately separate from the Angular layer:
 
-| Path                  | Responsibility                                                    |
-| --------------------- | ---------------------------------------------------------------- |
-| `src/dicom/`          | DICOM parsing (`dicom-parser` wrapper), slice → `Volume` assembly, float16 packing. Pure, framework-free, unit-tested. |
-| `src/render/`         | WebGPU device setup and the `SliceRenderer` (3D volume texture + WGSL reslice/windowing shader). |
-| `src/app/`            | Angular shell, the `Viewer` component (signals + OnPush, zoneless), and the `VolumeLoader` service. |
+| Path          | Responsibility                                                                                                         |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `src/dicom/`  | DICOM parsing (`dicom-parser` wrapper), slice → `Volume` assembly, float16 packing. Pure, framework-free, unit-tested. |
+| `src/render/` | WebGPU device setup and the `SliceRenderer` (3D volume texture + WGSL reslice/windowing shader).                       |
+| `src/app/`    | Angular shell, the `Viewer` component (signals + OnPush, zoneless), and the `VolumeLoader` service.                    |
 
 ### Rendering approach
 
