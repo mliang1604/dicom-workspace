@@ -30,7 +30,13 @@ import {
   type PaneView,
 } from '../../render/slice-renderer';
 import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
-import { slicePlaneCorners, volumeBounds } from '../../render/reslice';
+import { planeExtentMm, slicePlaneCorners, volumeBounds } from '../../render/reslice';
+import {
+  mmPerScreenPixel,
+  paneEdgeLabels,
+  scaleBar,
+  type PaneEdgeLabels,
+} from '../../render/pane-annotations';
 import {
   windowLevelDrag,
   windowLevelSensitivity,
@@ -112,6 +118,26 @@ interface CrosshairOverlay {
   readonly y: number;
 }
 
+/** A scale bar drawn in an MPR pane corner, in CSS pixels. */
+interface ScaleBarOverlay {
+  /** Bar length in CSS pixels. */
+  readonly lengthPx: number;
+  /** Rounded physical label, e.g. "5 cm". */
+  readonly label: string;
+}
+
+/** Orientation edge letters and a scale bar overlaid on one MPR pane. */
+interface PaneAnnotation {
+  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
+  readonly key: string;
+  /** The pane's rectangle in CSS pixels; the overlay is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  /** Patient-direction letters at the four edges. */
+  readonly edges: PaneEdgeLabels;
+  /** The physical scale bar, or null when the pane is too small to size one. */
+  readonly scale: ScaleBarOverlay | null;
+}
+
 /** A value per orientation, indexed by the orientation's numeric value. */
 type PerOrientation = readonly [number, number, number];
 
@@ -185,6 +211,11 @@ const AXIS_INDICATOR_SIZE = 72;
 const AXIS_INDICATOR_RADIUS = 24;
 /** Inset (CSS px) of the indicator from the 3D pane's top-right corner. */
 const AXIS_INDICATOR_MARGIN = 12;
+
+/** Longest an MPR pane's scale bar may grow: a fraction of the pane width… */
+const SCALE_BAR_MAX_FRACTION = 0.3;
+/** …capped in absolute CSS pixels so it stays a discreet ruler on large panes. */
+const SCALE_BAR_MAX_PX = 160;
 
 /**
  * How long after the last wheel-zoom or window/level change the 3D MIP keeps
@@ -437,6 +468,45 @@ export class Viewer {
       // Paint far axes first so the near labels (drawn last) sit on top.
       .sort((a, b) => a.depth - b.depth);
     return { left, top, size, center, markers };
+  });
+
+  /**
+   * Per-MPR-pane 2D overlays: anatomical edge letters and a physical scale bar.
+   * The letters come from {@link paneEdgeLabels} (orientation + sagittal flip), so
+   * they track the swap and flip toggles; the scale bar is sized from the plane's
+   * physical extent through the pane's letterbox fit and zoom ({@link
+   * mmPerScreenPixel}), so it rescales as the pane zooms. A pure CSS overlay,
+   * recomputed only from the panes, zooms and flip — never the window/level or 3D
+   * camera.
+   */
+  protected readonly paneAnnotations = computed<PaneAnnotation[]>(() => {
+    const volume = this.volume();
+    if (!this.isReady() || !volume) return [];
+
+    const zooms = this.zooms();
+    const flipped = this.sagittalFlipped();
+    const result: PaneAnnotation[] = [];
+    for (const pane of this.panes()) {
+      if (pane.kind !== 'mpr') continue;
+      const flipX = pane.orientation === Orientation.Sagittal && flipped;
+      const [planeW, planeH] = planeExtentMm(volume, pane.orientation);
+      const mmPerPixel = mmPerScreenPixel(
+        planeW,
+        planeH,
+        pane.rect.width,
+        pane.rect.height,
+        zooms[pane.orientation],
+      );
+      const maxLengthPx = Math.min(pane.rect.width * SCALE_BAR_MAX_FRACTION, SCALE_BAR_MAX_PX);
+      const bar = scaleBar(mmPerPixel, maxLengthPx);
+      result.push({
+        key: this.paneKey(pane),
+        rect: pane.rect,
+        edges: paneEdgeLabels(pane.orientation, flipX),
+        scale: bar ? { lengthPx: bar.lengthPx, label: bar.label } : null,
+      });
+    }
+    return result;
   });
 
   protected readonly statusIsError = computed(

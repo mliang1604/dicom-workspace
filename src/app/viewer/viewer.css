@@ -176,6 +176,82 @@ button.active {
   height: 100%;
 }
 
+/* Anatomical edge letters + scale bar overlaid on each MPR pane. */
+.pane-annotations {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.edge-label {
+  position: absolute;
+  color: var(--text);
+  font:
+    600 12px/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  text-shadow:
+    0 0 3px #000,
+    0 0 3px #000;
+  opacity: 0.85;
+}
+
+.edge-top {
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.edge-bottom {
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.edge-left {
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.edge-right {
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Physical ruler in the pane's bottom-right corner: end ticks + a baseline. */
+.scale-bar {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.scale-bar-label {
+  font:
+    600 11px/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  color: var(--text);
+  text-shadow:
+    0 0 3px #000,
+    0 0 3px #000;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-bar-line {
+  display: block;
+  height: 5px;
+  box-sizing: border-box;
+  border: solid var(--text);
+  border-width: 0 1px 2px 1px;
+  filter: drop-shadow(0 0 2px #000);
+}
+
 /* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
 .slice-planes {
   position: absolute;

@@ -58,3 +58,21 @@ export function axisMarkers(azimuth: number, elevation: number): AxisMarker[] {
     depth: -dot(dir, forward),
   }));
 }
+
+/**
+ * The single-letter patient direction (R/L/A/P/S/I) a vector points most nearly
+ * along — the same LPS axis labels the 3D cube draws. Shared with the 2D pane
+ * edge labels so both overlays name anatomical directions identically.
+ */
+export function directionLetter(dir: Vec3): string {
+  let best = AXES[0];
+  let bestDot = -Infinity;
+  for (const axis of AXES) {
+    const d = dot(dir, axis.dir);
+    if (d > bestDot) {
+      bestDot = d;
+      best = axis;
+    }
+  }
+  return best.label;
+}
