@@ -254,7 +254,8 @@ button.active {
 
 /* Measurement palette buttons cluster tightly in the toolbar. */
 .measure-palette,
-.cine {
+.cine,
+.view-controls {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -404,14 +405,19 @@ button.active {
   transition: width 0.15s ease-out;
 }
 
-/* Drop-target affordance: a dashed inset frame over the viewport while a file
-   drag hovers. Pointer-events stay off so the drag events reach the viewport. */
-.drop-overlay {
+/* Overlays that centre a single child over the viewport. */
+.drop-overlay,
+.help-overlay {
   position: absolute;
-  inset: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Drop-target affordance: a dashed inset frame over the viewport while a file
+   drag hovers. Pointer-events stay off so the drag events reach the viewport. */
+.drop-overlay {
+  inset: 12px;
   border: 2px dashed var(--accent);
   border-radius: var(--radius);
   background: rgba(76, 141, 255, 0.12);
@@ -446,15 +452,9 @@ button.active {
   font-variant-numeric: tabular-nums;
 }
 
-/* Metadata & raw-tag inspector: a scrollable panel pinned to the viewport's
-   right edge. Unlike the other overlays it accepts pointer input (scroll/search). */
-.info-panel {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  bottom: 12px;
-  width: 340px;
-  max-width: calc(100% - 24px);
+/* The glass card shared by the metadata inspector and the shortcut help. */
+.info-panel,
+.help-panel {
   display: flex;
   flex-direction: column;
   background: var(--glass-bg);
@@ -465,6 +465,17 @@ button.active {
   box-shadow: var(--shadow-sm);
   color: var(--text);
   overflow: hidden;
+}
+
+/* Metadata & raw-tag inspector: a scrollable panel pinned to the viewport's
+   right edge. Unlike the other overlays it accepts pointer input (scroll/search). */
+.info-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 340px;
+  max-width: calc(100% - 24px);
 }
 
 .info-header {
@@ -483,6 +494,22 @@ button.active {
 .info-body {
   padding: 8px 12px 12px;
   overflow-y: auto;
+}
+
+/* Keyboard & mouse shortcut help: a dimmed backdrop with a centred glass card
+   (the card's look is shared with .info-panel above). The backdrop catches
+   clicks to dismiss; the card stops them so it stays open. */
+.help-overlay {
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 24px;
+}
+
+/* The shortcut rows reuse .info-body / .info-row from the metadata panel. */
+.help-panel {
+  width: 420px;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 .info-group {

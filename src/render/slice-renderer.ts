@@ -7,6 +7,7 @@ import {
   clipTRange,
   patientToTexMatrix,
   planeExtentMm,
+  planePixelDims,
   planeToTexMatrix,
   slabTRange,
   sliceCountFor,
@@ -145,6 +146,8 @@ export interface MprPaneView {
   readonly pan?: Vec2;
   /** Mirror the in-plane horizontal axis (e.g. flip the sagittal view L/R). */
   readonly flipX?: boolean;
+  /** Invert the windowed grayscale (white ⇄ black); omitted/false renders normally. */
+  readonly invert?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
@@ -187,6 +190,12 @@ export interface MipPaneView {
    * full-quality image, identical to the settled output.
    */
   readonly interactive?: boolean;
+  /**
+   * Invert the windowed grayscale of the projection (MIP/MinIP/Average), matching
+   * the MPR panes' display inversion. Ignored by DVR, which maps colour through
+   * the transfer function. Omitted/false renders normally.
+   */
+  readonly invert?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
@@ -195,8 +204,9 @@ export interface MipPaneView {
 export type PaneView = MprPaneView | MipPaneView;
 
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
-// slicePos,flipX (32). Already a multiple of the 16-byte uniform-struct stride.
-const PARAMS_SIZE = 96;
+// slicePos,flipX (32) + invert + 12 bytes pad (16). A multiple of the 16-byte
+// uniform-struct stride, with the trailing pad satisfying the mat4x4 alignment.
+const PARAMS_SIZE = 112;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS (9 × vec4 = 144).
 const MIP_PARAMS_SIZE = 208;
@@ -494,6 +504,7 @@ export class SliceRenderer {
     floats[36] = tfLo;
     floats[37] = tfHi;
     floats[38] = DVR_AMBIENT;
+    floats[39] = view.invert ? 1 : 0; // invert grayscale projections (ignored by DVR)
     packHalfSpace(floats, 40, clip[0]); // axial cut-plane
     packHalfSpace(floats, 44, clip[1]); // coronal cut-plane
     packHalfSpace(floats, 48, clip[2]); // sagittal cut-plane
@@ -521,6 +532,7 @@ export class SliceRenderer {
     floats[MATRIX_FLOATS + 5] = view.windowWidth;
     floats[MATRIX_FLOATS + 6] = slicePos;
     uints[MATRIX_FLOATS + 7] = view.flipX ? 1 : 0;
+    uints[MATRIX_FLOATS + 8] = view.invert ? 1 : 0;
     this.device.queue.writeBuffer(buffer, 0, params);
   }
 }
@@ -543,6 +555,35 @@ export function aspectScale(
     return [viewAspect / planeAspect, 1];
   }
   return [1, planeAspect / viewAspect];
+}
+
+/**
+ * Magnification that renders an orientation's slice at its native resolution —
+ * one resampled output voxel per device pixel. {@link aspectScale}'s letterbox
+ * fit is `zoom = 1` (the slice scaled to just fit the pane); this returns the
+ * extra zoom on top of that fit which makes the finer-sampled in-plane axis
+ * exactly one voxel per pixel. The coarser axis is then upsampled, so no acquired
+ * detail is dropped (for the common square-pixel slice both axes coincide).
+ *
+ * `viewWidth`/`viewHeight` are the pane's size in the same device-pixel units
+ * {@link aspectScale} sees. Returns 1 if the plane has no extent. Apply
+ * {@link clampPan} afterwards, since the pan bound grows with zoom.
+ */
+export function oneToOneZoom(
+  volume: Volume,
+  orientation: Orientation,
+  viewWidth: number,
+  viewHeight: number,
+): number {
+  const [planeW, planeH] = planeExtentMm(volume, orientation);
+  const [nU, nV] = planePixelDims(volume, orientation);
+  // Device pixels per mm at the letterbox fit (zoom = 1): the plane just fits.
+  const fitPxPerMm = Math.min(viewWidth / planeW, viewHeight / planeH);
+  // Device pixels per mm at native scale: the finer in-plane sampling sets it,
+  // so every voxel covers at least one pixel.
+  const nativePxPerMm = Math.max(nU / planeW, nV / planeH);
+  const zoom = nativePxPerMm / fitPxPerMm;
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
 }
 
 /**

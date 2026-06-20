@@ -6,6 +6,7 @@ import {
   defaultSlabThicknessMm,
   isDvr,
   mipStepScale,
+  oneToOneZoom,
   ProjectionMode,
   projectionModeCode,
   projectionWindow,
@@ -68,6 +69,40 @@ describe('clampPan', () => {
       x: 0.25,
       y: 0.5,
     });
+  });
+});
+
+describe('oneToOneZoom', () => {
+  it('is 1 when the fit already shows one voxel per pixel', () => {
+    // A 100³ volume of 1 mm voxels fits a 100×100 pane exactly at native scale.
+    const volume = makeVolume([100, 100, 100]);
+    expect(oneToOneZoom(volume, Orientation.Axial, 100, 100)).toBeCloseTo(1, 6);
+  });
+
+  it('magnifies (>1) when the pane is larger than the voxel grid', () => {
+    // 100 voxels across a 200 px pane: the fit shows 2 px/voxel, so native (1
+    // px/voxel) is a half-size of the fit — zoom 0.5.
+    const volume = makeVolume([100, 100, 100]);
+    expect(oneToOneZoom(volume, Orientation.Axial, 200, 200)).toBeCloseTo(0.5, 6);
+  });
+
+  it('shrinks (<1) … and the same scale holds for any pane size', () => {
+    const volume = makeVolume([100, 100, 100]);
+    // 100 voxels across a 50 px pane: the fit shows 0.5 px/voxel, native doubles it.
+    expect(oneToOneZoom(volume, Orientation.Axial, 50, 50)).toBeCloseTo(2, 6);
+  });
+
+  it('keys off the finer in-plane axis for anisotropic voxels', () => {
+    // Coronal plane spans x (1 mm) × z (3 mm). Extent 100 × 30 mm, grid 100 × 10.
+    // Fit into 300×300 is limited by the 100 mm width → 3 px/mm. Native holds the
+    // finer x axis at 1 px/voxel = 1 px/mm, so zoom = 1 / 3.
+    const volume = makeVolume([100, 100, 10], [1, 1, 3]);
+    expect(oneToOneZoom(volume, Orientation.Coronal, 300, 300)).toBeCloseTo(1 / 3, 6);
+  });
+
+  it('falls back to 1 for a degenerate pane', () => {
+    const volume = makeVolume([100, 100, 100]);
+    expect(oneToOneZoom(volume, Orientation.Axial, 0, 0)).toBe(1);
   });
 });
 

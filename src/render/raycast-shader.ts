@@ -28,7 +28,7 @@ struct Params {
   axisV : vec4<f32>,          // half-height image-plane axis in .xyz, windowWidth in .w
   forward : vec4<f32>,        // unit ray direction (orthographic) in .xyz, voxels-per-t in .w
   modeSlab : vec4<f32>,       // mode (0 max,1 min,2 mean,3 DVR) .x, slab t-range [.y,.z], clip on .w
-  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), Lambert ambient .z
+  tfDomain : vec4<f32>,       // DVR transfer-function domain [.x,.y] (HU), Lambert ambient .z, gray invert .w
   clipA : vec4<f32>,          // axial cut-plane: texture-space normal .xyz, offset .w
   clipC : vec4<f32>,          // coronal cut-plane
   clipS : vec4<f32>,          // sagittal cut-plane
@@ -205,6 +205,9 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let windowWidth = P.axisV.w;
   let lo = windowCenter - 0.5 - (windowWidth - 1.0) * 0.5;
   let g = clamp((projected - lo) / max(windowWidth - 1.0, 1.0), 0.0, 1.0);
-  return vec4<f32>(g, g, g, 1.0);
+  // Display inversion (shared with the MPR panes); DVR returns earlier, so only
+  // the grayscale projections are flipped.
+  let shade = select(g, 1.0 - g, P.tfDomain.w != 0.0);
+  return vec4<f32>(shade, shade, shade, 1.0);
 }
 `;
