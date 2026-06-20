@@ -259,6 +259,25 @@ button.active {
   border-color: rgba(255, 122, 122, 0.4);
 }
 
+/* Determinate load progress bar shown beneath the status text while parsing. */
+.progress {
+  display: block;
+  margin-top: 6px;
+  width: 220px;
+  max-width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--glass-border);
+  overflow: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease-out;
+}
+
 /* Live voxel readout, anchored opposite the status line. */
 .probe {
   position: absolute;
