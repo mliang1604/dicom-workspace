@@ -127,8 +127,8 @@ kbd {
   width: 200px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 12px 10px;
+  gap: 8px;
+  padding: 10px 10px;
   overflow-y: auto;
   border-right: 1px solid var(--glass-border);
   background: var(--glass-bg);
@@ -136,18 +136,32 @@ kbd {
   -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
+/* Each group is a native <details> so it can be collapsed to keep every
+   group (including 3D) reachable without scrolling at short window heights. */
 .tool-group {
+  flex: 0 0 auto;
+}
+
+.tool-group-body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-top: 6px;
 }
 
 .tool-group-label {
-  flex: 1 0 100%;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--muted);
+  cursor: pointer;
+  list-style-position: inside;
+  user-select: none;
+}
+
+.tool-group-label:hover,
+.tool-group[open] > .tool-group-label {
+  color: var(--text);
 }
 
 .tool-rail button {
