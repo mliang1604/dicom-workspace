@@ -1,4 +1,5 @@
 import type { Vec3 } from '../dicom/types';
+import { cross, normalize, sub } from '../dicom/vec3';
 
 /**
  * Loft a stack of planar ROI contours (RTSTRUCT axial loops, in patient mm) into
@@ -12,9 +13,13 @@ import type { Vec3 } from '../dicom/types';
  * resampled loops are joined into a triangle band, and the first/last loops are
  * fanned into end caps so the surface is closed.
  *
- * Pure geometry, unit-tested without a GPU. Concavities and per-slice topology
- * changes (holes, branches) are approximated by the angular silhouette — fine
- * for a translucent overlay; a marching-cubes surface would be a separate effort.
+ * Lofting ({@link loftContours}), per-face normal generation ({@link loftRoiMesh})
+ * and the flat-shaded vertex interleave ({@link flattenSurfaceMeshes}) all live
+ * here so the lighting/packing geometry sits in the unit-tested render layer
+ * rather than the UI component. Pure geometry, exercised without a GPU.
+ * Concavities and per-slice topology changes (holes, branches) are approximated
+ * by the angular silhouette — fine for a translucent overlay; a marching-cubes
+ * surface would be a separate effort.
  */
 
 /** A triangle as three patient-space vertices. */
@@ -138,4 +143,156 @@ export function loftContours(
   // Close the ends so the translucent shell reads as a solid.
   tris.push(...cap(rings[0]), ...cap(rings[rings.length - 1]));
   return tris;
+}
+
+/** Floats per ROI-surface vertex once interleaved: position (3) + normal (3) + rgba (4). */
+export const SURFACE_VERTEX_FLOATS = 10;
+
+/**
+ * One ROI's lofted 3D surface, flattened for fast per-frame drawing: triangle
+ * vertex positions (9 floats each) and precomputed unit face normals (3 floats
+ * each) in patient mm. Built once per structure set; projected/shaded each orbit
+ * frame. Tagged with the structure set + ROI it came from so the UI can resolve
+ * its visibility / colour / opacity.
+ */
+export interface RoiSurfaceMesh {
+  readonly setIndex: number;
+  readonly roiNumber: number;
+  /** ROI display colour as [r, g, b] in 0–255, for shading. */
+  readonly baseColor: readonly [number, number, number];
+  /** Triangle vertices, 9 floats (3 × xyz) per triangle. */
+  readonly positions: Float32Array;
+  /** Unit face normals, 3 floats per triangle. */
+  readonly normals: Float32Array;
+  /** Number of triangles (positions.length / 9 = normals.length / 3). */
+  readonly count: number;
+}
+
+/**
+ * Loft an ROI's contour loops into a flattened triangle mesh with per-face
+ * normals — the render-layer home for the surface geometry and its lighting
+ * normals. Each triangle's flat normal is `normalize(cross(b − a, c − a))`,
+ * matching the head-light shade in `surface-shader.ts`. Returns `null` when the
+ * loops don't loft to a surface (fewer than two usable loops), so the caller can
+ * skip empty ROIs.
+ *
+ * @param setIndex  Index of the owning structure set (for the stable ROI key).
+ * @param roiNumber RTSTRUCT ROI Number within that set.
+ * @param baseColor ROI display colour [r, g, b] in 0–255, used for shading.
+ * @param loops     Planar contour loops in patient mm (each ≥ 3 points).
+ * @param samples   Points each loop is resampled to (see {@link loftContours}).
+ * @param maxLoops  Cap on the number of slices used (see {@link loftContours}).
+ */
+export function loftRoiMesh(
+  setIndex: number,
+  roiNumber: number,
+  baseColor: readonly [number, number, number],
+  loops: readonly (readonly Vec3[])[],
+  samples = 16,
+  maxLoops = 40,
+): RoiSurfaceMesh | null {
+  const triangles = loftContours(loops, samples, maxLoops);
+  if (triangles.length === 0) return null;
+  const count = triangles.length;
+  const positions = new Float32Array(count * 9);
+  const normals = new Float32Array(count * 3);
+  for (let t = 0; t < count; t++) {
+    const [a, b, c] = triangles[t];
+    const o = t * 9;
+    positions[o] = a[0];
+    positions[o + 1] = a[1];
+    positions[o + 2] = a[2];
+    positions[o + 3] = b[0];
+    positions[o + 4] = b[1];
+    positions[o + 5] = b[2];
+    positions[o + 6] = c[0];
+    positions[o + 7] = c[1];
+    positions[o + 8] = c[2];
+    const nrm = normalize(cross(sub(b, a), sub(c, a)));
+    normals[t * 3] = nrm[0];
+    normals[t * 3 + 1] = nrm[1];
+    normals[t * 3 + 2] = nrm[2];
+  }
+  return { setIndex, roiNumber, baseColor, positions, normals, count };
+}
+
+/** A flattened mesh paired with the resolved RGBA it should be drawn in. */
+export interface ColoredSurfaceMesh {
+  readonly mesh: RoiSurfaceMesh;
+  /** Linear RGBA in 0–1; alpha already folded with the base surface alpha. */
+  readonly rgba: readonly [number, number, number, number];
+}
+
+/** The interleaved GPU vertex array plus each triangle's centroid, for one frame. */
+export interface FlattenedSurface {
+  /**
+   * Interleaved vertex buffer: per vertex `pos3 + normal3 + rgba4`
+   * ({@link SURFACE_VERTEX_FLOATS} floats), three vertices per triangle, in the
+   * exact stride/order the surface shader's vertex layout expects.
+   */
+  readonly vertices: Float32Array;
+  /** Triangle centroids (3 floats each), parallel to the triangle order, for depth sorting. */
+  readonly centroids: Float32Array;
+  /** Triangle count (vertices.length / (3 · stride) = centroids.length / 3). */
+  readonly count: number;
+}
+
+/**
+ * Flatten the visible ROI surface meshes into one interleaved triangle list — the
+ * pure, GPU-free packing the surface pipeline draws. Each vertex carries its
+ * triangle's position, the shared flat face normal, and the ROI's resolved RGBA,
+ * laid out at {@link SURFACE_VERTEX_FLOATS}-float stride (`pos3 + normal3 +
+ * rgba4`) so the shader's vertex attributes line up byte-for-byte. The parallel
+ * per-triangle centroids feed the per-frame painter's-order depth sort.
+ *
+ * The component is left only choosing which ROIs are visible and what colour /
+ * opacity each gets; the interleave and centroid maths live here where they can
+ * be unit-tested without a device.
+ */
+export function flattenSurfaceMeshes(visible: readonly ColoredSurfaceMesh[]): FlattenedSurface {
+  let total = 0;
+  for (const { mesh } of visible) total += mesh.count;
+
+  const vertices = new Float32Array(total * 3 * SURFACE_VERTEX_FLOATS);
+  const centroids = new Float32Array(total * 3);
+  let v = 0;
+  let c = 0;
+  for (const { mesh, rgba } of visible) {
+    const [cr, cg, cb, alpha] = rgba;
+    const pos = mesh.positions;
+    const nrm = mesh.normals;
+    for (let i = 0; i < mesh.count; i++) {
+      const p = i * 9;
+      const n = i * 3;
+      const nx = nrm[n];
+      const ny = nrm[n + 1];
+      const nz = nrm[n + 2];
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      for (let vtx = 0; vtx < 3; vtx++) {
+        const o = p + vtx * 3;
+        const px = pos[o];
+        const py = pos[o + 1];
+        const pz = pos[o + 2];
+        vertices[v++] = px;
+        vertices[v++] = py;
+        vertices[v++] = pz;
+        vertices[v++] = nx;
+        vertices[v++] = ny;
+        vertices[v++] = nz;
+        vertices[v++] = cr;
+        vertices[v++] = cg;
+        vertices[v++] = cb;
+        vertices[v++] = alpha;
+        sx += px;
+        sy += py;
+        sz += pz;
+      }
+      centroids[c++] = sx / 3;
+      centroids[c++] = sy / 3;
+      centroids[c++] = sz / 3;
+    }
+  }
+  return { vertices, centroids, count: total };
 }
