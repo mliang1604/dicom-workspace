@@ -83,6 +83,11 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await expect(cell).toHaveAttribute('data-checker-size', '48');
   await page.locator('button[data-checkerboard]').click(); // back off for the rest
 
+  // The per-row opacity slider fills the row too (it was a 64px stub whose thumb
+  // stopped short of the right edge); it now spans well past that width.
+  const opacityBox = await overlayRow.locator('input.layer-opacity').boundingBox();
+  expect(opacityBox!.width).toBeGreaterThan(100);
+
   // Cycle the Layout button to the Compare layout.
   const layoutButton = page.getByRole('button', { name: /Layout/ });
   for (let i = 0; i < 6; i++) {
