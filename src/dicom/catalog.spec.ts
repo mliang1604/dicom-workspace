@@ -1,4 +1,12 @@
-import { addSeriesToCatalog, catalogSeries, groupPatients, groupStudies } from './catalog';
+import {
+  addSeriesToCatalog,
+  catalogSeries,
+  groupPatients,
+  groupStudies,
+  importKeepsOnePatient,
+  importPatientIds,
+  initialImportSeries,
+} from './catalog';
 import type { Series } from './series';
 
 /** A minimal series carrying just the study/patient-grouping fields under test. */
@@ -198,5 +206,81 @@ describe('catalogSeries', () => {
 
   it('is empty for an empty catalog', () => {
     expect(catalogSeries(new Map())).toEqual([]);
+  });
+});
+
+describe('importPatientIds', () => {
+  it('lists the distinct PatientIDs in encounter order', () => {
+    const ids = importPatientIds([
+      series('s1', { uid: 'a', patientId: 'p2' }),
+      series('s2', { uid: 'b', patientId: 'p1' }),
+      series('s3', { uid: 'c', patientId: 'p2' }),
+    ]);
+
+    expect(ids).toEqual(['p2', 'p1']);
+  });
+
+  it('keys a series with no PatientID under the empty string', () => {
+    expect(importPatientIds([series('s1', { patientId: null })])).toEqual(['']);
+  });
+
+  it('is empty for no series', () => {
+    expect(importPatientIds([])).toEqual([]);
+  });
+});
+
+describe('importKeepsOnePatient', () => {
+  it('allows the first import when the catalog is empty', () => {
+    expect(importKeepsOnePatient(null, [series('s1', { patientId: 'p1' })])).toBe(true);
+  });
+
+  it('allows a further import of the same patient', () => {
+    expect(importKeepsOnePatient('p1', [series('s1', { patientId: 'p1' })])).toBe(true);
+  });
+
+  it('flags an import of a different patient', () => {
+    expect(importKeepsOnePatient('p1', [series('s1', { patientId: 'p2' })])).toBe(false);
+  });
+
+  it('flags an import spanning several patients, even into an empty catalog', () => {
+    const mixed = [
+      series('s1', { uid: 'a', patientId: 'p1' }),
+      series('s2', { uid: 'b', patientId: 'p2' }),
+    ];
+    expect(importKeepsOnePatient(null, mixed)).toBe(false);
+    expect(importKeepsOnePatient('p1', mixed)).toBe(false);
+  });
+
+  it('matches an unidentified import against an unidentified current patient', () => {
+    expect(importKeepsOnePatient('', [series('s1', { patientId: null })])).toBe(true);
+  });
+
+  it('treats an empty import as a safe no-op', () => {
+    expect(importKeepsOnePatient('p1', [])).toBe(true);
+  });
+});
+
+describe('initialImportSeries', () => {
+  it('picks the largest series of the most recent study', () => {
+    const chosen = initialImportSeries([
+      series('early', { uid: 'a', studyDate: '20240101', imageCount: 300 }),
+      series('late', { uid: 'b', studyDate: '20240601', imageCount: 50 }),
+      series('late', { uid: 'c', studyDate: '20240601', imageCount: 200 }),
+    ]);
+
+    expect(chosen?.uid).toBe('c');
+  });
+
+  it('falls back to the largest series when no study is dated', () => {
+    const chosen = initialImportSeries([
+      series('s', { uid: 'a', imageCount: 10 }),
+      series('s', { uid: 'b', imageCount: 80 }),
+    ]);
+
+    expect(chosen?.uid).toBe('b');
+  });
+
+  it('returns undefined for an empty import', () => {
+    expect(initialImportSeries([])).toBeUndefined();
   });
 });

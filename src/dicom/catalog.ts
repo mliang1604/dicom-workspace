@@ -1,4 +1,4 @@
-import type { Series } from './series';
+import { largestSeries, type Series } from './series';
 
 /**
  * One DICOM study: the series acquired in a single examination, sharing a
@@ -141,6 +141,58 @@ export function addSeriesToCatalog(
     merged.push(s);
   }
   return new Map(groupPatients(merged).map((p) => [p.patientId, p]));
+}
+
+/**
+ * The distinct PatientIDs present in a batch of imported `series`, in encounter
+ * order. The empty string stands for series carrying no PatientID, mirroring
+ * {@link groupPatients}. A single entry is the ordinary one-patient import; more
+ * than one means the batch spans patients.
+ */
+export function importPatientIds(series: readonly Series[]): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const s of series) {
+    const id = s.patientId ?? '';
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Whether importing `series` keeps the catalog focused on a single patient,
+ * given the PatientID the UI is currently on (`currentPatientId`, null when the
+ * catalog is empty). Safe when the batch carries exactly one PatientID and that
+ * id matches the current patient — or there is no current patient yet. A batch
+ * spanning several PatientIDs, or one PatientID different from the current
+ * patient, would mix patients and so needs the switch-or-cancel guard; an empty
+ * batch is a no-op and reported safe.
+ */
+export function importKeepsOnePatient(
+  currentPatientId: string | null,
+  series: readonly Series[],
+): boolean {
+  const ids = importPatientIds(series);
+  if (ids.length === 0) return true;
+  if (ids.length > 1) return false;
+  return currentPatientId === null || ids[0] === currentPatientId;
+}
+
+/**
+ * The series to show first after a fresh patient import: the largest series (most
+ * images) of the most recent study, so the opening view is the primary
+ * acquisition of the latest examination rather than an arbitrary scout. Studies
+ * are ordered by {@link groupStudies} along the ascending timeline (undated
+ * last), so the most recent is its final entry. Returns undefined only for an
+ * empty batch; callers with a known-non-empty import can assert the result.
+ */
+export function initialImportSeries(series: readonly Series[]): Series | undefined {
+  if (series.length === 0) return undefined;
+  const studies = groupStudies(series);
+  return largestSeries(studies[studies.length - 1].series);
 }
 
 /** The distinct, non-null modalities across a study's series, in encounter order. */

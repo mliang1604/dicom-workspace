@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { buildVolume } from '../dicom/volume';
-import { groupSeries, largestSeries, type Series } from '../dicom/series';
+import { initialImportSeries } from '../dicom/catalog';
+import { groupSeries, type Series } from '../dicom/series';
 import { structureSetsForSeries } from '../dicom/structure-set';
 import {
   baseImageLayer,
@@ -70,9 +71,12 @@ export class VolumeLoader {
     const { slices, structureSets } = await parseFilesInWorkers(files, onProgress);
 
     const series = groupSeries(slices);
-    if (series.length === 0) buildVolume(slices); // throws the canonical "no slices" error
+    // initialImportSeries returns undefined only for an empty batch; assemble it to
+    // throw the canonical "no slices" error in that case.
+    const selected = initialImportSeries(series);
+    if (!selected) buildVolume(slices); // throws the canonical "no slices" error
 
-    return this.buildResult(series, largestSeries(series), structureSets, files.length);
+    return this.buildResult(series, selected!, structureSets, files.length);
   }
 
   /**
