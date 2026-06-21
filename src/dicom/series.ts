@@ -1,6 +1,6 @@
 import type { DicomMetadata } from './metadata';
+import { orderSlicesThroughPlane } from './slice-order';
 import type { Slice } from './types';
-import { cross } from './vec3';
 
 /**
  * One DICOM series: a set of slices sharing a SeriesInstanceUID, with the
@@ -120,26 +120,8 @@ export function largestSeries(series: readonly Series[]): Series {
 export function middleSlice(series: Series): Slice | null {
   const { slices } = series;
   if (slices.length === 0) return null;
-  const ordered = orderSlices(slices);
+  const ordered = orderSlicesThroughPlane(slices);
   return ordered[Math.floor(ordered.length / 2)];
-}
-
-/**
- * Order slices through-plane: by ImagePositionPatient projected onto the slice
- * normal when every slice carries a position and the first carries an
- * orientation, else by InstanceNumber. Mirrors the private ordering in
- * {@link import('./volume').buildVolume} so a thumbnail's middle slice matches
- * the volume's central plane.
- */
-function orderSlices(slices: readonly Slice[]): Slice[] {
-  const first = slices[0];
-  if (first.orientation && slices.every((s) => s.position)) {
-    const normal = cross(first.orientation.slice(0, 3), first.orientation.slice(3, 6));
-    const proj = (s: Slice) =>
-      s.position![0] * normal[0] + s.position![1] * normal[1] + s.position![2] * normal[2];
-    return [...slices].sort((a, b) => proj(a) - proj(b));
-  }
-  return [...slices].sort((a, b) => a.instanceNumber - b.instanceNumber);
 }
 
 /** Order series by SeriesNumber (absent last), then by UID for stability. */
