@@ -548,6 +548,34 @@ export class SliceRenderer {
     }
   }
 
+  /**
+   * Free every GPU resource this renderer owns. The constructor allocates the
+   * MPR/MIP uniform buffers, the surface camera buffer, and the transfer-function
+   * and overlay LUT textures once and keeps them for the renderer's lifetime;
+   * {@link setVolume}/{@link setOverlay}/{@link setSurfaceMesh} allocate the
+   * per-load volume, overlay and surface buffers/textures. None of these are
+   * freed by the per-load `destroy()` calls, so call this before dropping the
+   * renderer (component destroy) or rebuilding it (a fresh `initGpu`) to avoid
+   * leaking GPU memory. Pipelines and the sampler have no explicit `destroy()`;
+   * they're released with the device. Idempotent for the per-load resources.
+   */
+  dispose(): void {
+    // Per-load resources (also cleared on the next setVolume/setOverlay).
+    this.texture?.destroy();
+    this.texture = null;
+    this.clearOverlay();
+    this.surfaceVertexBuffer?.destroy();
+    this.surfaceVertexBuffer = null;
+    this.surfaceIndexBuffer?.destroy();
+    this.surfaceIndexBuffer = null;
+    // Constructor-time resources, never otherwise freed.
+    this.surfaceCameraBuffer.destroy();
+    this.mipSlot.buffer.destroy();
+    for (const slot of this.slots) slot.buffer.destroy();
+    this.tfTexture.destroy();
+    this.overlayLut.destroy();
+  }
+
   /** Drop any fusion overlay (texture + matrices + opacity + colormap). */
   private clearOverlay(): void {
     this.overlayTexture?.destroy();
