@@ -101,16 +101,42 @@ export class VolumeLoader {
     allStructureSets: readonly StructureSet[],
     fileCount: number,
   ): LoadResult {
+    const baseVolume = buildVolume(selected.slices);
+    const layers: Layer[] = [baseImageLayer(selected.uid, baseVolume)];
+    // A same-frame dose grid in the same load joins as a fusion overlay above the
+    // base (the CT + dose case), so dropping the pair shows the wash immediately.
+    // Co-sampling needs both grids' geometry, so a geometry-less series is skipped.
+    if (baseVolume.geometry) {
+      for (const s of doseOverlaySeries(series, selected)) {
+        const overlayVolume = buildVolume(s.slices);
+        if (overlayVolume.geometry) layers.push(overlayImageLayer(s.uid, overlayVolume));
+      }
+    }
     return {
       series,
       selectedUid: selected.uid,
-      layers: [baseImageLayer(selected.uid, buildVolume(selected.slices))],
+      layers,
       structureSets: structureSetsForSeries(allStructureSets, selected),
       allStructureSets,
       fileCount,
       sliceCount: selected.slices.length,
     };
   }
+}
+
+/**
+ * The series in a load that should sit above `selected` (the base) as fusion
+ * overlays: a same-frame-of-reference dose grid (RTDOSE) other than the base —
+ * the CT + dose case. Image series are left as selectable series, not forced
+ * overlays, so an ordinary multi-series study isn't auto-fused. Pure for testing.
+ */
+export function doseOverlaySeries(series: readonly Series[], selected: Series): Series[] {
+  return series.filter(
+    (s) =>
+      s.uid !== selected.uid &&
+      s.modality === 'RTDOSE' &&
+      framesMatch(s.frameOfReferenceUid, selected.frameOfReferenceUid),
+  );
 }
 
 /**
