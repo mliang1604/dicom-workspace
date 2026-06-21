@@ -292,7 +292,6 @@ export function baseImageLayer(id: string, volume: Volume): Layer {
   };
 }
 
-/**
 /** Default overlay colormap name for a dose wash; the render layer resolves it. */
 export const DOSE_COLORMAP = 'jet';
 

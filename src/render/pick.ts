@@ -1,3 +1,4 @@
+import { clamp01, clampIndex } from '../dicom/math';
 import type { Vec3, Volume } from '../dicom/types';
 import { add, scale } from '../dicom/vec3';
 import { cameraBasis, intersectUnitBox, type OrbitCamera } from './camera';
@@ -236,12 +237,4 @@ function applyAffine(m: Float32Array, v: Vec3, w: number): Vec3 {
 /** Clamp a texture coordinate into the unit cube, matching the shader's guard. */
 function clampUnit(coord: Vec3): Vec3 {
   return [clamp01(coord[0]), clamp01(coord[1]), clamp01(coord[2])];
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-function clampIndex(index: number, dim: number): number {
-  return Math.min(dim - 1, Math.max(0, index));
 }

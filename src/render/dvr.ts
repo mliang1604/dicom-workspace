@@ -1,3 +1,4 @@
+import { clamp01 } from '../dicom/math';
 import type { Vec3 } from '../dicom/types';
 import { add, length, normalize, scale } from '../dicom/vec3';
 
@@ -198,8 +199,4 @@ export function dvrLightingParams(lightDirTex: Vec3, lighting: DvrLighting): Flo
 
 function dot(a: Vec3, b: Vec3): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
 }

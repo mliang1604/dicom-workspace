@@ -1,3 +1,4 @@
+import { clamp, clampIndex } from '../dicom/math';
 import { Orientation, type Volume } from '../dicom/types';
 import type { PlanePoint } from './pane-coords';
 import {
@@ -89,7 +90,7 @@ export function measureAngleDeg(
   const la = Math.hypot(ax, ay);
   const lb = Math.hypot(bx, by);
   if (la === 0 || lb === 0) return 0;
-  const cos = Math.min(1, Math.max(-1, (ax * bx + ay * by) / (la * lb)));
+  const cos = clamp((ax * bx + ay * by) / (la * lb), -1, 1);
   return (Math.acos(cos) * 180) / Math.PI;
 }
 
@@ -219,8 +220,4 @@ export function roiStats(
     }
   }
   return { areaMm2, stats: huStats(values) };
-}
-
-function clampIndex(index: number, dim: number): number {
-  return Math.min(dim - 1, Math.max(0, index));
 }

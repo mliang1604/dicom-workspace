@@ -14,6 +14,8 @@
  * and the shader clamps samples outside it to the end colours.
  */
 
+import { clamp } from '../dicom/math';
+
 /** The selectable DVR transfer-function presets; values double as UI codes. */
 export const TransferFunctionPreset = {
   /** Dense bone: transparent below ~150 HU, opaque ivory above. */
@@ -200,10 +202,6 @@ export function removeControlPoint(tf: TransferFunction, index: number): Transfe
   const points = tf.controlPoints;
   if (points.length <= 2 || index < 0 || index >= points.length) return tf;
   return { ...tf, controlPoints: points.filter((_, i) => i !== index) };
-}
-
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, value));
 }
 
 /**

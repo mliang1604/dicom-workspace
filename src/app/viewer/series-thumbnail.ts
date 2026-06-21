@@ -14,6 +14,7 @@
  * or a browser.
  */
 
+import { clamp } from '../../dicom/math';
 import { middleSlice, type Series } from '../../dicom/series';
 import type { Slice } from '../../dicom/types';
 
@@ -202,9 +203,4 @@ export class SeriesThumbnailCache {
   clear(): void {
     this.cache.clear();
   }
-}
-
-/** Clamp `x` to `[lo, hi]`. */
-function clamp(x: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, x));
 }
