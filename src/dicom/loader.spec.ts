@@ -168,6 +168,26 @@ function dicomFile(dataSetBody: Uint8Array, transferSyntax = EXPLICIT_VR_LE): Ar
 
 // --- Fixtures ---------------------------------------------------------------
 
+/**
+ * A CT whose header declares a 4×4 frame (16 samples) but whose PixelData
+ * carries only 4 — a truncated file. Reading it must throw a typed error rather
+ * than building a typed-array view past the end of the buffer.
+ */
+function truncatedCt(): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0060, 'CS', text('CT')), // Modality
+    element(0x0020, 0x000e, 'UI', uid('1.2.3.4')), // SeriesInstanceUID
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0010, 'US', u16le(4)), // Rows (declares 16 samples…)
+    element(0x0028, 0x0011, 'US', u16le(4)), // Columns
+    element(0x0028, 0x0030, 'DS', numbers([1, 1])), // PixelSpacing
+    element(0x0028, 0x0100, 'US', u16le(16)), // BitsAllocated
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation
+    pixelData([[1, 2, 3, 4]]), // …but only 4 samples are present
+  ]);
+  return dicomFile(body);
+}
+
 /** A classic single-frame CT, 2×2, with top-level geometry. */
 function singleFrameCt(): ArrayBuffer {
   const body = concat([
@@ -574,6 +594,11 @@ describe('parseFile — non-images', () => {
 
     expect(() => parseFile('jpeg.dcm', buffer)).toThrow(UnsupportedDicomError);
   });
+
+  it('throws a typed error for truncated PixelData instead of a RangeError', () => {
+    expect(() => parseFile('truncated.dcm', truncatedCt())).toThrow(UnsupportedDicomError);
+    expect(() => parseFile('truncated.dcm', truncatedCt())).toThrow(/truncated/i);
+  });
 });
 
 /**
@@ -583,10 +608,18 @@ describe('parseFile — non-images', () => {
  * non-canonically-cased Modality, and a missing GridFrameOffsetVector.
  */
 function rtDose(
-  opts: { bits?: 16 | 32; modality?: string; gridOffsets?: number[] | null } = {},
+  opts: {
+    bits?: 16 | 32;
+    modality?: string;
+    gridOffsets?: number[] | null;
+    signed?: boolean;
+    frames?: number[][];
+  } = {},
 ): ArrayBuffer {
-  const { bits = 16, modality = 'RTDOSE', gridOffsets = [0, 5] } = opts;
-  const frames = [
+  const { bits = 16, modality = 'RTDOSE', gridOffsets = [0, 5], signed = false } = opts;
+  // DataView.setUint16/32 wrap negatives to two's complement, so the unsigned
+  // writers below faithfully encode signed frame values for the signed case.
+  const frames = opts.frames ?? [
     [0, 4, 8, 12],
     [16, 20, 24, 28],
   ];
@@ -606,7 +639,7 @@ function rtDose(
     element(0x0028, 0x0030, 'DS', numbers([2, 3])), // PixelSpacing [row, col]
     element(0x0028, 0x0100, 'US', u16le(bits)), // BitsAllocated
     element(0x0028, 0x0101, 'US', u16le(bits)), // BitsStored
-    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation (unsigned)
+    element(0x0028, 0x0103, 'US', u16le(signed ? 1 : 0)), // PixelRepresentation
     element(0x3004, 0x0002, 'CS', text('GY')), // DoseUnits
     ...(gridOffsets ? [element(0x3004, 0x000c, 'DS', numbers(gridOffsets))] : []), // GridFrameOffsetVector
     element(0x3004, 0x000e, 'DS', numbers([0.25])), // DoseGridScaling
@@ -642,6 +675,23 @@ describe('parseFile — RT Dose', () => {
 
     expect(Array.from(slices[0].pixels)).toEqual([0, 1, 2, 3]);
     expect(Array.from(slices[1].pixels)).toEqual([4, 5, 6, 7]);
+  });
+
+  it('decodes signed dose samples when PixelRepresentation is 1', () => {
+    // A signed (e.g. difference) dose grid: negative stored values must read as
+    // negatives, not wrap to large positives through an unsigned read.
+    const frames = [
+      [-4, 0, 4, 8],
+      [-8, -4, 0, 12],
+    ];
+    const slices16 = parseFile('dose.dcm', rtDose({ signed: true, frames }));
+    // DoseGridScaling 0.25 scales the signed integers into Gy.
+    expect(Array.from(slices16[0].pixels)).toEqual([-1, 0, 1, 2]);
+    expect(Array.from(slices16[1].pixels)).toEqual([-2, -1, 0, 3]);
+
+    const slices32 = parseFile('dose32.dcm', rtDose({ bits: 32, signed: true, frames }));
+    expect(Array.from(slices32[0].pixels)).toEqual([-1, 0, 1, 2]);
+    expect(Array.from(slices32[1].pixels)).toEqual([-2, -1, 0, 3]);
   });
 
   it('detects dose by SOP class / case-insensitive modality, not exact casing', () => {

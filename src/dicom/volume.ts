@@ -129,7 +129,7 @@ function assemble(ordered: Slice[], sliceVoxels: number, sx: number, sy: number)
   const gaps = consecutiveGaps(proj);
   const sz = median(gaps); // representative spacing, robust to gap outliers
 
-  const { data, depth } = resampleAlongNormal(ordered, proj, sz, sliceVoxels);
+  const { data, depth, spacingZ } = resampleAlongNormal(ordered, proj, sz, sliceVoxels);
 
   // The grid has one layer per representative-spacing step; any extra layers
   // over the acquired count were synthesized to fill gaps.
@@ -140,7 +140,7 @@ function assemble(ordered: Slice[], sliceVoxels: number, sx: number, sy: number)
   const origin: Vec3 = [first.position![0], first.position![1], first.position![2]];
   const iStep = scale(rowDir, sx);
   const jStep = scale(colDir, sy);
-  const kStep = scale(normal, sz);
+  const kStep = scale(normal, spacingZ);
 
   // A near-singular map (e.g. parallel cosines, or a collapsed stack) cannot be
   // inverted to reslice; fall back to a clean axis-aligned frame.
@@ -148,12 +148,12 @@ function assemble(ordered: Slice[], sliceVoxels: number, sx: number, sy: number)
     return {
       data,
       depth,
-      spacingZ: sz,
-      geometry: { iStep: [sx, 0, 0], jStep: [0, sy, 0], kStep: [0, 0, sz], origin },
+      spacingZ,
+      geometry: { iStep: [sx, 0, 0], jStep: [0, sy, 0], kStep: [0, 0, spacingZ], origin },
       missingSlices,
     };
   }
-  return { data, depth, spacingZ: sz, geometry: { iStep, jStep, kStep, origin }, missingSlices };
+  return { data, depth, spacingZ, geometry: { iStep, jStep, kStep, origin }, missingSlices };
 }
 
 /** Concatenate slice pixels in order, one slice per grid layer. */
@@ -164,26 +164,48 @@ function stackByIndex(ordered: Slice[], sliceVoxels: number): Float32Array {
 }
 
 /**
+ * Upper bound on the resampled grid depth, as a multiple of the acquired slice
+ * count. A pathological geometry — a tiny median gap (gantry jitter, irregular
+ * spacing, or a stray ImagePositionPatient) against a large projection span —
+ * would otherwise make `round(span / sz)` enormous and allocate hundreds of MB.
+ * Capping the depth keeps the allocation bounded; the synthesized-layer count
+ * still flags the series through {@link MissingSlices} so the gap is reported
+ * rather than hidden.
+ */
+const MAX_RESAMPLE_DEPTH_FACTOR = 16;
+
+/**
  * Resample the (position-sorted) slices onto a uniform through-plane axis of
  * pitch `sz`, spanning the slices' projection range. Each output layer is the
  * linear blend of the two source slices that bracket its position, so missing
  * slices are interpolated rather than abutted. `proj` is ascending (the sort
  * order), so a single forward cursor finds each layer's bracket.
+ *
+ * The layer count is capped at {@link MAX_RESAMPLE_DEPTH_FACTOR}× the acquired
+ * slice count so a degenerate geometry cannot allocate unboundedly. When the cap
+ * binds, the pitch is widened to still span the full range (returned as
+ * `spacingZ`), and the inflated synthesized-layer count flags the series via
+ * {@link MissingSlices}.
  */
 function resampleAlongNormal(
   ordered: Slice[],
   proj: number[],
   sz: number,
   sliceVoxels: number,
-): { data: Float32Array; depth: number } {
+): { data: Float32Array; depth: number; spacingZ: number } {
   const n = ordered.length;
   const span = proj[n - 1] - proj[0];
-  const depth = Math.max(1, Math.round(span / sz) + 1);
+  const cap = n * MAX_RESAMPLE_DEPTH_FACTOR;
+  const ideal = Math.max(1, Math.round(span / sz) + 1);
+  const depth = Math.min(ideal, cap);
+  // Below the cap the pitch is the representative spacing exactly; only a capped
+  // grid widens its step to keep covering the full span at fewer layers.
+  const step = depth < ideal && depth > 1 ? span / (depth - 1) : sz;
   const data = new Float32Array(sliceVoxels * depth);
 
   let src = 0;
   for (let k = 0; k < depth; k++) {
-    const target = proj[0] + k * sz;
+    const target = proj[0] + k * step;
     while (src < n - 1 && proj[src + 1] < target) src++;
     const hiIndex = Math.min(src + 1, n - 1);
     const gap = proj[hiIndex] - proj[src];
@@ -200,7 +222,7 @@ function resampleAlongNormal(
       for (let i = 0; i < sliceVoxels; i++) data[offset + i] = lo[i] + (hi[i] - lo[i]) * t;
     }
   }
-  return { data, depth };
+  return { data, depth, spacingZ: step };
 }
 
 function clamp01(value: number): number {
