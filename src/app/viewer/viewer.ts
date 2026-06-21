@@ -635,6 +635,10 @@ const NOTICE_MS = 3600;
     // match event.key exactly, so Shift / Caps Lock (reported as 'X') would silently
     // miss; and they'd need a separate focus guard from the digit/'?' shortcuts.
     '(window:keydown)': 'onShortcutKey($event)',
+    // Picking from a <select> leaves it focused, so isEditableTarget swallows every
+    // subsequent shortcut until the user clicks away. Release that focus on change
+    // (the event bubbles to window) so the keyboard works straight after a pick.
+    '(window:change)': 'onControlChange($event)',
   },
 })
 export class Viewer {
@@ -2958,6 +2962,16 @@ export class Viewer {
   }
 
   /**
+   * Return focus to the document after a `<select>` is changed. A picked dropdown
+   * stays focused, and {@link isEditableTarget} then suppresses every shortcut, so
+   * hotkeys go dead until the user clicks away (issue #175). Blurring the select on
+   * change releases that focus. Other controls (checkboxes) are left untouched.
+   */
+  protected onControlChange(event: Event): void {
+    releaseSelectFocus(event.target);
+  }
+
+  /**
    * Escape closes the open overlays (help, then metadata), then cancels an
    * in-progress measurement, then deactivates the tool — most-modal first so one
    * press peels off one layer.
@@ -4371,6 +4385,16 @@ export function isEditableTarget(target: EventTarget | null): boolean {
     target instanceof HTMLTextAreaElement ||
     (target instanceof HTMLElement && target.isContentEditable === true)
   );
+}
+
+/**
+ * Blur a changed `<select>` so focus returns to the document. A picked dropdown
+ * stays focused and {@link isEditableTarget} would then swallow every shortcut,
+ * leaving hotkeys dead until the user clicks away (issue #175). Non-select targets
+ * (checkboxes, etc.) are left untouched.
+ */
+export function releaseSelectFocus(target: EventTarget | null): void {
+  if (target instanceof HTMLSelectElement) target.blur();
 }
 
 /** Whether CSS-pixel point (x, y) lies within a rectangle. */
