@@ -29,6 +29,10 @@ describe('modalityUnit', () => {
     expect(modalityUnit('CT')).toBe('HU');
   });
 
+  it('labels RTDOSE values as Gray', () => {
+    expect(modalityUnit('RTDOSE')).toBe('Gy');
+  });
+
   it('returns null for modalities without a standard scalar unit', () => {
     expect(modalityUnit('MR')).toBeNull();
     expect(modalityUnit('US')).toBeNull();

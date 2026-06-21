@@ -13,6 +13,7 @@ import {
   ybrFullToRgb,
 } from './photometric';
 import { extractMetadata } from './metadata';
+import { add, cross, normalize, scale } from './vec3';
 import type { Slice } from './types';
 
 /** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
@@ -39,6 +40,9 @@ type FrameCodec = (
 const FRAME_CODECS: Record<string, FrameCodec> = {
   '1.2.840.10008.1.2.5': decodeRleFrame, // RLE Lossless
 };
+
+/** SOP Class UID identifying an RT Dose Storage object. */
+const RTDOSE_SOP_CLASS = '1.2.840.10008.5.1.4.1.1.481.2';
 
 export class UnsupportedDicomError extends Error {}
 
@@ -88,6 +92,8 @@ interface FileContext {
   readonly seriesDescription: string | null;
   readonly frameOfReferenceUid: string | null;
   readonly modality: string | null;
+  /** True for an RT Dose object, decoded as a Gy-scaled grid rather than an image. */
+  readonly isDose: boolean;
   /** The PixelData (7FE0,0010) element — the source of encapsulated frames. */
   readonly pixelElement: dicomParser.Element;
   /** Sync (pure-JS) frame codec for a compressed transfer syntax, or null. */
@@ -123,6 +129,7 @@ export function parseFile(name: string, buffer: ArrayBuffer): Slice[] {
   const setup = setupFile(name, buffer);
   if (!setup) return [];
   const { ctx, frames } = setup;
+  if (ctx.isDose) return parseDose(ctx, frames);
   if (ctx.wasmTransferSyntax) {
     throw new UnsupportedDicomError(
       `Transfer syntax ${ctx.wasmTransferSyntax} requires async decoding; use parseFileAsync (${name}).`,
@@ -143,6 +150,7 @@ export async function parseFileAsync(name: string, buffer: ArrayBuffer): Promise
   const setup = setupFile(name, buffer);
   if (!setup) return [];
   const { ctx, frames } = setup;
+  if (ctx.isDose) return parseDose(ctx, frames);
   const count = ctx.rows * ctx.columns;
   const raw: FramePixels[] = [];
   for (let f = 0; f < frames; f++) raw.push(await readFrameSamplesAsync(ctx, f, count));
@@ -186,6 +194,13 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
   // or a palette-indexed one. Anything else is plain single-sample grayscale.
   const kind: FileContext['kind'] = samplesPerPixel >= 3 ? 'color' : palette ? 'palette' : 'mono';
 
+  // Detect RT Dose by Modality (uppercased, like the RTSTRUCT path) or SOP class,
+  // so a non-canonically-cased dose isn't misdecoded as a 16-bit image.
+  const modality = dataSet.string('x00080060')?.trim() || null;
+  const isDose =
+    modality?.toUpperCase() === 'RTDOSE' ||
+    dataSet.string('x00080016')?.trim() === RTDOSE_SOP_CLASS;
+
   const ctx: FileContext = {
     name,
     buffer,
@@ -205,7 +220,8 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
     seriesNumber: intOrNull(dataSet, 'x00200011'), // SeriesNumber
     seriesDescription: dataSet.string('x0008103e')?.trim() || null, // SeriesDescription
     frameOfReferenceUid: dataSet.string('x00200052')?.trim() || null, // FrameOfReferenceUID
-    modality: dataSet.string('x00080060')?.trim() || null,
+    modality,
+    isDose,
     pixelElement,
     codec,
     wasmTransferSyntax: wasm ? transferSyntax : null,
@@ -224,6 +240,94 @@ function assemble(ctx: FileContext, frames: number, raw: FramePixels[]): Slice[]
   const metadata = extractMetadata(ctx.dataSet);
   const slices = frames > 1 ? parseMultiframe(ctx, frames, raw) : [parseSingleFrame(ctx, raw[0])];
   return slices.map((slice, f) => (f === 0 ? { ...slice, metadata } : slice));
+}
+
+/**
+ * Assemble an RT Dose (Modality RTDOSE) instance into one {@link Slice} per
+ * dose-grid plane.
+ *
+ * A dose grid is multi-frame, but unlike an image stack its through-plane
+ * positions come from GridFrameOffsetVector (3004,000C) — per-frame offsets in mm
+ * along the slice normal from ImagePositionPatient — and its samples are scaled to
+ * absorbed dose in Gray by DoseGridScaling (3004,000E) rather than a modality LUT.
+ * Emitting one Gy-valued Slice per plane lets {@link import('./volume').buildVolume}
+ * assemble the grid and the existing reslice/probe/overlay machinery treat dose
+ * like any other scalar volume; `rescaleSlope = DoseGridScaling` lets the probe
+ * recover the stored integer. Frames are unsigned 8/16/32-bit and uncompressed.
+ */
+function parseDose(ctx: FileContext, frames: number): Slice[] {
+  if (ctx.codec || ctx.wasmTransferSyntax) {
+    throw new UnsupportedDicomError(`Compressed RT Dose is not supported (${ctx.name}).`);
+  }
+  const { dataSet } = ctx;
+  const scaling = num(dataSet, 'x3004000e', 1); // DoseGridScaling
+  const offsets = readFloats(dataSet, 'x3004000c', frames); // GridFrameOffsetVector
+  const orientation = readFloats(dataSet, 'x00200037', 6); // ImageOrientationPatient
+  const origin = readTriple(dataSet, 'x00200032'); // ImagePositionPatient (frame 0)
+  const pixelSpacing = readPair(dataSet, 'x00280030', [1, 1]);
+  const normal =
+    orientation && origin
+      ? normalize(cross(orientation.slice(0, 3), orientation.slice(3, 6)))
+      : null;
+  const count = ctx.rows * ctx.columns;
+  const metadata = extractMetadata(dataSet);
+
+  const slices: Slice[] = [];
+  for (let f = 0; f < frames; f++) {
+    // Each frame sits offsets[f] mm along the normal from the first frame's origin.
+    // A missing GridFrameOffsetVector (malformed multi-frame dose) falls back to
+    // unit steps so the frames still stack rather than collapsing onto one plane.
+    const offset = offsets ? offsets[f] : f;
+    const position = origin && normal ? add(origin, scale(normal, offset)) : origin;
+    const slice: Slice = {
+      name: frames > 1 ? `${ctx.name}#${f + 1}` : ctx.name,
+      rows: ctx.rows,
+      columns: ctx.columns,
+      pixelSpacing,
+      position,
+      orientation,
+      instanceNumber: f + 1,
+      seriesUid: ctx.seriesUid,
+      seriesNumber: ctx.seriesNumber,
+      seriesDescription: ctx.seriesDescription,
+      frameOfReferenceUid: ctx.frameOfReferenceUid,
+      // Canonical modality so the unit lookup yields Gy even for a SOP-class-detected
+      // (or non-canonically-cased) dose object.
+      modality: 'RTDOSE',
+      rescaleSlope: scaling,
+      rescaleIntercept: 0,
+      windowCenter: null,
+      windowWidth: null,
+      pixels: readDoseFrame(ctx, f, count, scaling),
+    };
+    slices.push(f === 0 ? { ...slice, metadata } : slice);
+  }
+  return slices;
+}
+
+/**
+ * Read one RT Dose frame's unsigned samples (8/16/32-bit, little-endian) directly
+ * from uncompressed PixelData, scaled to Gy by `scaling`. Dose grids are commonly
+ * 32-bit, which the general {@link readRawPixels} path (8/16-bit) does not cover.
+ */
+function readDoseFrame(
+  ctx: FileContext,
+  frameIndex: number,
+  count: number,
+  scaling: number,
+): Float32Array {
+  const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : ctx.bitsAllocated <= 16 ? 2 : 4;
+  const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
+  const view = new DataView(ctx.buffer, offset, count * bytesPerSample);
+  const out = new Float32Array(count);
+  if (bytesPerSample === 4) {
+    for (let i = 0; i < count; i++) out[i] = view.getUint32(i * 4, true) * scaling;
+  } else if (bytesPerSample === 2) {
+    for (let i = 0; i < count; i++) out[i] = view.getUint16(i * 2, true) * scaling;
+  } else {
+    for (let i = 0; i < count; i++) out[i] = view.getUint8(i) * scaling;
+  }
+  return out;
 }
 
 /** A frame's modality LUT and suggested display window, before photometric folding. */

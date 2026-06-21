@@ -315,7 +315,8 @@ export function framesMatch(a: string | null, b: string | null): boolean {
 /**
  * The unit of a volume's rescaled voxel values, given its DICOM modality.
  *
- * CT values rescaled through the modality LUT are Hounsfield Units (HU). Other
+ * CT values rescaled through the modality LUT are Hounsfield Units (HU); an
+ * RTDOSE grid scaled by DoseGridScaling is absorbed dose in Gray (Gy). Other
  * modalities (e.g. MR signal intensity) have no standard scalar unit, so they
  * return null and should be shown unitless.
  */
@@ -323,6 +324,8 @@ export function modalityUnit(modality: string | null): string | null {
   switch (modality) {
     case 'CT':
       return 'HU';
+    case 'RTDOSE':
+      return 'Gy';
     default:
       return null;
   }
