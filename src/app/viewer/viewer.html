@@ -503,6 +503,25 @@
       }
     </div>
 
+    <!-- Fusion blend bar: slide to set the overlay's composite opacity. -->
+    @if (blendBar(); as bar) {
+      <input
+        type="range"
+        class="blend-bar"
+        min="0"
+        max="100"
+        step="1"
+        [value]="blendPercent()"
+        (input)="onBlendInput($event)"
+        [style.left.px]="bar.x"
+        [style.top.px]="bar.y"
+        [style.width.px]="bar.width"
+        [attr.data-blend]="blendPercent()"
+        aria-label="Overlay blend"
+        [title]="'Overlay blend: ' + blendPercent() + '%'"
+      />
+    }
+
     <!-- RTSTRUCT ROI contours: one SVG per MPR pane, clipped to its rectangle. -->
     @for (overlay of contourOverlays(); track overlay.key) {
       <svg

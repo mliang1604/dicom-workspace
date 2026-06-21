@@ -493,6 +493,22 @@ button.active {
   cursor: pointer;
 }
 
+/* In-pane fusion blend bar: positioned over the largest MPR pane. */
+.blend-bar {
+  position: absolute;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  accent-color: #4ea1ff;
+  opacity: 0.8;
+}
+
+.blend-bar:hover,
+.blend-bar:focus-visible {
+  opacity: 1;
+}
+
 /* MPR cut-planes projected into the 3D pane, clipped to its rectangle. */
 .slice-planes {
   position: absolute;

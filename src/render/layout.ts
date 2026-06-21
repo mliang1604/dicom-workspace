@@ -120,3 +120,27 @@ export function scaleRect(rect: PaneRect, factor: number): PaneRect {
 function clampNonNegative(value: number): number {
   return value > 0 ? value : 0;
 }
+
+/** Placement of the in-pane overlay blend bar (a horizontal slider). */
+export interface BlendBar {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+}
+
+/**
+ * Place the in-pane fusion blend bar: a centred horizontal slider near the bottom
+ * of the largest MPR pane among `mprRects`. Returns null when there's no pane, or
+ * the host pane is too small to host a usable bar, so the caller hides it.
+ */
+export function blendBarPlacement(mprRects: readonly PaneRect[]): BlendBar | null {
+  if (mprRects.length === 0) return null;
+  const host = mprRects.reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  if (host.width < 120 || host.height < 80) return null;
+  const width = Math.min(260, Math.round(host.width * 0.6));
+  return {
+    x: Math.round(host.x + (host.width - width) / 2),
+    y: Math.round(host.y + host.height - 30),
+    width,
+  };
+}
