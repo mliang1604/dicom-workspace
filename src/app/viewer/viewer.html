@@ -194,6 +194,76 @@
       </div>
     </details>
 
+    @if (hasLayersPanel()) {
+      <details class="tool-group" open>
+        <summary class="tool-group-label">Layers</summary>
+        <div class="tool-group-body layer-panel">
+          <div class="view-mode" role="group" aria-label="View mode">
+            <button
+              type="button"
+              (click)="setViewMode('fusion')"
+              [class.active]="isFusion()"
+              [attr.aria-pressed]="isFusion()"
+              title="Fusion: composite the overlay over the base in a 3-pane MPR"
+            >
+              Fusion
+            </button>
+            <button
+              type="button"
+              (click)="setViewMode('compare')"
+              [class.active]="isCompare()"
+              [attr.aria-pressed]="isCompare()"
+              title="Compare: show the base and overlay side by side (6-pane)"
+            >
+              Compare
+            </button>
+          </div>
+
+          <div class="layer-legend">
+            @for (layer of layerLegend(); track layer.id) {
+              <div class="layer-item" [attr.data-layer]="layer.id">
+                @if (!layer.isBase) {
+                  <input
+                    type="checkbox"
+                    [checked]="layer.visible"
+                    (change)="toggleLayerVisible(layer.id)"
+                    [attr.aria-label]="'Show ' + layer.label + ' overlay'"
+                  />
+                }
+                <span class="layer-name" [title]="layer.label">{{ layer.label }}</span>
+                <span class="layer-role">{{ layer.roleBadge }}</span>
+                @if (!layer.isBase) {
+                  <select
+                    class="layer-display"
+                    [value]="layer.displayValue"
+                    (change)="onLayerDisplay(layer.id, $event)"
+                    [attr.aria-label]="layer.label + ' display'"
+                    title="Overlay colour map"
+                  >
+                    @for (opt of displayOptions; track opt) {
+                      <option [value]="opt">{{ opt }}</option>
+                    }
+                  </select>
+                  <input
+                    type="range"
+                    class="layer-opacity"
+                    min="0"
+                    max="100"
+                    step="5"
+                    [value]="layer.opacityPercent"
+                    (input)="onLayerOpacity(layer.id, $event)"
+                    [attr.data-opacity]="layer.opacityPercent"
+                    [attr.aria-label]="layer.label + ' opacity'"
+                    [title]="layer.label + ' opacity: ' + layer.opacityPercent + '%'"
+                  />
+                }
+              </div>
+            }
+          </div>
+        </div>
+      </details>
+    }
+
     @if (hasOverlay()) {
       <details class="tool-group" open>
         <summary class="tool-group-label">Fusion</summary>

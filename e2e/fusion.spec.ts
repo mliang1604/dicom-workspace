@@ -41,6 +41,31 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await expect(blendBar).toBeVisible({ timeout: 30_000 });
   await expect(blendBar).toHaveAttribute('data-blend', /\d+/);
 
+  // #130: the dose loaded as an overlay, so the Layers panel lists both layers
+  // (base CT + overlay dose) and exposes the overlay's colormap and the view-mode
+  // switch — the acceptance path: load dose, set its colormap, switch fusion ⇄
+  // compare, all without a render error.
+  const layerPanel = page.locator('.layer-panel');
+  await expect(layerPanel).toBeVisible();
+  await expect(layerPanel.locator('.layer-item')).toHaveCount(2);
+
+  // Change the overlay colormap (jet → hot); recomposites without error.
+  await layerPanel.locator('select.layer-display').selectOption('hot');
+
+  // Hiding the overlay drops it from compositing (blend bar goes away); re-show it.
+  const overlayRow = layerPanel.locator('.layer-item[data-layer]').last();
+  await overlayRow.locator('input[type="checkbox"]').uncheck();
+  await expect(blendBar).toHaveCount(0);
+  await overlayRow.locator('input[type="checkbox"]').check();
+  await expect(blendBar).toBeVisible();
+
+  // The view-mode switch jumps to Compare (6 panes) and back to Fusion (3 panes).
+  await layerPanel.getByRole('button', { name: 'Compare' }).click();
+  await expect(page.locator('.pane-overlay .pane')).toHaveCount(6);
+  await layerPanel.getByRole('button', { name: 'Fusion' }).click();
+  await expect(page.locator('.pane-overlay .pane')).toHaveCount(3);
+  await expect(blendBar).toBeVisible();
+
   // Cycle the Layout button to the Compare layout.
   const layoutButton = page.getByRole('button', { name: /Layout/ });
   for (let i = 0; i < 6; i++) {

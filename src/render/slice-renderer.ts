@@ -602,6 +602,15 @@ export class SliceRenderer {
       this.rebuildMprBindGroups();
       return;
     }
+    // Same overlay grid, only opacity/colormap changed (the blend bar and the
+    // layers-panel slider): update the per-frame scalars and the LUT in place —
+    // no texture re-upload, matrix recompute, or bind-group churn per drag frame.
+    if (volume === this.overlayVolume) {
+      this.overlayOpacity = opacity;
+      this.overlayColormap = display?.kind === 'colormap';
+      if (display?.kind === 'colormap') this.uploadOverlayLut(colormap(display.name));
+      return;
+    }
     this.overlayTexture?.destroy();
     this.overlayTexture = this.createVolumeTexture(volume, 'Overlay');
     this.overlayVolume = volume;

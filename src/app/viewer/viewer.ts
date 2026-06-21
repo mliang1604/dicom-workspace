@@ -105,16 +105,19 @@ import {
   type CrossSectionRow,
 } from '../../render/contours';
 import {
+  applyLayerOverrides,
   baseLayer,
   DEFAULT_OVERLAY_OPACITY,
   modalityUnit,
   Orientation,
   type Layer,
+  type LayerDisplay,
   type MissingSlices,
   type StructureSet,
   type Vec3,
   type Volume,
 } from '../../dicom/types';
+import { COLORMAPS } from '../../render/colormap';
 import { add, cross, dot, length, normalize, scale, sub } from '../../dicom/vec3';
 import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
@@ -288,6 +291,24 @@ export interface RoiLegendEntry {
   readonly opacityPercent: number;
   /** Whether the ROI's contours are currently drawn. */
   readonly visible: boolean;
+}
+
+/** One layer listed in the layers panel, with its display controls. */
+interface LayerLegendEntry {
+  /** The layer's id (see {@link Layer.id}); the `@for` track and override key. */
+  readonly id: string;
+  /** Human label: the modality, or a fallback when the layer has none. */
+  readonly label: string;
+  /** Role badge text: 'BASE' or 'OVERLAY'. */
+  readonly roleBadge: string;
+  /** Whether this is the base underlay (shown without overlay-only controls). */
+  readonly isBase: boolean;
+  /** Whether the layer is currently composited. */
+  readonly visible: boolean;
+  /** Composite opacity as a whole percent `[0, 100]`, for the opacity slider. */
+  readonly opacityPercent: number;
+  /** Selected display: `'grayscale'` or a colormap name, for the `<select>`. */
+  readonly displayValue: string;
 }
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
@@ -847,6 +868,24 @@ export class Viewer {
    * here. Reset on each load.
    */
   private readonly roiOpacities = signal<ReadonlyMap<string, number>>(new Map());
+  /**
+   * Layer ids hidden from the layers panel. The base never appears here (it's the
+   * underlay); an overlay listed here is dropped from compositing. Reset on a fresh
+   * base load (an added overlay starts visible). See {@link applyLayerOverrides}.
+   */
+  private readonly hiddenLayers = signal<ReadonlySet<string>>(new Set());
+  /**
+   * Per-layer composite opacity in `[0, 1]` keyed by {@link Layer.id}. A layer
+   * absent keeps its registry default; the layers-panel slider and the in-pane
+   * blend bar both write here (they edit the same value). Reset on a fresh load.
+   */
+  private readonly layerOpacities = signal<ReadonlyMap<string, number>>(new Map());
+  /**
+   * Per-layer display-transform overrides keyed by {@link Layer.id}: the colormap
+   * (or grayscale) the layers panel picks for an overlay, overriding the load-time
+   * default (RTDOSE → jet). Reset on a fresh load.
+   */
+  private readonly layerDisplays = signal<ReadonlyMap<string, LayerDisplay>>(new Map());
   /**
    * Which structure set the panel and overlays show: an index into
    * {@link structureSets}, or -1 for all of them. Only meaningful when more than
@@ -1610,7 +1649,13 @@ export class Viewer {
    */
   private readonly layers = computed<readonly Layer[]>(() => {
     const state = this.load();
-    return state.status === 'ready' ? state.result.layers : [];
+    if (state.status !== 'ready') return [];
+    return applyLayerOverrides(
+      state.result.layers,
+      this.hiddenLayers(),
+      this.layerOpacities(),
+      this.layerDisplays(),
+    );
   });
 
   /**
@@ -1629,8 +1674,64 @@ export class Viewer {
     () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
   );
 
+  /** Whether the layers panel applies: more than the lone base layer is loaded. */
+  protected readonly hasLayersPanel = computed(() => this.layers().length > 1);
+
+  /** The layers for the panel, each with its display controls (base first). */
+  protected readonly layerLegend = computed<LayerLegendEntry[]>(() =>
+    this.layers().map((layer) => ({
+      id: layer.id,
+      label: layer.modality ?? 'Image',
+      roleBadge: layer.role === 'base' ? 'BASE' : 'OVERLAY',
+      isBase: layer.role === 'base',
+      visible: layer.visible,
+      opacityPercent: Math.round(layer.opacity * 100),
+      displayValue: layer.display.kind === 'grayscale' ? 'grayscale' : layer.display.name,
+    })),
+  );
+
+  /** Overlay display choices for the layers panel: grayscale plus each colormap. */
+  protected readonly displayOptions = ['grayscale', ...Object.keys(COLORMAPS)];
+
+  /** Toggle an overlay layer's visibility (the base underlay is never hidden). */
+  protected toggleLayerVisible(id: string): void {
+    this.hiddenLayers.update((hidden) => {
+      const next = new Set(hidden);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  /** Set a layer's composite opacity from a 0..100 slider value. */
+  private setLayerOpacity(id: string, percent: number): void {
+    const opacity = Math.min(1, Math.max(0, percent / 100));
+    this.layerOpacities.update((map) => new Map(map).set(id, opacity));
+  }
+
+  /** Layers-panel opacity slider for a layer. */
+  protected onLayerOpacity(id: string, event: Event): void {
+    this.setLayerOpacity(id, Number((event.target as HTMLInputElement).value));
+  }
+
+  /** Layers-panel display selector: grayscale or a named colormap for the layer. */
+  protected onLayerDisplay(id: string, event: Event): void {
+    const value = (event.target as HTMLSelectElement).value;
+    const display: LayerDisplay =
+      value === 'grayscale' ? { kind: 'grayscale' } : { kind: 'colormap', name: value };
+    this.layerDisplays.update((map) => new Map(map).set(id, display));
+  }
+
   /** True in the side-by-side Compare layout (vs. the composited fusion views). */
   protected readonly isCompare = computed(() => this.layoutMode() === LayoutMode.Compare);
+
+  /** True in the composited Fusion view (the 3-pane MPR with the overlay blended in). */
+  protected readonly isFusion = computed(() => this.layoutMode() === LayoutMode.TriMpr);
+
+  /** View-mode selector: Fusion (composited 3-pane) vs Compare (side-by-side 6-pane). */
+  protected setViewMode(mode: 'fusion' | 'compare'): void {
+    this.layoutMode.set(mode === 'compare' ? LayoutMode.Compare : LayoutMode.TriMpr);
+  }
 
   /**
    * The volume a Compare group draws: the base layer for group 0, the active
@@ -1719,9 +1820,6 @@ export class Viewer {
     () => this.selectedOverlay() !== null && !this.isCompare(),
   );
 
-  /** Composite opacity of the active overlay, driven by the in-pane blend bar. */
-  protected readonly blendOpacity = signal(DEFAULT_OVERLAY_OPACITY);
-
   /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
   protected readonly checkerboardEnabled = signal(false);
 
@@ -1730,8 +1828,14 @@ export class Viewer {
     this.checkerboardEnabled.update((on) => !on);
   }
 
-  /** Blend opacity as a 0..100 percentage, for the range input and its readout. */
-  protected readonly blendPercent = computed(() => Math.round(this.blendOpacity() * 100));
+  /**
+   * The active overlay's composite opacity as a 0..100 percentage, for the in-pane
+   * blend bar and its readout. The bar and the layers-panel slider edit the same
+   * per-layer opacity (see {@link layerOpacities}).
+   */
+  protected readonly blendPercent = computed(() =>
+    Math.round((this.selectedOverlay()?.opacity ?? DEFAULT_OVERLAY_OPACITY) * 100),
+  );
 
   /**
    * Placement of the in-pane blend bar over the largest MPR pane, or null when no
@@ -1745,10 +1849,10 @@ export class Viewer {
     return blendBarPlacement(mprRects);
   });
 
-  /** Drag/keyboard the blend bar: set the overlay opacity from its 0..100 value. */
+  /** Drag/keyboard the blend bar: set the active overlay's opacity from its 0..100 value. */
   protected onBlendInput(event: Event): void {
-    const value = Number((event.target as HTMLInputElement).value);
-    this.blendOpacity.set(Math.min(1, Math.max(0, value / 100)));
+    const overlay = this.selectedOverlay();
+    if (overlay) this.setLayerOpacity(overlay.id, Number((event.target as HTMLInputElement).value));
   }
 
   /**
@@ -1887,9 +1991,9 @@ export class Viewer {
     effect(() => {
       const renderer = this.renderer();
       const overlay = this.selectedOverlay();
-      // The in-pane blend bar drives the opacity (not the layer's stored default),
-      // so dragging it re-runs setOverlay and redraws.
-      const opacity = overlay ? this.blendOpacity() : 0;
+      // The layer's (overridable) opacity drives compositing; the blend bar and the
+      // layers-panel slider both edit it, so either re-runs setOverlay and redraws.
+      const opacity = overlay ? overlay.opacity : 0;
       if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
       this.scheduleFrame();
     });
@@ -3698,6 +3802,10 @@ export class Viewer {
     this.hiddenRois.set(new Set()); // a fresh structure set starts fully visible
     this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
     this.roiOpacities.set(new Map()); // …fully opaque
+    // A fresh base load drops any layers-panel edits (overlays load at their defaults).
+    this.hiddenLayers.set(new Set());
+    this.layerOpacities.set(new Map());
+    this.layerDisplays.set(new Map());
     this.selectedSetIndex.set(-1); // showing every associated structure set
     // Per-volume view state is per-session: always reset to volume-derived defaults.
     this.invert.set(false);

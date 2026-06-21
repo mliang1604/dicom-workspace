@@ -1,10 +1,12 @@
 import {
+  applyLayerOverrides,
   baseImageLayer,
   baseLayer,
   framesMatch,
   modalityUnit,
   overlayImageLayer,
   type Layer,
+  type LayerDisplay,
   type Volume,
 } from './types';
 
@@ -118,5 +120,37 @@ describe('baseLayer', () => {
 
   it('returns undefined for an empty registry', () => {
     expect(baseLayer([])).toBeUndefined();
+  });
+});
+
+describe('applyLayerOverrides', () => {
+  const base = baseImageLayer('ct', fakeVolume('CT'));
+  const overlay = overlayImageLayer('dose', fakeVolume('RTDOSE')); // jet, 0.5, visible
+
+  it('returns each layer unchanged (same reference) when there are no overrides', () => {
+    const out = applyLayerOverrides([base, overlay], new Set(), new Map(), new Map());
+    expect(out[0]).toBe(base);
+    expect(out[1]).toBe(overlay);
+  });
+
+  it('hides a layer listed in the hidden set', () => {
+    const out = applyLayerOverrides([base, overlay], new Set(['dose']), new Map(), new Map());
+    expect(out[1].visible).toBe(false);
+    expect(out[0].visible).toBe(true);
+  });
+
+  it('overrides opacity and display while leaving identity fields intact', () => {
+    const displays = new Map<string, LayerDisplay>([['dose', { kind: 'colormap', name: 'hot' }]]);
+    const out = applyLayerOverrides([base, overlay], new Set(), new Map([['dose', 0.2]]), displays);
+    expect(out[1].opacity).toBe(0.2);
+    expect(out[1].display).toEqual({ kind: 'colormap', name: 'hot' });
+    expect(out[1].id).toBe('dose');
+    expect(out[1].role).toBe('overlay');
+  });
+
+  it('keeps a layer hidden at the source even without a hidden-set entry', () => {
+    const hiddenSource: Layer = { ...overlay, visible: false };
+    const out = applyLayerOverrides([hiddenSource], new Set(), new Map(), new Map());
+    expect(out[0].visible).toBe(false);
   });
 });
