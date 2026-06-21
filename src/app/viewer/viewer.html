@@ -1167,3 +1167,7 @@
     }
   </main>
 </div>
+
+<!-- Longitudinal history docked below the workspace; hidden until a patient is
+     imported. Highlights the currently-loaded series' chip (read-only; #173). -->
+<app-history-panel [loadedSeriesUid]="selectedSeriesUid()" />

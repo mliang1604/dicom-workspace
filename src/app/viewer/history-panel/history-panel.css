@@ -1,0 +1,203 @@
+/* Longitudinal history, docked below the viewport as the last row of the
+   viewer's flex column. Glass surface with a hairline top edge; capped height so
+   an expanded study never crowds out the imaging area. */
+:host {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 42vh;
+  border-top: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+/* Removed from layout entirely when the catalog is empty (host [hidden]). */
+:host([hidden]) {
+  display: none;
+}
+
+/* Header bar: collapse toggle + focused-patient label. */
+.history-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+}
+
+.history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--glass-bg);
+  color: var(--text);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.history-toggle:hover,
+.history-toggle:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--accent-ring);
+  outline: none;
+}
+
+.history-chevron {
+  color: var(--muted);
+}
+
+.history-count {
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--glass-bg-strong);
+  border-radius: var(--radius-pill);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-patient {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The date axis: study tiles laid out left → right (oldest → newest), scrolling
+   horizontally when they overflow. */
+.timeline {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin: 0;
+  padding: 0 12px 12px;
+  list-style: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 0;
+}
+
+.study {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* One study tile: date / description / (modalities + count). The whole tile is
+   the accordion button. The open tile widens to host its series strip. */
+.study-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 168px;
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--text);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.study-tile:hover,
+.study-tile:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--accent-ring);
+  outline: none;
+}
+
+.study.open .study-tile {
+  border-color: var(--accent);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.study-date {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.study-desc {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.study-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.study-modalities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.modality-badge {
+  padding: 0 5px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+.study-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Series chips revealed inline beneath an open tile: a horizontal strip joined
+   to the tile (shared accent border, no gap at the seam). */
+.series-strip {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+  overflow-x: auto;
+  background: var(--glass-bg);
+  border: 1px solid var(--accent);
+  border-top: none;
+  border-bottom-left-radius: var(--radius-sm);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.series-strip li {
+  flex: 0 0 auto;
+}
+
+/* Drop translucency where it harms legibility or is unsupported. */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :host {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--panel);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :host {
+    background: var(--panel);
+  }
+}
