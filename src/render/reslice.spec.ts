@@ -7,10 +7,12 @@ import {
   isOblique,
   NO_OBLIQUE,
   orientTowardRay,
+  overlayPlaneToTexMatrix,
   planeCoordsAt,
   planeExtentMm,
   planePixelDims,
   planeToTex,
+  planeToTexMatrix,
   patientToTexMatrix,
   referenceLine,
   slabTRange,
@@ -46,6 +48,55 @@ function expectVec(actual: readonly number[], expected: readonly number[]): void
   expect(actual.length).toBe(expected.length);
   for (let i = 0; i < expected.length; i++) expect(actual[i]).toBeCloseTo(expected[i], 6);
 }
+
+/** Apply a column-major 4×4 to a pane point (u, v, slicePos, 1), returning xyz. */
+function applyMat4(m: Float32Array, u: number, v: number, s: number): [number, number, number] {
+  return [
+    m[0] * u + m[4] * v + m[8] * s + m[12],
+    m[1] * u + m[5] * v + m[9] * s + m[13],
+    m[2] * u + m[6] * v + m[10] * s + m[14],
+  ];
+}
+
+describe('overlayPlaneToTexMatrix', () => {
+  // Base: a 2×2×2 grid at patient 0..10 (bounds −5..15). Overlay: same spacing but
+  // shifted to patient 10..20 (bounds 5..25) — a different field of view in the
+  // same frame of reference, i.e. the case that breaks naive per-volume mapping.
+  const base = makeVolume([2, 2, 2], {
+    iStep: [10, 0, 0],
+    jStep: [0, 10, 0],
+    kStep: [0, 0, 10],
+    origin: [0, 0, 0],
+  });
+  const overlay = makeVolume([2, 2, 2], {
+    iStep: [10, 0, 0],
+    jStep: [0, 10, 0],
+    kStep: [0, 0, 10],
+    origin: [10, 10, 10],
+  });
+
+  it('samples the overlay grid at the same patient point the base pane shows', () => {
+    const m = overlayPlaneToTexMatrix(base, overlay, Orientation.Axial);
+    // Base pane centre is patient [5,5,5] — the overlay's minimum corner → tex 0.
+    expectVec(applyMat4(m, 0.5, 0.5, 0.5), [0, 0, 0]);
+    // Base pane far corner is patient [15,15,15] — the overlay's centre → tex 0.5.
+    expectVec(applyMat4(m, 1, 1, 1), [0.5, 0.5, 0.5]);
+  });
+
+  it('differs from mapping the overlay by its own bounds (the co-registration fix)', () => {
+    // The naive overlay-own matrix maps the pane centre to the overlay's OWN
+    // centre (tex 0.5) — a different patient point — which would mis-register.
+    const naive = applyMat4(planeToTexMatrix(overlay, Orientation.Axial), 0.5, 0.5, 0.5);
+    expect(naive[0]).toBeCloseTo(0.5);
+    const correct = applyMat4(
+      overlayPlaneToTexMatrix(base, overlay, Orientation.Axial),
+      0.5,
+      0.5,
+      0.5,
+    );
+    expect(correct[0]).not.toBeCloseTo(naive[0]);
+  });
+});
 
 describe('planeToTex', () => {
   it('reproduces the legacy axis mapping when geometry is identity', () => {

@@ -6,6 +6,7 @@ import type { PaneRect, Vec2 } from './layout';
 import {
   clipPlaneTex,
   clipTRange,
+  overlayPlaneToTexMatrix,
   patientToTexMatrix,
   planeExtentMm,
   planePixelDims,
@@ -235,9 +236,12 @@ export interface MipPaneView {
 export type PaneView = MprPaneView | MipPaneView;
 
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
-// slicePos,flipX (32) + invert + 12 bytes pad (16). A multiple of the 16-byte
-// uniform-struct stride, with the trailing pad satisfying the mat4x4 alignment.
-const PARAMS_SIZE = 112;
+// slicePos,flipX (32) + invert + 12 bytes pad (16) = 112; then the fusion-overlay
+// block at byte 112 (16-aligned for its mat4x4): overlayToTex mat4x4 (64) +
+// overlayWindowCenter,overlayWindowWidth,overlayOpacity,_pad (16) = 80. Total 192.
+const PARAMS_SIZE = 192;
+/** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
+const OVERLAY_FLOATS = 28;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 const MIP_PARAMS_SIZE = 256;
@@ -313,6 +317,13 @@ export class SliceRenderer {
   private texture: GPUTexture | null = null;
   /** Per-orientation plane→texture matrices, indexed by Orientation value. */
   private matrices: readonly Float32Array[] = [];
+  /** The active fusion overlay (a second volume), or null when none is shown. */
+  private overlayVolume: Volume | null = null;
+  private overlayTexture: GPUTexture | null = null;
+  /** Overlay per-orientation plane→texture matrices (its own grid), or null. */
+  private overlayMatrices: readonly Float32Array[] | null = null;
+  /** Composite opacity of the overlay over the base, 0 when no overlay. */
+  private overlayOpacity = 0;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -433,46 +444,74 @@ export class SliceRenderer {
     return sliceCountFor(this.volume, orientation);
   }
 
-  /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
-  setVolume(volume: Volume): void {
+  /** Upload a {@link Volume} to a fresh `r16float` 3D texture, with a size guard. */
+  private createVolumeTexture(volume: Volume, label: string): GPUTexture {
     const [width, height, depth] = volume.dims;
     const limit = this.device.limits.maxTextureDimension3D;
     if (width > limit || height > limit || depth > limit) {
       throw new Error(
-        `Volume ${width}×${height}×${depth} exceeds this GPU's 3D texture limit of ${limit}.`,
+        `${label} ${width}×${height}×${depth} exceeds this GPU's 3D texture limit of ${limit}.`,
       );
     }
-
-    this.texture?.destroy();
     const texture = this.device.createTexture({
       dimension: '3d',
       size: { width, height, depthOrArrayLayers: depth },
       format: 'r16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-
     this.device.queue.writeTexture(
       { texture },
       floatsToHalf(volume.data),
       { bytesPerRow: width * BYTES_PER_HALF, rowsPerImage: height },
       { width, height, depthOrArrayLayers: depth },
     );
+    return texture;
+  }
 
-    const view = texture.createView();
+  /**
+   * (Re)build the MPR slot bind groups for the current base + overlay textures.
+   * With no overlay, binding 3 reuses the base view — a valid texture the shader
+   * skips (overlayOpacity 0); `layout:'auto'` requires the binding to exist.
+   */
+  private rebuildMprBindGroups(): void {
+    if (!this.texture) return;
+    const baseView = this.texture.createView();
+    const overlayView = this.overlayTexture?.createView() ?? baseView;
     for (const slot of this.slots) {
       slot.bindGroup = this.device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: view },
+          { binding: 0, resource: baseView },
           { binding: 1, resource: this.sampler },
           { binding: 2, resource: { buffer: slot.buffer } },
+          { binding: 3, resource: overlayView },
         ],
       });
     }
+  }
+
+  /** Drop any fusion overlay (texture + matrices + opacity). */
+  private clearOverlay(): void {
+    this.overlayTexture?.destroy();
+    this.overlayTexture = null;
+    this.overlayVolume = null;
+    this.overlayMatrices = null;
+    this.overlayOpacity = 0;
+  }
+
+  /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
+  setVolume(volume: Volume): void {
+    this.texture?.destroy();
+    this.texture = this.createVolumeTexture(volume, 'Volume');
+    // A fresh base load drops any previous fusion overlay; the viewer re-adds one
+    // through setOverlay when the new load carries an overlay layer.
+    this.clearOverlay();
+    this.rebuildMprBindGroups();
+
     this.mipSlot.bindGroup = this.device.createBindGroup({
       layout: this.mipPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: view },
+        { binding: 0, resource: this.texture.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.mipSlot.buffer } },
         { binding: 3, resource: this.tfTexture.createView({ dimension: '1d' }) },
@@ -480,7 +519,6 @@ export class SliceRenderer {
     });
 
     this.volume = volume;
-    this.texture = texture;
     // The reslice matrix depends only on the volume's geometry, so build one
     // per orientation up front and reuse it across frames.
     this.matrices = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map(
@@ -490,7 +528,40 @@ export class SliceRenderer {
     // geometry; cache them for the MIP raycaster. Step the ray roughly once per
     // voxel along the box diagonal so detail isn't skipped.
     this.patientToTex = patientToTexMatrix(volume);
+    const [width, height, depth] = volume.dims;
     this.mipSteps = Math.ceil(Math.hypot(width, height, depth));
+  }
+
+  /**
+   * Set, replace, or clear (`null`) the fusion overlay — a second volume
+   * composited over the base in the MPR panes by `opacity`. Uploads only the
+   * overlay texture and rebuilds the MPR bind groups; the base volume, its
+   * matrices and the view state are untouched (unlike {@link setVolume}). The
+   * overlay shares the patient frame but has its own grid, so it carries its own
+   * per-orientation plane→texture matrices.
+   */
+  setOverlay(volume: Volume | null, opacity: number): void {
+    if (!volume) {
+      if (!this.overlayVolume) return;
+      this.clearOverlay();
+      this.rebuildMprBindGroups();
+      return;
+    }
+    this.overlayTexture?.destroy();
+    this.overlayTexture = this.createVolumeTexture(volume, 'Overlay');
+    this.overlayVolume = volume;
+    this.overlayOpacity = opacity;
+    // The overlay matrices co-register the BASE's pane plane with the overlay's
+    // grid, so they need the base volume; rebuilt here for the orthogonal panes
+    // and refreshed per-frame for oblique ones in writeParams. Without a base
+    // there's nothing to composite over (matrices stay null → shader skips it).
+    const base = this.volume;
+    this.overlayMatrices = base
+      ? [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map((orientation) =>
+          overlayPlaneToTexMatrix(base, volume, orientation),
+        )
+      : null;
+    this.rebuildMprBindGroups();
   }
 
   /**
@@ -700,21 +771,87 @@ export class SliceRenderer {
       ? planeToTexMatrix(volume, view.orientation, view.rotation)
       : this.matrices[view.orientation];
 
-    const params = new ArrayBuffer(PARAMS_SIZE);
-    const floats = new Float32Array(params);
-    const uints = new Uint32Array(params);
-    floats.set(matrix, 0); // planeToTex, floats 0..15
-    floats[MATRIX_FLOATS + 0] = scaleX / zoom;
-    floats[MATRIX_FLOATS + 1] = scaleY / zoom;
-    floats[MATRIX_FLOATS + 2] = pan.x;
-    floats[MATRIX_FLOATS + 3] = pan.y;
-    floats[MATRIX_FLOATS + 4] = view.windowCenter;
-    floats[MATRIX_FLOATS + 5] = view.windowWidth;
-    floats[MATRIX_FLOATS + 6] = slicePos;
-    uints[MATRIX_FLOATS + 7] = view.flipX ? 1 : 0;
-    uints[MATRIX_FLOATS + 8] = view.invert ? 1 : 0;
+    // The overlay shares the pane plane but samples its own grid, so it gets its
+    // own (possibly oblique) plane→texture matrix and is windowed by its own
+    // volume's defaults. Null when there's no overlay (the shader then skips it).
+    const overlay =
+      this.overlayVolume && this.overlayMatrices
+        ? {
+            matrix: isOblique(view.rotation)
+              ? overlayPlaneToTexMatrix(volume, this.overlayVolume, view.orientation, view.rotation)
+              : this.overlayMatrices[view.orientation],
+            windowCenter: this.overlayVolume.windowCenter,
+            windowWidth: this.overlayVolume.windowWidth,
+            opacity: this.overlayOpacity,
+          }
+        : null;
+
+    const params = packSliceParams({
+      matrix,
+      scaleX: scaleX / zoom,
+      scaleY: scaleY / zoom,
+      pan,
+      windowCenter: view.windowCenter,
+      windowWidth: view.windowWidth,
+      slicePos,
+      flipX: !!view.flipX,
+      invert: !!view.invert,
+      overlay,
+    });
     this.device.queue.writeBuffer(buffer, 0, params);
   }
+}
+
+/** The base reslice + screen fit + window for one MPR pane (see {@link packSliceParams}). */
+export interface SliceParams {
+  readonly matrix: Float32Array | readonly number[];
+  readonly scaleX: number;
+  readonly scaleY: number;
+  readonly pan: Vec2;
+  readonly windowCenter: number;
+  readonly windowWidth: number;
+  readonly slicePos: number;
+  readonly flipX: boolean;
+  readonly invert: boolean;
+  /** The fusion overlay block, or null when no overlay is composited. */
+  readonly overlay: {
+    readonly matrix: Float32Array | readonly number[];
+    readonly windowCenter: number;
+    readonly windowWidth: number;
+    readonly opacity: number;
+  } | null;
+}
+
+/**
+ * Pack one MPR pane's uniform to the exact byte layout the WGSL `Params` struct
+ * expects (see slice-shader.ts): the base reslice matrix + screen fit + window
+ * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
+ * matrix (28..43), overlay window centre/width and opacity (44..46). With no
+ * overlay the opacity stays 0, so the shader leaves the base untouched. Pure and
+ * exported so the layout can be unit-tested without a GPU — the shader and this
+ * packing must stay in lockstep.
+ */
+export function packSliceParams(p: SliceParams): ArrayBuffer {
+  const params = new ArrayBuffer(PARAMS_SIZE);
+  const floats = new Float32Array(params);
+  const uints = new Uint32Array(params);
+  floats.set(p.matrix as ArrayLike<number>, 0); // planeToTex, floats 0..15
+  floats[MATRIX_FLOATS + 0] = p.scaleX;
+  floats[MATRIX_FLOATS + 1] = p.scaleY;
+  floats[MATRIX_FLOATS + 2] = p.pan.x;
+  floats[MATRIX_FLOATS + 3] = p.pan.y;
+  floats[MATRIX_FLOATS + 4] = p.windowCenter;
+  floats[MATRIX_FLOATS + 5] = p.windowWidth;
+  floats[MATRIX_FLOATS + 6] = p.slicePos;
+  uints[MATRIX_FLOATS + 7] = p.flipX ? 1 : 0;
+  uints[MATRIX_FLOATS + 8] = p.invert ? 1 : 0;
+  if (p.overlay) {
+    floats.set(p.overlay.matrix as ArrayLike<number>, OVERLAY_FLOATS); // overlayToTex, 28..43
+    floats[OVERLAY_FLOATS + 16] = p.overlay.windowCenter; // float 44
+    floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45
+    floats[OVERLAY_FLOATS + 18] = p.overlay.opacity; // float 46
+  }
+  return params;
 }
 
 /**

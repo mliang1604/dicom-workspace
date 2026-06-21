@@ -1577,6 +1577,15 @@ export class Viewer {
   private readonly volume = computed<Volume | null>(() => baseLayer(this.layers())?.volume ?? null);
 
   /**
+   * The active fusion overlay: the first visible `'overlay'`-role layer, or null.
+   * Composited over the base in the MPR panes (see the setOverlay effect). A
+   * single active overlay for now — the layers panel will let the user pick which.
+   */
+  private readonly selectedOverlay = computed<Layer | null>(
+    () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
+  );
+
+  /**
    * The volume's full depth (mm): the upper bound and default for the slab
    * thickness control, at which the slab covers the whole volume.
    */
@@ -1703,6 +1712,16 @@ export class Viewer {
       const selectedSet = this.selectedSetIndex();
       if (renderer)
         this.buildSurfaceMesh(renderer, meshes, hidden, overrides, opacities, selectedSet);
+      this.scheduleFrame();
+    });
+
+    // Upload / swap / clear the active fusion overlay whenever it changes. Unlike
+    // the base volume this doesn't reset the view state — setOverlay re-uploads
+    // only the overlay texture and rebuilds the MPR bind groups, then we redraw.
+    effect(() => {
+      const renderer = this.renderer();
+      const overlay = this.selectedOverlay();
+      if (renderer) renderer.setOverlay(overlay?.volume ?? null, overlay?.opacity ?? 0);
       this.scheduleFrame();
     });
 

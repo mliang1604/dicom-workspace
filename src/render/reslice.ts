@@ -95,7 +95,21 @@ export function planeToTex(
   const geom = resolveGeometry(volume);
   const dims = volume.dims;
   const basis = obliqueBasis(planeBasis(orientation, patientBounds(geom, dims)), rotation);
+  return basisToTex(basis, geom, dims);
+}
 
+/**
+ * Map a pane basis (its u/v/slice axes and origin in patient space) into a
+ * volume's texture coordinates. Separated from {@link planeToTex} so a pane plane
+ * defined by ONE volume's bounds can be sampled from ANOTHER volume's grid — the
+ * fusion overlay case, where the base defines the displayed plane and the overlay
+ * (sharing the patient frame, different grid) is sampled at the same patient point.
+ */
+function basisToTex(
+  basis: PlaneBasis,
+  geom: VolumeGeometry,
+  dims: readonly [number, number, number],
+): PlaneToTex {
   const dU = perTexel(invMul(geom, basis.axisU), dims);
   const dV = perTexel(invMul(geom, basis.axisV), dims);
   const dS = perTexel(invMul(geom, basis.axisS), dims);
@@ -137,13 +151,8 @@ export function planeCoordsAt(map: PlaneToTex, coord: Vec3): PlaneCoords {
   return { u: dot(r0, rhs) * inv, v: dot(r1, rhs) * inv, slicePos: dot(r2, rhs) * inv };
 }
 
-/** Column-major 4×4 of {@link planeToTex} for upload to the shader uniform. */
-export function planeToTexMatrix(
-  volume: Volume,
-  orientation: Orientation,
-  rotation?: ObliqueRotation,
-): Float32Array {
-  const { dU, dV, dS, origin } = planeToTex(volume, orientation, rotation);
+/** Column-major 4×4 of a {@link PlaneToTex} for upload to the shader uniform. */
+function texAffineMatrix({ dU, dV, dS, origin }: PlaneToTex): Float32Array {
   // texcoord = (M · vec4(u, v, slicePos, 1)).xyz, with M's columns being the
   // three deltas and the origin. WGSL reads mat4x4 column-major.
   // prettier-ignore
@@ -153,6 +162,37 @@ export function planeToTexMatrix(
     dS[0], dS[1], dS[2], 0,
     origin[0], origin[1], origin[2], 1,
   ]);
+}
+
+/** Column-major 4×4 of {@link planeToTex} for upload to the shader uniform. */
+export function planeToTexMatrix(
+  volume: Volume,
+  orientation: Orientation,
+  rotation?: ObliqueRotation,
+): Float32Array {
+  return texAffineMatrix(planeToTex(volume, orientation, rotation));
+}
+
+/**
+ * Column-major 4×4 mapping the BASE volume's displayed pane plane into the
+ * OVERLAY volume's texture coordinates — for fusion compositing. The pane plane
+ * (which patient FOV the pane shows) is defined by the base's bounds, but the
+ * overlay has its own grid, so we take the base's pane basis (pane→patient) and
+ * map it through the overlay's geometry. Both volumes must share the patient
+ * frame of reference (validated at load); they need not share bounds or spacing.
+ */
+export function overlayPlaneToTexMatrix(
+  baseVolume: Volume,
+  overlayVolume: Volume,
+  orientation: Orientation,
+  rotation?: ObliqueRotation,
+): Float32Array {
+  const baseGeom = resolveGeometry(baseVolume);
+  const basis = obliqueBasis(
+    planeBasis(orientation, patientBounds(baseGeom, baseVolume.dims)),
+    rotation,
+  );
+  return texAffineMatrix(basisToTex(basis, resolveGeometry(overlayVolume), overlayVolume.dims));
 }
 
 /** A pane's displayed plane: its orientation, slice, and optional oblique tilt. */
