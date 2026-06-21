@@ -545,7 +545,7 @@ const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 
 /** Bounds (framebuffer px, at zoom 1) for the fusion checkerboard cell-size slider. */
-const CHECKER_SIZE_MIN = 8;
+const CHECKER_SIZE_MIN = 16;
 const CHECKER_SIZE_MAX = 96;
 
 /** Frames-per-second options offered in the cine speed selector, in display order. */

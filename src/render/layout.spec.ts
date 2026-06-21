@@ -9,21 +9,26 @@ import {
 } from './layout';
 
 describe('compareLayout', () => {
-  it('lays out G columns of 3 stacked rows reaching the far edges', () => {
+  it('lays out G columns as a tall main pane over two split side panes (2×1×2)', () => {
     const cols = compareLayout(406, 306, 2, 6); // 2 groups, 6px gaps
 
     expect(cols).toHaveLength(2);
-    expect(cols[0]).toHaveLength(3);
+    expect(cols[0]).toHaveLength(3); // [main, bottomLeft, bottomRight]
     // Columns: (406 - 6) / 2 = 200 each; second starts at 206 and reaches 406.
-    expect(cols[0][0].x).toBe(0);
-    expect(cols[0][0].width).toBe(200);
+    expect(cols[0][0]).toEqual({ x: 0, y: 0, width: 200, height: 180 });
     expect(cols[1][0].x).toBe(206);
-    expect(cols[1][0].x + cols[1][0].width).toBe(406);
-    // Rows: (306 - 12) / 3 = 98 each; third reaches the bottom (306).
-    expect(cols[0][0].y).toBe(0);
-    expect(cols[0][0].height).toBe(98);
-    expect(cols[0][2].y).toBe(208);
-    expect(cols[0][2].y + cols[0][2].height).toBe(306);
+    expect(cols[1][2].x + cols[1][2].width).toBe(406); // bottom-right reaches the far edge
+
+    // Main is 0.6 of the height (round((306 - 6) * 0.6) = 180); the two side panes
+    // split the row below it and reach the bottom (306).
+    const [main, bottomLeft, bottomRight] = cols[0];
+    expect(main.height).toBe(180);
+    expect(bottomLeft.y).toBe(186); // mainHeight + gap
+    expect(bottomLeft.y + bottomLeft.height).toBe(306);
+    expect(bottomLeft.width).toBe(97); // round((200 - 6) / 2)
+    expect(bottomRight.x).toBe(103); // left pane + gap
+    expect(bottomRight.x + bottomRight.width).toBe(200); // reaches the column's right edge
+    expect(bottomRight.height).toBe(bottomLeft.height);
   });
 });
 
