@@ -129,6 +129,7 @@ import { PatientCatalog } from '../patient-catalog';
 import { importKeepsOnePatient } from '../../dicom/catalog';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
+import { modifierLabel } from '../platform';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
@@ -940,6 +941,13 @@ export class Viewer {
   protected readonly dropIntent = signal<DropIntent>('primary');
   /** The drop-overlay headline for the modifier currently held (see {@link dropIntent}). */
   protected readonly dropHeadline = computed(() => dropHeadlineText(this.dropIntent()));
+  /**
+   * Host-adapted modifier labels for the drop-hint spans — macOS glyphs (`⌥`,
+   * `⇧`) on a Mac, words (`Alt`, `Shift`) elsewhere — so the hint reads as the
+   * user's own keyboard does. Detection still keys off `altKey`/`shiftKey`.
+   */
+  protected readonly altLabel = modifierLabel('alt');
+  protected readonly shiftLabel = modifierLabel('shift');
   /**
    * A transient status notice shown over the viewport — e.g. a ⌥/⇧ drop that
    * couldn't fuse — auto-cleared after {@link NOTICE_MS}. Null when none is up.
