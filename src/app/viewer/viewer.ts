@@ -3188,6 +3188,11 @@ export class Viewer {
     if (!(input instanceof HTMLInputElement) || !input.files) return;
     const files = Array.from(input.files);
     input.value = ''; // allow re-selecting the same folder
+    // Picking files leaves focus on this hidden <input type=file>. Since it's an
+    // editable target, every subsequent window keydown is swallowed by
+    // isEditableTarget and the viewer's shortcuts go dead until the user clicks
+    // the canvas. Release that focus so the keyboard works straight after upload.
+    input.blur();
     if (files.length > 0) await this.loadFiles(files, describeSelection(files));
   }
 
