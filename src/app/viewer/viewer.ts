@@ -125,6 +125,8 @@ import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult } from '../volume-loader';
+import { PatientCatalog } from '../patient-catalog';
+import { importKeepsOnePatient } from '../../dicom/catalog';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
 import { readDropped } from './drop-files';
@@ -624,6 +626,7 @@ const MIP_SETTLE_MS = 200;
 })
 export class Viewer {
   private readonly loader = inject(VolumeLoader);
+  private readonly catalog = inject(PatientCatalog);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
   private readonly destroyRef = inject(DestroyRef);
@@ -3884,8 +3887,24 @@ export class Viewer {
         // Ignore stragglers from a superseded load (a new load already started).
         if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
       });
+      // One-patient guard: every parsed series is folded into the patient catalog,
+      // but only after making sure the import doesn't silently mix patients. A batch
+      // with a different (or several) PatientID prompts to switch — clearing the
+      // catalog and the current view — or cancel, leaving what's showing untouched.
+      let switched = false;
+      if (!importKeepsOnePatient(this.catalog.currentPatientId(), result.series)) {
+        if (!confirmPatientSwitch()) {
+          this.load.set(previous);
+          return;
+        }
+        this.catalog.clear();
+        switched = true;
+      }
+      this.catalog.add(result.series);
+      // A patient switch starts a fresh view; otherwise a same-frame series of the
+      // current patient stacks atop what's showing (the overlay merge).
       const merged =
-        previous.status === 'ready'
+        previous.status === 'ready' && !switched
           ? this.loader.merge(previous.result, result)
           : { result, added: false };
       if (merged.added) this.addLayer(merged.result);
@@ -4105,6 +4124,19 @@ function downloadBlob(blob: Blob, filename: string): void {
   anchor.click();
   // Revoke after the click has been dispatched so the download isn't cancelled.
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/**
+ * Ask whether to switch the catalog to the just-imported patient, discarding the
+ * one currently loaded. The viewer holds one patient at a time, so a different-
+ * patient import is a deliberate switch rather than a silent mix; `false` cancels
+ * and leaves the current view untouched.
+ */
+function confirmPatientSwitch(): boolean {
+  return confirm(
+    'These files belong to a different patient. Switch to them and clear the ' +
+      'current patient from the viewer?',
+  );
 }
 
 /** Whether a drag event carries files (vs. dragged text/elements within the page). */
