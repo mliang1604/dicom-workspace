@@ -138,6 +138,27 @@ describe('buildVolume', () => {
     expect(volume.missingSlices).toEqual({ count: 2, maxGapMm: 6 });
   });
 
+  it('caps the resample depth for a tiny median gap against a large span', () => {
+    // Pathological geometry: four slices clustered 0.1 mm apart with one stray
+    // 100 mm away (gantry jitter / a bad ImagePositionPatient). The median gap is
+    // 0.1 mm, so an uncapped grid would allocate ~1000 layers to span 100 mm.
+    const volume = buildVolume([
+      axialSlice(0, 0, 1),
+      axialSlice(0.1, 1, 2),
+      axialSlice(0.2, 2, 3),
+      axialSlice(100, 100, 4),
+    ]);
+
+    // Depth is clamped to 16× the acquired slice count instead of ~1000.
+    expect(volume.dims[2]).toBe(4 * 16);
+    // The pitch widens to still span the full 100 mm range at the capped depth.
+    expect(volume.spacing[2]).toBeCloseTo(100 / (4 * 16 - 1), 6);
+    expect(volume.geometry?.kStep[2]).toBeCloseTo(100 / (4 * 16 - 1), 6);
+    // The clamp is reported through MissingSlices rather than silently allocating.
+    expect(volume.missingSlices?.count).toBe(4 * 16 - 4);
+    expect(volume.missingSlices?.maxGapMm).toBeCloseTo(99.8, 6);
+  });
+
   it('reports no missing slices for a uniformly-spaced series', () => {
     const volume = buildVolume([axialSlice(0, 0, 1), axialSlice(2, 10, 2), axialSlice(4, 20, 3)]);
 

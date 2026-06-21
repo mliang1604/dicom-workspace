@@ -325,9 +325,11 @@ function parseDose(ctx: FileContext, frames: number): Slice[] {
 }
 
 /**
- * Read one RT Dose frame's unsigned samples (8/16/32-bit, little-endian) directly
- * from uncompressed PixelData, scaled to Gy by `scaling`. Dose grids are commonly
+ * Read one RT Dose frame's samples (8/16/32-bit, little-endian) directly from
+ * uncompressed PixelData, scaled to Gy by `scaling`. Dose grids are commonly
  * 32-bit, which the general {@link readRawPixels} path (8/16-bit) does not cover.
+ * Samples are read signed when PixelRepresentation (0028,0103) is 1 — e.g. a
+ * difference (signed) dose grid — and unsigned otherwise.
  */
 function readDoseFrame(
   ctx: FileContext,
@@ -337,16 +339,36 @@ function readDoseFrame(
 ): Float32Array {
   const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : ctx.bitsAllocated <= 16 ? 2 : 4;
   const offset = ctx.pixelOffset + frameIndex * count * bytesPerSample;
+  ensurePixelBytes(ctx, offset, count * bytesPerSample);
   const view = new DataView(ctx.buffer, offset, count * bytesPerSample);
+  const signed = ctx.pixelRepresentation === 1;
   const out = new Float32Array(count);
   if (bytesPerSample === 4) {
-    for (let i = 0; i < count; i++) out[i] = view.getUint32(i * 4, true) * scaling;
+    for (let i = 0; i < count; i++)
+      out[i] = (signed ? view.getInt32(i * 4, true) : view.getUint32(i * 4, true)) * scaling;
   } else if (bytesPerSample === 2) {
-    for (let i = 0; i < count; i++) out[i] = view.getUint16(i * 2, true) * scaling;
+    for (let i = 0; i < count; i++)
+      out[i] = (signed ? view.getInt16(i * 2, true) : view.getUint16(i * 2, true)) * scaling;
   } else {
-    for (let i = 0; i < count; i++) out[i] = view.getUint8(i) * scaling;
+    for (let i = 0; i < count; i++)
+      out[i] = (signed ? view.getInt8(i) : view.getUint8(i)) * scaling;
   }
   return out;
+}
+
+/**
+ * Guard a raw pixel read against a header that declares more samples than the
+ * file carries. A truncated PixelData element would otherwise build a typed-array
+ * view past the end of the buffer and throw an untyped `RangeError` that aborts
+ * the whole batch; throwing a typed {@link UnsupportedDicomError} lets the bad
+ * file be skipped diagnostically. Checks both the buffer end and the declared
+ * PixelData element extent.
+ */
+function ensurePixelBytes(ctx: FileContext, offset: number, byteCount: number): void {
+  const pixelEnd = ctx.pixelOffset + ctx.pixelElement.length;
+  if (offset + byteCount > ctx.buffer.byteLength || offset + byteCount > pixelEnd) {
+    throw new UnsupportedDicomError(`PixelData truncated (${ctx.name}).`);
+  }
 }
 
 /** A frame's modality LUT and suggested display window, before photometric folding. */
@@ -562,6 +584,7 @@ function readFrameSamples(ctx: FileContext, frameIndex: number, count: number): 
   const total = count * samplesPerPixel;
   const bytesPerSample = ctx.bitsAllocated <= 8 ? 1 : 2;
   const offset = ctx.pixelOffset + frameIndex * total * bytesPerSample;
+  ensurePixelBytes(ctx, offset, total * bytesPerSample);
   const raw = readRawPixels(ctx.buffer, offset, total, ctx.bitsAllocated, ctx.pixelRepresentation);
   return convertFrame(ctx, raw, count);
 }
