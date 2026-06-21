@@ -69,6 +69,48 @@
   white-space: nowrap;
 }
 
+/* Timeline ⇄ tree segmented toggle, pushed to the right of the header bar. */
+.history-views {
+  display: inline-flex;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.history-view {
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.history-view:hover,
+.history-view:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+.history-view.active {
+  color: var(--text);
+  background: var(--glass-bg-strong);
+}
+
+/* Body wrapper: fills the panel below the header and lets each view scroll. */
+.history-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* The date axis: study tiles laid out left → right (oldest → newest), scrolling
    horizontally when they overflow. */
 .timeline {
@@ -184,6 +226,88 @@
 }
 
 .series-strip li {
+  flex: 0 0 auto;
+}
+
+/* Tree view: Patient ▸ Study ▸ Series stacked vertically and scrolling, for
+   patients with many studies/series. Rows share the timeline's chip + metadata. */
+.tree,
+.tree-studies,
+.tree-series {
+  margin: 0;
+  list-style: none;
+}
+
+.tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.tree-studies {
+  padding-left: 16px;
+}
+
+/* A clickable expand/collapse row (patient or study): chevron + inline metadata. */
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.tree-row:hover,
+.tree-row:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--accent-ring);
+  outline: none;
+}
+
+.tree-chevron {
+  flex: 0 0 auto;
+  width: 1em;
+  color: var(--muted);
+}
+
+.tree-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-row-study .study-desc {
+  flex: 1 1 auto;
+}
+
+.tree-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The study's series chips, revealed beneath an open study row and indented
+   under its chevron. Wraps so a study with many series stays readable. */
+.tree-series {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px 8px 32px;
+}
+
+.tree-series li {
   flex: 0 0 auto;
 }
 

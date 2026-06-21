@@ -1,4 +1,4 @@
-import { formatStudyDate, nextOpenStudy, seriesCountLabel } from './history-panel';
+import { formatStudyDate, nextOpenStudy, seriesCountLabel, studyCountLabel } from './history-panel';
 import { imageCountLabel, modalityGlyph, seriesChipLabel } from './series-chip';
 import type { Series } from '../../../dicom/series';
 
@@ -51,6 +51,14 @@ describe('seriesCountLabel', () => {
   it('summarises a study’s series count', () => {
     expect(seriesCountLabel(1)).toBe('1 series');
     expect(seriesCountLabel(4)).toBe('4 series');
+  });
+});
+
+describe('studyCountLabel', () => {
+  it('singularises one study and pluralises the rest (tree root)', () => {
+    expect(studyCountLabel(1)).toBe('1 study');
+    expect(studyCountLabel(3)).toBe('3 studies');
+    expect(studyCountLabel(0)).toBe('0 studies');
   });
 });
 

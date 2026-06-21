@@ -2,25 +2,29 @@ import { ChangeDetectionStrategy, Component, computed, inject, input, signal } f
 import type { StudyRecord } from '../../../dicom/catalog';
 import type { Series } from '../../../dicom/series';
 import { PatientCatalog } from '../../patient-catalog';
-import { PreferencesStore } from '../../preferences-store';
+import { PreferencesStore, type HistoryView } from '../../preferences-store';
 import { SeriesThumbnailCache, type SeriesThumbnail } from '../series-thumbnail';
 import { SeriesChip } from './series-chip';
 
 /**
  * The longitudinal history panel docked below the viewport: the focused
- * patient's studies as compact tiles along a date axis (oldest → newest).
+ * patient's studies, shown either as compact tiles along a date axis (oldest →
+ * newest) or as a denser Patient ▸ Study ▸ Series tree.
  *
- * **Studies-first, Option A (expand-in-place accordion).** Each tile shows the
- * study's date, description, modality badges and series count with no series
- * visible; clicking a tile unfolds it in place to reveal its series chips while
- * its neighbours stay collapsed (single-open). The panel itself is collapsible to
- * its header bar, and both the collapsed flag and the last-opened study persist
- * via {@link PreferencesStore} so the timeline restores across sessions.
+ * **Two views, one chip.** The default `timeline` lays studies out as
+ * expand-in-place accordion tiles (date, description, modality badges and series
+ * count; clicking unfolds the study's series chips while its neighbours stay
+ * collapsed — single-open). The alternate `tree` stacks the same studies as
+ * collapsible rows under a patient root for patients with many studies/series.
+ * Both reuse {@link SeriesChip} and share the open-study and active-series state,
+ * so the header toggle switches layout without reloading or losing selection.
+ * The collapsed flag, the chosen view and the last-opened study all persist via
+ * {@link PreferencesStore} so the panel restores across sessions.
  *
  * Read-only: it reflects the {@link PatientCatalog} and highlights the chip of
  * the {@link loadedSeriesUid currently-loaded series}. Loading and drag-to-load
- * is #173; the tree toggle and B/C layouts (which reuse {@link SeriesChip}) are
- * #172. Hidden entirely when the catalog holds no studies.
+ * is #173. The single patient root is shaped so multi-patient catalogs are a
+ * natural extension. Hidden entirely when the catalog holds no studies.
  */
 @Component({
   selector: 'app-history-panel',
@@ -61,6 +65,12 @@ export class HistoryPanel {
   /** Whether the panel is collapsed to its header bar. Restored from preferences. */
   protected readonly collapsed = signal(this.preferences.preferences().historyCollapsed);
 
+  /** The active layout (`timeline` / `tree`). Restored from preferences. */
+  protected readonly view = signal<HistoryView>(this.preferences.preferences().historyView);
+
+  /** Whether the tree's patient root is expanded. Tree-only, session-local. */
+  protected readonly patientExpanded = signal(true);
+
   /**
    * StudyInstanceUID of the single open (accordion) study, or null when all are
    * collapsed. Restored from preferences; a stale UID simply matches no tile.
@@ -74,6 +84,18 @@ export class HistoryPanel {
     const next = !this.collapsed();
     this.collapsed.set(next);
     this.preferences.update({ historyCollapsed: next });
+  }
+
+  /** Switch to the given layout (no-op if already active), persisting the choice. */
+  protected setView(view: HistoryView): void {
+    if (this.view() === view) return;
+    this.view.set(view);
+    this.preferences.update({ historyView: view });
+  }
+
+  /** Expand/collapse the tree's patient root. */
+  protected togglePatient(): void {
+    this.patientExpanded.update((open) => !open);
   }
 
   /** Open the clicked study (closing any other), or close it if already open. */
@@ -102,6 +124,11 @@ export class HistoryPanel {
   protected countLabel(study: StudyRecord): string {
     return seriesCountLabel(study.series.length);
   }
+
+  /** Pluralised study-count summary for the tree's patient root. */
+  protected studiesLabel(): string {
+    return studyCountLabel(this.studies().length);
+  }
 }
 
 /**
@@ -126,4 +153,9 @@ export function formatStudyDate(date: string | null): string {
 /** Pluralised series-count summary, e.g. `1 series` / `4 series`. */
 export function seriesCountLabel(count: number): string {
   return `${count} series`;
+}
+
+/** Pluralised study-count summary for the tree root, e.g. `1 study` / `3 studies`. */
+export function studyCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'study' : 'studies'}`;
 }
