@@ -1,3 +1,4 @@
+import { clampIndex } from '../dicom/math';
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
 import {
@@ -120,8 +121,4 @@ function sampleTex(volume: Volume, tx: number, ty: number, tz: number, patient: 
   const rawValue =
     volume.rescaleSlope !== 0 ? (value - volume.rescaleIntercept) / volume.rescaleSlope : value;
   return { voxel: [vx, vy, vz], value, rawValue, patient };
-}
-
-function clampIndex(index: number, dim: number): number {
-  return Math.min(dim - 1, Math.max(0, index));
 }

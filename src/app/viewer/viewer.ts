@@ -120,6 +120,7 @@ import {
   type Volume,
 } from '../../dicom/types';
 import { COLORMAPS } from '../../render/colormap';
+import { clamp, clamp01 } from '../../dicom/math';
 import { add, cross, dot, length, normalize, scale, sub } from '../../dicom/vec3';
 import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
@@ -1846,7 +1847,7 @@ export class Viewer {
 
   /** Set a layer's composite opacity from a 0..100 slider value. */
   private setLayerOpacity(id: string, percent: number): void {
-    const opacity = Math.min(1, Math.max(0, percent / 100));
+    const opacity = clamp01(percent / 100);
     this.layerOpacities.update((map) => new Map(map).set(id, opacity));
   }
 
@@ -4674,13 +4675,9 @@ function intValue(event: Event): number {
   return Number.isFinite(parsed) ? Math.round(parsed) : 0;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
 /** Clamp a pixel offset to a symmetric ±`max` range (the oblique knob's reach). */
 function clampPx(value: number, max: number): number {
-  return Math.min(max, Math.max(-max, value));
+  return clamp(value, -max, max);
 }
 
 /** A linear RGB triple in [0, 1] as a `#rrggbb` hex string for an `<input type=color>`. */

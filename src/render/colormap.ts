@@ -7,6 +7,8 @@
  * but a pure colour ramp (opacity is the per-layer composite, not in the LUT).
  */
 
+import { clamp01 } from '../dicom/math';
+
 /** Resolution of a baked colormap LUT, in texels — matches the DVR LUT size. */
 export const COLORMAP_LUT_SIZE = 256;
 
@@ -69,7 +71,7 @@ export function colormap(name: string): Colormap {
 /** Colour at position `t` (clamped to [0, 1]) along a colormap's stops. */
 export function sampleColormap(map: Colormap, t: number): [number, number, number] {
   const stops = map.stops;
-  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+  const clamped = clamp01(t);
   if (clamped <= stops[0].pos) return [...stops[0].color];
   const last = stops[stops.length - 1];
   if (clamped >= last.pos) return [...last.color];

@@ -1,3 +1,4 @@
+import { clamp01, clampIndex } from '../dicom/math';
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
 import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
 
@@ -304,7 +305,7 @@ export function linkedSliceIndex(
   // plane (here its u=v=0 corner) gives the same through-plane position.
   const slicePos = dot(sub(from.base, basis.origin), basis.axisS) / denom;
   const index = Math.round(slicePos * count - 0.5);
-  return Math.min(count - 1, Math.max(0, index));
+  return clampIndex(index, count);
 }
 
 /**
@@ -319,8 +320,8 @@ export function clipLineToUnitSquare(
   const hits: PlaneCoords2D[] = [];
   const push = (u: number, v: number): void => {
     if (u < -1e-9 || u > 1 + 1e-9 || v < -1e-9 || v > 1 + 1e-9) return;
-    const cu = Math.min(1, Math.max(0, u));
-    const cv = Math.min(1, Math.max(0, v));
+    const cu = clamp01(u);
+    const cv = clamp01(v);
     if (!hits.some((p) => Math.abs(p.u - cu) < 1e-6 && Math.abs(p.v - cv) < 1e-6)) {
       hits.push({ u: cu, v: cv });
     }

@@ -1,3 +1,4 @@
+import { clamp01 } from './math';
 import { orderSlicesThroughPlane, throughPlaneNormal } from './slice-order';
 import type { MissingSlices, Slice, Vec3, Volume, VolumeGeometry } from './types';
 import { cross, dot, scale, sub } from './vec3';
@@ -223,10 +224,6 @@ function resampleAlongNormal(
     }
   }
   return { data, depth, spacingZ: step };
-}
-
-function clamp01(value: number): number {
-  return value < 0 ? 0 : value > 1 ? 1 : value;
 }
 
 /** PixelSpacing is [rowSpacing, colSpacing] -> [x (col), y (row)]. */

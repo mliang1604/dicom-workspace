@@ -1,5 +1,7 @@
+import { clamp01, clampIndex } from '../dicom/math';
 import type { Vec3, Volume, VolumeGeometry } from '../dicom/types';
 import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
+import { patientToVoxel } from '../dicom/volume';
 import { resolveGeometry } from './reslice';
 
 /**
@@ -298,7 +300,9 @@ export function straightenedCpr(
  * outside the voxel grid, which the caller replaces with a background value.
  */
 export function sampleVolumeTrilinear(volume: Volume, geom: VolumeGeometry, point: Vec3): number {
-  const [fx, fy, fz] = patientToIndex(geom, point);
+  const index = patientToVoxel(geom, point);
+  if (index === null) return NaN;
+  const [fx, fy, fz] = index;
   const [dimX, dimY, dimZ] = volume.dims;
   if (
     fx < -0.5 ||
@@ -435,24 +439,4 @@ function frameFrom(tangent: Vec3, normal: Vec3): Frame {
   const t = normalize(tangent);
   const n = normalize(normal);
   return { normal: n, binormal: normalize(cross(t, n)) };
-}
-
-/** Continuous voxel index `(i, j, k)` of a patient point via the inverse geometry. */
-function patientToIndex(geom: VolumeGeometry, point: Vec3): Vec3 {
-  const v = sub(point, geom.origin);
-  // Inverse of M = [iStep | jStep | kStep] by Cramer's rule (cf. reslice.invMul).
-  const r0 = cross(geom.jStep, geom.kStep);
-  const r1 = cross(geom.kStep, geom.iStep);
-  const r2 = cross(geom.iStep, geom.jStep);
-  const det = dot(geom.iStep, r0);
-  const inv = det !== 0 ? 1 / det : 0;
-  return [dot(r0, v) * inv, dot(r1, v) * inv, dot(r2, v) * inv];
-}
-
-function clampIndex(index: number, dim: number): number {
-  return index < 0 ? 0 : index > dim - 1 ? dim - 1 : index;
-}
-
-function clamp01(value: number): number {
-  return value < 0 ? 0 : value > 1 ? 1 : value;
 }

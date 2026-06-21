@@ -1,4 +1,5 @@
 import { afterEveryRender, Directive, ElementRef, HostListener, inject } from '@angular/core';
+import { clamp } from '../../dicom/math';
 
 /**
  * Fill percentage (0–100, clamped) for a range slider at `value` within
@@ -8,7 +9,7 @@ import { afterEveryRender, Directive, ElementRef, HostListener, inject } from '@
 export function rangeFillPercent(min: number, max: number, value: number): number {
   const span = max - min;
   const pct = span > 0 ? ((value - min) / span) * 100 : 0;
-  return Math.max(0, Math.min(100, pct));
+  return clamp(pct, 0, 100);
 }
 
 /**

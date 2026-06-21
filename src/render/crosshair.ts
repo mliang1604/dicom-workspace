@@ -1,3 +1,4 @@
+import { clampIndex } from '../dicom/math';
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
 import { planeCoordsAt, planeToTex, sliceCountFor, type ObliqueRotation } from './reslice';
@@ -77,8 +78,4 @@ export function focusPanePoint(
   const u = (planeX - 0.5) * (z / scaleX) + 0.5 + pan.x;
   const v = (planeY - 0.5) * (z / scaleY) + 0.5 + pan.y;
   return { x: rect.x + u * rect.width, y: rect.y + v * rect.height };
-}
-
-function clampIndex(index: number, count: number): number {
-  return Math.min(count - 1, Math.max(0, index));
 }

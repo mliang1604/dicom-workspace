@@ -8,6 +8,7 @@ import {
   signal,
 } from '@angular/core';
 import type { StudyRecord } from '../../../dicom/catalog';
+import { formatDicomDate } from '../../../dicom/metadata';
 import type { Series } from '../../../dicom/series';
 import { PatientCatalog } from '../../patient-catalog';
 import { PreferencesStore, type HistoryView } from '../../preferences-store';
@@ -187,7 +188,7 @@ export function nextOpenStudy(current: string | null, clicked: string): string |
  */
 export function formatStudyDate(date: string | null): string {
   if (date === null || !/^\d{8}$/.test(date)) return 'Undated';
-  return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+  return formatDicomDate(date);
 }
 
 /** Pluralised series-count summary, e.g. `1 series` / `4 series`. */
