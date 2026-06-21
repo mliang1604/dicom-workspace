@@ -1,11 +1,28 @@
 import {
   baseImageLayer,
   baseLayer,
+  framesMatch,
   modalityUnit,
   overlayImageLayer,
   type Layer,
   type Volume,
 } from './types';
+
+describe('framesMatch', () => {
+  it('matches two equal, non-null frame of reference UIDs', () => {
+    expect(framesMatch('1.2.frame', '1.2.frame')).toBe(true);
+  });
+
+  it('does not match differing frames', () => {
+    expect(framesMatch('1.2.frame', '9.9.other')).toBe(false);
+  });
+
+  it('never matches when either side is null — an absent frame aligns to nothing', () => {
+    expect(framesMatch(null, null)).toBe(false);
+    expect(framesMatch('1.2.frame', null)).toBe(false);
+    expect(framesMatch(null, '1.2.frame')).toBe(false);
+  });
+});
 
 describe('modalityUnit', () => {
   it('labels CT values as Hounsfield Units', () => {
