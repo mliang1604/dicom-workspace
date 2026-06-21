@@ -16,6 +16,25 @@ export interface Series {
   /** Modality of the series (taken from its first slice); null when absent. */
   readonly modality: string | null;
   /**
+   * StudyInstanceUID shared by the series' slices (taken from its first slice);
+   * null when absent. {@link import('./catalog').groupStudies} groups series by
+   * this into a {@link import('./catalog').StudyRecord}.
+   */
+  readonly studyUid: string | null;
+  /** StudyDate (raw DICOM `DA`, `YYYYMMDD`) of the first slice; null when absent. */
+  readonly studyDate: string | null;
+  /** StudyTime (raw DICOM `TM`) of the first slice; null when absent. */
+  readonly studyTime: string | null;
+  /** StudyDescription of the first slice, labelling the study; null when absent. */
+  readonly studyDescription: string | null;
+  /**
+   * PatientID of the first slice; null when absent.
+   * {@link import('./catalog').groupPatients} groups series by this.
+   */
+  readonly patientId: string | null;
+  /** PatientName (raw DICOM `PN`) of the first slice; null when absent. */
+  readonly patientName: string | null;
+  /**
    * FrameOfReferenceUID shared by the series' slices (taken from its first
    * slice); null when absent. An RTSTRUCT is associated to this series by
    * matching its referenced frame of reference against this value.
@@ -57,6 +76,12 @@ export function groupSeries(slices: readonly Slice[]): Series[] {
       seriesNumber: first.seriesNumber,
       description: first.seriesDescription,
       modality: first.modality,
+      studyUid: first.studyUid,
+      studyDate: first.studyDate,
+      studyTime: first.studyTime,
+      studyDescription: first.studyDescription,
+      patientId: first.patientId,
+      patientName: first.patientName,
       frameOfReferenceUid: first.frameOfReferenceUid,
       imageCount: group.length,
       dims: [first.columns, first.rows],
