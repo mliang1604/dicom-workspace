@@ -116,6 +116,16 @@ export class HistoryPanel {
     this.preferences.update({ historyCollapsed: next });
   }
 
+  /**
+   * Collapse/expand from the viewer's `H` hotkey. A no-op when the panel is
+   * hidden (empty catalog / no patient loaded), so the key does nothing when
+   * there's nothing to toggle.
+   */
+  toggleCollapsedFromHotkey(): void {
+    if (!this.hasCatalog()) return;
+    this.toggleCollapsed();
+  }
+
   /** Switch to the given layout (no-op if already active), persisting the choice. */
   protected setView(view: HistoryView): void {
     if (this.view() === view) return;

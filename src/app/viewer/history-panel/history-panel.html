@@ -5,10 +5,10 @@
     (click)="toggleCollapsed()"
     [attr.aria-expanded]="!collapsed()"
     aria-controls="history-body"
-    title="Show or hide the study history"
+    title="Show or hide the study history (H)"
   >
     <span class="history-chevron" aria-hidden="true">{{ collapsed() ? '▸' : '▾' }}</span>
-    History
+    History <kbd>H</kbd>
     <span class="history-count">{{ studies().length }}</span>
   </button>
   @if (patientLabel(); as label) {
