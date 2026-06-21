@@ -40,7 +40,7 @@ function entriesOf(dataTransfer: DataTransfer): FileSystemEntry[] {
 }
 
 /** Append `entry`'s files to `out`, recursing into directories. */
-async function collectEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
+export async function collectEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
   if (entry.isFile) {
     const file = await fileOf(entry as FileSystemFileEntry);
     if (file) out.push(file);
@@ -82,7 +82,10 @@ function readDir(entry: FileSystemDirectoryEntry): Promise<FileSystemEntry[]> {
  * flat set of files uses a single name or an "N files" count. Returns null when
  * nothing loadable was dropped.
  */
-function labelFor(entries: readonly FileSystemEntry[], files: readonly File[]): RecentEntry | null {
+export function labelFor(
+  entries: readonly FileSystemEntry[],
+  files: readonly File[],
+): RecentEntry | null {
   if (files.length === 0) return null;
   const dir = entries.find((e) => e.isDirectory);
   if (dir) return { label: dir.name, kind: 'folder' };
