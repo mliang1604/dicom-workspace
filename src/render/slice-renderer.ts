@@ -1,7 +1,14 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
-import { Orientation, type Vec3, type Volume } from '../dicom/types';
+import { Orientation, type LayerDisplay, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
+import {
+  colormap,
+  colormapLut,
+  COLORMAP_LUT_SIZE,
+  DEFAULT_COLORMAP,
+  type Colormap,
+} from './colormap';
 import type { PaneRect, Vec2 } from './layout';
 import {
   clipPlaneTex,
@@ -238,7 +245,8 @@ export type PaneView = MprPaneView | MipPaneView;
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
 // slicePos,flipX (32) + invert + 12 bytes pad (16) = 112; then the fusion-overlay
 // block at byte 112 (16-aligned for its mat4x4): overlayToTex mat4x4 (64) +
-// overlayWindowCenter,overlayWindowWidth,overlayOpacity,_pad (16) = 80. Total 192.
+// overlayWindowCenter,overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80.
+// Total 192.
 const PARAMS_SIZE = 192;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
@@ -324,6 +332,10 @@ export class SliceRenderer {
   private overlayMatrices: readonly Float32Array[] | null = null;
   /** Composite opacity of the overlay over the base, 0 when no overlay. */
   private overlayOpacity = 0;
+  /** 1-D RGBA colormap LUT for a colormap overlay (e.g. a dose wash). */
+  private readonly overlayLut: GPUTexture;
+  /** Whether the active overlay is colour-mapped through {@link overlayLut}. */
+  private overlayColormap = false;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -423,6 +435,26 @@ export class SliceRenderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     this.uploadTransferFunction(transferFunction(TransferFunctionPreset.CtBone));
+
+    // The overlay colormap lives in its own 1-D RGBA LUT, rebaked in place when a
+    // colormap overlay is set. Seeded so binding 4 is always valid to bind.
+    this.overlayLut = this.device.createTexture({
+      dimension: '1d',
+      size: { width: COLORMAP_LUT_SIZE },
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.uploadOverlayLut(colormap(DEFAULT_COLORMAP)); // valid seed; the flag gates use
+  }
+
+  /** Bake a colormap into the overlay's 1-D LUT texture. */
+  private uploadOverlayLut(map: Colormap): void {
+    this.device.queue.writeTexture(
+      { texture: this.overlayLut },
+      floatsToHalf(colormapLut(map, COLORMAP_LUT_SIZE)),
+      { bytesPerRow: COLORMAP_LUT_SIZE * 4 * BYTES_PER_HALF, rowsPerImage: 1 },
+      { width: COLORMAP_LUT_SIZE },
+    );
   }
 
   /** Bake a transfer function into the 1-D LUT texture, once per change. */
@@ -477,6 +509,7 @@ export class SliceRenderer {
     if (!this.texture) return;
     const baseView = this.texture.createView();
     const overlayView = this.overlayTexture?.createView() ?? baseView;
+    const lutView = this.overlayLut.createView({ dimension: '1d' });
     for (const slot of this.slots) {
       slot.bindGroup = this.device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
@@ -485,18 +518,20 @@ export class SliceRenderer {
           { binding: 1, resource: this.sampler },
           { binding: 2, resource: { buffer: slot.buffer } },
           { binding: 3, resource: overlayView },
+          { binding: 4, resource: lutView },
         ],
       });
     }
   }
 
-  /** Drop any fusion overlay (texture + matrices + opacity). */
+  /** Drop any fusion overlay (texture + matrices + opacity + colormap). */
   private clearOverlay(): void {
     this.overlayTexture?.destroy();
     this.overlayTexture = null;
     this.overlayVolume = null;
     this.overlayMatrices = null;
     this.overlayOpacity = 0;
+    this.overlayColormap = false;
   }
 
   /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
@@ -534,13 +569,14 @@ export class SliceRenderer {
 
   /**
    * Set, replace, or clear (`null`) the fusion overlay — a second volume
-   * composited over the base in the MPR panes by `opacity`. Uploads only the
-   * overlay texture and rebuilds the MPR bind groups; the base volume, its
-   * matrices and the view state are untouched (unlike {@link setVolume}). The
-   * overlay shares the patient frame but has its own grid, so it carries its own
+   * composited over the base in the MPR panes by `opacity`, drawn grayscale or
+   * through a colormap per `display`. Uploads only the overlay texture (and its
+   * colormap LUT) and rebuilds the MPR bind groups; the base volume, its matrices
+   * and the view state are untouched (unlike {@link setVolume}). The overlay
+   * shares the patient frame but has its own grid, so it carries its own
    * per-orientation plane→texture matrices.
    */
-  setOverlay(volume: Volume | null, opacity: number): void {
+  setOverlay(volume: Volume | null, opacity: number, display?: LayerDisplay): void {
     if (!volume) {
       if (!this.overlayVolume) return;
       this.clearOverlay();
@@ -551,6 +587,10 @@ export class SliceRenderer {
     this.overlayTexture = this.createVolumeTexture(volume, 'Overlay');
     this.overlayVolume = volume;
     this.overlayOpacity = opacity;
+    // Colormap display bakes the named ramp into the overlay LUT; grayscale leaves
+    // the flag off and the shader uses the windowed value directly.
+    this.overlayColormap = display?.kind === 'colormap';
+    if (display?.kind === 'colormap') this.uploadOverlayLut(colormap(display.name));
     // The overlay matrices co-register the BASE's pane plane with the overlay's
     // grid, so they need the base volume; rebuilt here for the orthogonal panes
     // and refreshed per-frame for oblique ones in writeParams. Without a base
@@ -783,6 +823,7 @@ export class SliceRenderer {
             windowCenter: this.overlayVolume.windowCenter,
             windowWidth: this.overlayVolume.windowWidth,
             opacity: this.overlayOpacity,
+            colormap: this.overlayColormap,
           }
         : null;
 
@@ -819,6 +860,8 @@ export interface SliceParams {
     readonly windowCenter: number;
     readonly windowWidth: number;
     readonly opacity: number;
+    /** Map the windowed overlay value through the colormap LUT (vs. grayscale). */
+    readonly colormap: boolean;
   } | null;
 }
 
@@ -826,10 +869,10 @@ export interface SliceParams {
  * Pack one MPR pane's uniform to the exact byte layout the WGSL `Params` struct
  * expects (see slice-shader.ts): the base reslice matrix + screen fit + window
  * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
- * matrix (28..43), overlay window centre/width and opacity (44..46). With no
- * overlay the opacity stays 0, so the shader leaves the base untouched. Pure and
- * exported so the layout can be unit-tested without a GPU — the shader and this
- * packing must stay in lockstep.
+ * matrix (28..43), overlay window centre/width and opacity (44..46), and the
+ * colormap flag (47, u32). With no overlay the opacity stays 0, so the shader
+ * leaves the base untouched. Pure and exported so the layout can be unit-tested
+ * without a GPU — the shader and this packing must stay in lockstep.
  */
 export function packSliceParams(p: SliceParams): ArrayBuffer {
   const params = new ArrayBuffer(PARAMS_SIZE);
@@ -850,6 +893,7 @@ export function packSliceParams(p: SliceParams): ArrayBuffer {
     floats[OVERLAY_FLOATS + 16] = p.overlay.windowCenter; // float 44
     floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45
     floats[OVERLAY_FLOATS + 18] = p.overlay.opacity; // float 46
+    uints[OVERLAY_FLOATS + 19] = p.overlay.colormap ? 1 : 0; // float 47 (u32)
   }
   return params;
 }

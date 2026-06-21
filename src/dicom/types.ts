@@ -271,19 +271,26 @@ export function baseImageLayer(id: string, volume: Volume): Layer {
 }
 
 /**
- * Build an overlay image layer for a {@link Volume}: a translucent, visible,
- * grayscale `'overlay'`-role layer that sits above the base. Used when a second
- * (or Nth) series sharing the base's frame of reference is loaded as an added
- * layer rather than replacing the current load. Grayscale by default — a fusion
- * caller (e.g. a dose map) can swap {@link Layer.display} for a colormap.
+/** Default overlay colormap name for a dose wash; the render layer resolves it. */
+export const DOSE_COLORMAP = 'jet';
+
+/**
+ * Build an overlay image layer for a {@link Volume}: a translucent, visible
+ * `'overlay'`-role layer that sits above the base. Used when a second (or Nth)
+ * series sharing the base's frame of reference is loaded as an added layer rather
+ * than replacing the current load. A dose grid (modality RTDOSE) defaults to a
+ * colour wash ({@link DOSE_COLORMAP}); other images default to grayscale, and a
+ * caller can swap {@link Layer.display} later.
  */
 export function overlayImageLayer(id: string, volume: Volume): Layer {
+  const display: LayerDisplay =
+    volume.modality === 'RTDOSE' ? { kind: 'colormap', name: DOSE_COLORMAP } : GRAYSCALE_DISPLAY;
   return {
     id,
     volume,
     modality: volume.modality,
     role: 'overlay',
-    display: GRAYSCALE_DISPLAY,
+    display,
     opacity: DEFAULT_OVERLAY_OPACITY,
     visible: true,
   };

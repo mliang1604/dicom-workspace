@@ -29,13 +29,14 @@ struct Params {
   overlayWindowCenter : f32,
   overlayWindowWidth : f32,
   overlayOpacity : f32,
-  _pad : f32,
+  overlayColormap : u32,    // non-zero: map the windowed overlay through overlayLut
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
 @group(0) @binding(1) var volSamp : sampler;
 @group(0) @binding(2) var<uniform> P : Params;
 @group(0) @binding(3) var overlayTex : texture_3d<f32>;
+@group(0) @binding(4) var overlayLut : texture_1d<f32>; // RGBA colormap ramp
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -82,20 +83,27 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // DICOM windowing (PS3.3 C.11.2.1.2 linear form).
   let lo = P.windowCenter - 0.5 - (P.windowWidth - 1.0) * 0.5;
   let g = clamp((raw - lo) / max(P.windowWidth - 1.0, 1.0), 0.0, 1.0);
-  var shade = select(g, 1.0 - g, P.invert != 0u);
+  let shade = select(g, 1.0 - g, P.invert != 0u);
+  var rgb = vec3<f32>(shade, shade, shade);
 
   // Fusion overlay: sample the second volume at the same pane point via its own
-  // affine, window it to gray, and blend over the base. Outside the overlay's
-  // grid (or with no overlay, opacity 0) the base shows through unchanged.
+  // affine, window it, and blend over the base. A colormap overlay (e.g. a dose
+  // wash) maps the windowed value through overlayLut to colour; a grayscale one
+  // uses the value directly. Outside the overlay's grid (or opacity 0) the base
+  // shows through unchanged.
   if (P.overlayOpacity > 0.0) {
     let ocoord = (P.overlayToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
     if (all(ocoord >= vec3<f32>(0.0)) && all(ocoord <= vec3<f32>(1.0))) {
       let oraw = textureSampleLevel(overlayTex, volSamp, ocoord, 0.0).r;
       let olo = P.overlayWindowCenter - 0.5 - (P.overlayWindowWidth - 1.0) * 0.5;
       let og = clamp((oraw - olo) / max(P.overlayWindowWidth - 1.0, 1.0), 0.0, 1.0);
-      shade = mix(shade, og, P.overlayOpacity);
+      var orgb = vec3<f32>(og, og, og);
+      if (P.overlayColormap != 0u) {
+        orgb = textureSampleLevel(overlayLut, volSamp, og, 0.0).rgb;
+      }
+      rgb = mix(rgb, orgb, P.overlayOpacity);
     }
   }
-  return vec4<f32>(shade, shade, shade, 1.0);
+  return vec4<f32>(rgb, 1.0);
 }
 `;
