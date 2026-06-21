@@ -180,6 +180,11 @@ kbd {
   justify-content: space-between;
 }
 
+/* Rail-row range sliders fill the width between their label and value readout. */
+.tool-rail .ctrl input[type='range'] {
+  flex: 1;
+}
+
 .viewport {
   position: relative;
   flex: 1;
@@ -493,8 +498,7 @@ button.active {
 }
 
 .roi-opacity,
-.layer-opacity,
-.checker-size {
+.layer-opacity {
   flex: 0 0 auto;
   width: 64px;
   cursor: pointer;
