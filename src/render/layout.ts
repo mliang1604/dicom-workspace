@@ -55,6 +55,9 @@ export interface TriLayout {
 /** Fraction of the width the main pane takes in the 1+2 ({@link TriLayout}) arrangement. */
 export const MAIN_WIDTH_FRACTION = 2 / 3;
 
+/** Fraction of the height the main pane takes in each {@link compareLayout} column. */
+export const COMPARE_MAIN_HEIGHT_FRACTION = 0.6;
+
 /**
  * Split a `width × height` area into a 2×2 grid of equal cells separated by
  * `gap` pixels. Rects are clamped to be non-negative so a zero-sized container
@@ -105,10 +108,13 @@ export function singleLayout(width: number, height: number): PaneRect {
 }
 
 /**
- * Split a `width × height` area into `groups` equal columns, each stacked into 3
- * equal rows — the side-by-side compare layout (one column of axial/coronal/
- * sagittal per group). Returns rects indexed `[group][row]`. The last column/row
- * absorbs the rounding remainder so the panes reach the far edges exactly.
+ * Split a `width × height` area into `groups` equal columns, each a **2×1×2**
+ * arrangement — the side-by-side compare layout (one column per group). Per column:
+ * a tall main pane on top ({@link COMPARE_MAIN_HEIGHT_FRACTION} of the height,
+ * full column width), and below it a row split into two side panes. Returns rects
+ * indexed `[group][slot]` with slot order `[main, bottomLeft, bottomRight]` (the
+ * caller assigns orientations to those slots). The last column and the bottom-right
+ * pane absorb the rounding remainder so the panes reach the far edges exactly.
  */
 export function compareLayout(
   width: number,
@@ -117,18 +123,21 @@ export function compareLayout(
   gap = 6,
 ): PaneRect[][] {
   const colWidth = clampNonNegative(Math.round((width - (groups - 1) * gap) / groups));
-  const rowHeight = clampNonNegative(Math.round((height - 2 * gap) / 3));
+  const mainHeight = clampNonNegative(Math.round((height - gap) * COMPARE_MAIN_HEIGHT_FRACTION));
+  const bottomY = mainHeight + gap;
+  const bottomHeight = clampNonNegative(height - bottomY);
   const cols: PaneRect[][] = [];
   for (let g = 0; g < groups; g++) {
     const x = g * (colWidth + gap);
     const w = g === groups - 1 ? clampNonNegative(width - x) : colWidth;
-    const rows: PaneRect[] = [];
-    for (let r = 0; r < 3; r++) {
-      const y = r * (rowHeight + gap);
-      const h = r === 2 ? clampNonNegative(height - y) : rowHeight;
-      rows.push({ x, y, width: w, height: h });
-    }
-    cols.push(rows);
+    const leftWidth = clampNonNegative(Math.round((w - gap) / 2));
+    const rightX = x + leftWidth + gap;
+    const rightWidth = clampNonNegative(x + w - rightX);
+    cols.push([
+      { x, y: 0, width: w, height: mainHeight },
+      { x, y: bottomY, width: leftWidth, height: bottomHeight },
+      { x: rightX, y: bottomY, width: rightWidth, height: bottomHeight },
+    ]);
   }
   return cols;
 }
