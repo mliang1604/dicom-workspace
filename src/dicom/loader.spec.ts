@@ -1,4 +1,5 @@
 import { parseFile, parseFileAsync, UnsupportedDicomError } from './loader';
+import { buildVolume } from './volume';
 
 // --- Minimal Explicit-VR-Little-Endian DICOM P10 writer --------------------
 //
@@ -88,6 +89,15 @@ function pixelData(frames: readonly number[][]): Uint8Array {
   const out = new Uint8Array(samples.length * 2);
   const view = new DataView(out.buffer);
   samples.forEach((s, i) => view.setUint16(i * 2, s, true));
+  return element(0x7fe0, 0x0010, 'OW', out);
+}
+
+/** Raw 32-bit unsigned PixelData (as RT Dose grids commonly use). */
+function pixelData32(frames: readonly number[][]): Uint8Array {
+  const samples = frames.flat();
+  const out = new Uint8Array(samples.length * 4);
+  const view = new DataView(out.buffer);
+  samples.forEach((s, i) => view.setUint32(i * 4, s, true));
   return element(0x7fe0, 0x0010, 'OW', out);
 }
 
@@ -545,5 +555,99 @@ describe('parseFile — non-images', () => {
     const buffer = dicomFile(body, '1.2.840.10008.1.2.4.50');
 
     expect(() => parseFile('jpeg.dcm', buffer)).toThrow(UnsupportedDicomError);
+  });
+});
+
+/**
+ * A 2×2, 2-frame RT Dose grid (axial). Frames sit 5 mm apart via the
+ * GridFrameOffsetVector; DoseGridScaling 0.25 turns the stored integers into Gy.
+ * Options model the variants the parser must tolerate: 32-bit pixels, a
+ * non-canonically-cased Modality, and a missing GridFrameOffsetVector.
+ */
+function rtDose(
+  opts: { bits?: 16 | 32; modality?: string; gridOffsets?: number[] | null } = {},
+): ArrayBuffer {
+  const { bits = 16, modality = 'RTDOSE', gridOffsets = [0, 5] } = opts;
+  const frames = [
+    [0, 4, 8, 12],
+    [16, 20, 24, 28],
+  ];
+  const body = concat([
+    element(0x0008, 0x0060, 'CS', text(modality)), // Modality
+    element(0x0008, 0x0016, 'UI', uid('1.2.840.10008.5.1.4.1.1.481.2')), // SOPClassUID (RT Dose)
+    element(0x0020, 0x000e, 'UI', uid('1.2.dose')), // SeriesInstanceUID
+    element(0x0020, 0x0052, 'UI', uid('1.2.frame')), // FrameOfReferenceUID
+    element(0x0020, 0x0032, 'DS', numbers([10, 20, 30])), // ImagePositionPatient
+    element(0x0020, 0x0037, 'DS', numbers([1, 0, 0, 0, 1, 0])), // ImageOrientationPatient
+    element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
+    element(0x0028, 0x0008, 'IS', numbers([2])), // NumberOfFrames
+    element(0x0028, 0x0010, 'US', u16le(2)), // Rows
+    element(0x0028, 0x0011, 'US', u16le(2)), // Columns
+    element(0x0028, 0x0030, 'DS', numbers([2, 3])), // PixelSpacing [row, col]
+    element(0x0028, 0x0100, 'US', u16le(bits)), // BitsAllocated
+    element(0x0028, 0x0101, 'US', u16le(bits)), // BitsStored
+    element(0x0028, 0x0103, 'US', u16le(0)), // PixelRepresentation (unsigned)
+    element(0x3004, 0x0002, 'CS', text('GY')), // DoseUnits
+    ...(gridOffsets ? [element(0x3004, 0x000c, 'DS', numbers(gridOffsets))] : []), // GridFrameOffsetVector
+    element(0x3004, 0x000e, 'DS', numbers([0.25])), // DoseGridScaling
+    bits === 32 ? pixelData32(frames) : pixelData(frames),
+  ]);
+  return dicomFile(body);
+}
+
+describe('parseFile — RT Dose', () => {
+  it('parses an RTDOSE grid into per-frame slices scaled to Gy', () => {
+    const slices = parseFile('dose.dcm', rtDose());
+
+    expect(slices).toHaveLength(2);
+    expect(slices[0].modality).toBe('RTDOSE');
+    // DoseGridScaling 0.25 turns raw [0,4,8,12] / [16,20,24,28] into Gy.
+    expect(Array.from(slices[0].pixels)).toEqual([0, 1, 2, 3]);
+    expect(Array.from(slices[1].pixels)).toEqual([4, 5, 6, 7]);
+    // rescaleSlope keeps the scaling so the probe can recover the stored value.
+    expect(slices[0].rescaleSlope).toBe(0.25);
+    expect(slices[0].rescaleIntercept).toBe(0);
+    // GridFrameOffsetVector [0,5] places the frames 5 mm apart along +z.
+    expect(slices[0].position).toEqual([10, 20, 30]);
+    expect(slices[1].position).toEqual([10, 20, 35]);
+  });
+
+  it('reads 32-bit dose PixelData', () => {
+    const slices = parseFile('dose32.dcm', rtDose({ bits: 32 }));
+
+    expect(Array.from(slices[0].pixels)).toEqual([0, 1, 2, 3]);
+    expect(Array.from(slices[1].pixels)).toEqual([4, 5, 6, 7]);
+  });
+
+  it('detects dose by SOP class / case-insensitive modality, not exact casing', () => {
+    // A non-canonically-cased Modality must still take the dose path (not be
+    // misdecoded as a 16-bit image) and report the canonical 'RTDOSE'.
+    const slices = parseFile('dose.dcm', rtDose({ modality: 'RTDose' }));
+
+    expect(slices).toHaveLength(2);
+    expect(slices[0].modality).toBe('RTDOSE');
+    expect(Array.from(slices[0].pixels)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('stacks frames when GridFrameOffsetVector is absent instead of collapsing', () => {
+    const slices = parseFile('dose.dcm', rtDose({ gridOffsets: null }));
+
+    expect(slices).toHaveLength(2);
+    // Unit fallback keeps the frames at distinct positions so the grid survives.
+    expect(slices[0].position).toEqual([10, 20, 30]);
+    expect(slices[1].position).toEqual([10, 20, 31]);
+    expect(buildVolume(slices).dims).toEqual([2, 2, 2]);
+  });
+
+  it('assembles into a dose Volume with through-plane geometry from the offset vector', () => {
+    const volume = buildVolume(parseFile('dose.dcm', rtDose()));
+
+    expect(volume.dims).toEqual([2, 2, 2]);
+    expect(volume.spacing).toEqual([3, 2, 5]); // [col, row, GridFrameOffset step]
+    expect(volume.modality).toBe('RTDOSE');
+    expect(volume.geometry?.origin).toEqual([10, 20, 30]);
+    expect(volume.geometry?.kStep).toEqual([0, 0, 5]);
+    expect(volume.min).toBe(0);
+    expect(volume.max).toBe(7);
   });
 });
