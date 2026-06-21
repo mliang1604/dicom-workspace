@@ -261,8 +261,8 @@ export type PaneView = MprPaneView | MipPaneView;
 const PARAMS_SIZE = 192;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
-/** Fusion checkerboard cell size, in framebuffer pixels. */
-const CHECKER_SIZE_PX = 24;
+/** Default fusion checkerboard cell size, in framebuffer pixels (at zoom 1). */
+export const DEFAULT_CHECKER_SIZE_PX = 24;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 const MIP_PARAMS_SIZE = 256;
@@ -354,6 +354,8 @@ export class SliceRenderer {
   private overlayColormap = false;
   /** Whether the overlay is composited as a checkerboard (vs. a uniform blend). */
   private overlayCheckerboard = false;
+  /** Checkerboard cell size in framebuffer pixels at zoom 1; scaled by the pane zoom. */
+  private overlayCheckerSize = DEFAULT_CHECKER_SIZE_PX;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -647,6 +649,15 @@ export class SliceRenderer {
   }
 
   /**
+   * Set the checkerboard cell size in framebuffer pixels (at zoom 1). A per-frame
+   * uniform — no texture work — so the caller just redraws; the drawn size scales
+   * with each pane's zoom so the pattern stays anchored to the anatomy.
+   */
+  setCheckerSize(px: number): void {
+    this.overlayCheckerSize = px;
+  }
+
+  /**
    * Replace the ROI surface mesh (patient-space vertices: pos3 + normal3 + rgba4
    * per vertex). Uploaded once when the structures/visibility change, then drawn
    * each frame via {@link renderPanes}; pass an empty array to clear.
@@ -908,7 +919,9 @@ export class SliceRenderer {
             opacity: this.overlayOpacity,
             colormap: this.overlayColormap,
             checkerboard: this.overlayCheckerboard,
-            checkerSize: CHECKER_SIZE_PX,
+            // Scale the cell by the pane zoom so the pattern tracks the anatomy
+            // (the shader divides framebuffer coords by this).
+            checkerSize: this.overlayCheckerSize * zoom,
           }
         : null;
 

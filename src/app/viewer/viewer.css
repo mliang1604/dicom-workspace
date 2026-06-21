@@ -493,7 +493,8 @@ button.active {
 }
 
 .roi-opacity,
-.layer-opacity {
+.layer-opacity,
+.checker-size {
   flex: 0 0 auto;
   width: 64px;
   cursor: pointer;

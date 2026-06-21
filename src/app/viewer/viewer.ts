@@ -25,6 +25,7 @@ import {
 } from '../../render/layout';
 import {
   clampPan,
+  DEFAULT_CHECKER_SIZE_PX,
   defaultSlabThicknessMm,
   isDvr,
   oneToOneZoom,
@@ -542,6 +543,10 @@ const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.S
 const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
+
+/** Bounds (framebuffer px, at zoom 1) for the fusion checkerboard cell-size slider. */
+const CHECKER_SIZE_MIN = 8;
+const CHECKER_SIZE_MAX = 96;
 
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
@@ -1829,9 +1834,18 @@ export class Viewer {
   /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
   protected readonly checkerboardEnabled = signal(false);
 
-  /** Toggle checkerboard compositing of the fusion overlay. */
+  /** Checkerboard cell size in framebuffer px (at zoom 1); the slider's live value. */
+  protected readonly checkerSize = signal(DEFAULT_CHECKER_SIZE_PX);
+
+  /** Toggle compositing the fusion overlay as a checkerboard. */
   protected toggleCheckerboard(): void {
     this.checkerboardEnabled.update((on) => !on);
+  }
+
+  /** Set the checkerboard cell size from the slider, clamped to a usable range. */
+  protected onCheckerSizeInput(event: Event): void {
+    const px = Number((event.target as HTMLInputElement).value);
+    this.checkerSize.set(clamp(px, CHECKER_SIZE_MIN, CHECKER_SIZE_MAX));
   }
 
   /**
@@ -2024,11 +2038,14 @@ export class Viewer {
       this.scheduleFrame();
     });
 
-    // Checkerboard vs. uniform-blend overlay compositing — a per-frame mode flag,
-    // no texture re-upload, so this is its own effect off the toggle.
+    // Checkerboard vs. uniform-blend overlay compositing, and the cell size — both
+    // per-frame uniforms (no texture re-upload), so this is its own effect.
     effect(() => {
       const renderer = this.renderer();
-      if (renderer) renderer.setOverlayCheckerboard(this.checkerboardEnabled());
+      if (renderer) {
+        renderer.setOverlayCheckerboard(this.checkerboardEnabled());
+        renderer.setCheckerSize(this.checkerSize());
+      }
       this.scheduleFrame();
     });
 
