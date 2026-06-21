@@ -75,15 +75,21 @@ input[type='range'] {
   background: transparent;
   cursor: pointer;
 }
+/* Accent fill from the left up to the thumb (--range-fill, set by RangeFill),
+   over the unfilled track colour. */
 input[type='range']::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.22);
+  background:
+    linear-gradient(var(--accent), var(--accent)) left / var(--range-fill, 0%) 100% no-repeat,
+    rgba(255, 255, 255, 0.22);
 }
 input[type='range']::-moz-range-track {
   height: 4px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.22);
+  background:
+    linear-gradient(var(--accent), var(--accent)) left / var(--range-fill, 0%) 100% no-repeat,
+    rgba(255, 255, 255, 0.22);
 }
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
