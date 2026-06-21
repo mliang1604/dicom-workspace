@@ -261,8 +261,12 @@ export type PaneView = MprPaneView | MipPaneView;
 const PARAMS_SIZE = 192;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
-/** Default fusion checkerboard cell size, in framebuffer pixels (at zoom 1). */
-export const DEFAULT_CHECKER_SIZE_PX = 24;
+/**
+ * Default fusion checkerboard density, as the number of cells spanning the image
+ * (at zoom 1). The cell's pixel size is derived per-pane from the pane width, so
+ * the pattern stays the same coarseness regardless of how large the image draws.
+ */
+export const DEFAULT_CHECKER_CELLS = 20;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 const MIP_PARAMS_SIZE = 256;
@@ -354,8 +358,8 @@ export class SliceRenderer {
   private overlayColormap = false;
   /** Whether the overlay is composited as a checkerboard (vs. a uniform blend). */
   private overlayCheckerboard = false;
-  /** Checkerboard cell size in framebuffer pixels at zoom 1; scaled by the pane zoom. */
-  private overlayCheckerSize = DEFAULT_CHECKER_SIZE_PX;
+  /** Checkerboard density: cells across the image at zoom 1. Pixel size is per-pane. */
+  private overlayCheckerCells = DEFAULT_CHECKER_CELLS;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -649,12 +653,13 @@ export class SliceRenderer {
   }
 
   /**
-   * Set the checkerboard cell size in framebuffer pixels (at zoom 1). A per-frame
-   * uniform — no texture work — so the caller just redraws; the drawn size scales
-   * with each pane's zoom so the pattern stays anchored to the anatomy.
+   * Set the checkerboard density: the number of cells spanning the image (at zoom
+   * 1). Each pane derives its cell's pixel size from this and its own width, so the
+   * pattern reads the same coarseness on any image, then scales with the pane zoom
+   * so it stays anchored to the anatomy. A per-frame uniform — no texture work.
    */
-  setCheckerSize(px: number): void {
-    this.overlayCheckerSize = px;
+  setCheckerCells(cells: number): void {
+    this.overlayCheckerCells = cells;
   }
 
   /**
@@ -923,9 +928,11 @@ export class SliceRenderer {
             opacity: this.overlayOpacity,
             colormap: this.overlayColormap,
             checkerboard: this.overlayCheckerboard,
-            // Scale the cell by the pane zoom so the pattern tracks the anatomy
-            // (the shader divides framebuffer coords by this).
-            checkerSize: this.overlayCheckerSize * zoom,
+            // Derive the cell's framebuffer size from the pane width so a fixed
+            // count of cells spans the image regardless of how large it draws,
+            // then scale by the pane zoom so the pattern tracks the anatomy (the
+            // shader divides framebuffer coords by this).
+            checkerSize: (rect.width / Math.max(this.overlayCheckerCells, 1)) * zoom,
           }
         : null;
 

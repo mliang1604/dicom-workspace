@@ -25,7 +25,7 @@ import {
 } from '../../render/layout';
 import {
   clampPan,
-  DEFAULT_CHECKER_SIZE_PX,
+  DEFAULT_CHECKER_CELLS,
   defaultSlabThicknessMm,
   isDvr,
   oneToOneZoom,
@@ -560,9 +560,13 @@ const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 
-/** Bounds (framebuffer px, at zoom 1) for the fusion checkerboard cell-size slider. */
-const CHECKER_SIZE_MIN = 16;
-const CHECKER_SIZE_MAX = 96;
+/**
+ * Bounds for the fusion checkerboard slider, in cells across the image: from a
+ * coarse 2 (halves the image) up to a fine 20. The pixel size is derived per-pane
+ * from the pane width, so the count holds regardless of how large the image draws.
+ */
+const CHECKER_CELLS_MIN = 2;
+const CHECKER_CELLS_MAX = 20;
 
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
@@ -1960,18 +1964,18 @@ export class Viewer {
   /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
   protected readonly checkerboardEnabled = signal(false);
 
-  /** Checkerboard cell size in framebuffer px (at zoom 1); the slider's live value. */
-  protected readonly checkerSize = signal(DEFAULT_CHECKER_SIZE_PX);
+  /** Checkerboard density in cells across the image (at zoom 1); the slider's value. */
+  protected readonly checkerCells = signal(DEFAULT_CHECKER_CELLS);
 
   /** Toggle compositing the fusion overlay as a checkerboard. */
   protected toggleCheckerboard(): void {
     this.checkerboardEnabled.update((on) => !on);
   }
 
-  /** Set the checkerboard cell size from the slider, clamped to a usable range. */
-  protected onCheckerSizeInput(event: Event): void {
-    const px = Number((event.target as HTMLInputElement).value);
-    this.checkerSize.set(clamp(px, CHECKER_SIZE_MIN, CHECKER_SIZE_MAX));
+  /** Set the checkerboard density (cells across the image) from the slider, clamped. */
+  protected onCheckerCellsInput(event: Event): void {
+    const cells = Number((event.target as HTMLInputElement).value);
+    this.checkerCells.set(clamp(cells, CHECKER_CELLS_MIN, CHECKER_CELLS_MAX));
   }
 
   /**
@@ -2170,7 +2174,7 @@ export class Viewer {
       const renderer = this.renderer();
       if (renderer) {
         renderer.setOverlayCheckerboard(this.checkerboardEnabled());
-        renderer.setCheckerSize(this.checkerSize());
+        renderer.setCheckerCells(this.checkerCells());
       }
       this.scheduleFrame();
     });

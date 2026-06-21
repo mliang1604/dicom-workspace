@@ -72,21 +72,21 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await expect(page.locator('.pane-overlay .pane')).toHaveCount(3);
   await expect(blendBar).toBeVisible();
 
-  // #143: turning the checkerboard on reveals a cell-size slider that changes the
-  // size live (a per-frame uniform — no re-upload, no error).
+  // #143: turning the checkerboard on reveals a density slider (cells across the
+  // image) that changes the pattern live (a per-frame uniform — no re-upload).
   await page.locator('button[data-checkerboard]').click();
   const cell = page.locator('input.checker-size');
   await expect(cell).toBeVisible();
-  await expect(cell).toHaveAttribute('data-checker-size', '24');
+  await expect(cell).toHaveAttribute('data-checker-size', '20');
   // The slider fills its rail row (it used to be a 64px stub floating mid-row, so
   // the thumb couldn't reach the right). It now spans well past that width.
   const cellBox = await cell.boundingBox();
   expect(cellBox!.width).toBeGreaterThan(140);
   await cell.evaluate((el) => {
-    (el as HTMLInputElement).value = '48';
+    (el as HTMLInputElement).value = '6';
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  await expect(cell).toHaveAttribute('data-checker-size', '48');
+  await expect(cell).toHaveAttribute('data-checker-size', '6');
   await page.locator('button[data-checkerboard]').click(); // back off for the rest
 
   // The per-row opacity slider fills the row too (it was a 64px stub whose thumb
