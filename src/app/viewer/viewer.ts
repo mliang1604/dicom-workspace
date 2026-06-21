@@ -129,6 +129,7 @@ import { describeSelection, RecentStore, type RecentEntry } from '../recent-stor
 import { PreferencesStore } from '../preferences-store';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
+import { RangeFill } from './range-fill';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -609,6 +610,7 @@ const MIP_SETTLE_MS = 200;
 @Component({
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [RangeFill],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
