@@ -1,4 +1,4 @@
-import { groupSeries, largestSeries } from './series';
+import { groupSeries, largestSeries, middleSlice } from './series';
 import type { Slice } from './types';
 
 /** A minimal slice carrying just the series-grouping fields under test. */
@@ -107,5 +107,43 @@ describe('largestSeries', () => {
     ]);
 
     expect(largestSeries(series).uid).toBe('lo');
+  });
+});
+
+describe('middleSlice', () => {
+  it('returns null for a series with no slices', () => {
+    const series = groupSeries([slice('a')]);
+    expect(middleSlice({ ...series[0], slices: [] })).toBeNull();
+  });
+
+  it('returns the central slice by InstanceNumber when there is no spatial metadata', () => {
+    const [series] = groupSeries([
+      slice('a', { instanceNumber: 3, name: 'three' }),
+      slice('a', { instanceNumber: 1, name: 'one' }),
+      slice('a', { instanceNumber: 2, name: 'two' }),
+    ]);
+
+    expect(middleSlice(series)?.name).toBe('two');
+  });
+
+  it('orders by ImagePositionPatient along the slice normal when present', () => {
+    const orientation = [1, 0, 0, 0, 1, 0]; // normal is +z
+    const at = (z: number, name: string) => slice('a', { orientation, position: [0, 0, z], name });
+    // Encounter order is shuffled; the middle by z is the one at z=5.
+    const [series] = groupSeries([at(9, 'top'), at(1, 'bottom'), at(5, 'middle')]);
+
+    expect(middleSlice(series)?.name).toBe('middle');
+  });
+
+  it('does not reorder the series own slice array', () => {
+    const [series] = groupSeries([
+      slice('a', { instanceNumber: 3, name: 'three' }),
+      slice('a', { instanceNumber: 1, name: 'one' }),
+    ]);
+    const before = series.slices.map((s) => s.name);
+
+    middleSlice(series);
+
+    expect(series.slices.map((s) => s.name)).toEqual(before);
   });
 });
