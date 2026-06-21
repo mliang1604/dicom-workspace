@@ -3188,6 +3188,7 @@ export class Viewer {
     if (!(input instanceof HTMLInputElement) || !input.files) return;
     const files = Array.from(input.files);
     input.value = ''; // allow re-selecting the same folder
+    input.blur(); // release focus so post-upload shortcuts aren't swallowed
     if (files.length > 0) await this.loadFiles(files, describeSelection(files));
   }
 
