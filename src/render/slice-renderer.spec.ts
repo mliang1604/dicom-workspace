@@ -1,13 +1,16 @@
 import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { Vec2 } from './layout';
 import { patientToTexMatrix } from './reslice';
+import type { CameraBasis } from './camera';
 import {
   clampPan,
   defaultSlabThicknessMm,
+  ensureSurfaceSortScratch,
   isDvr,
   mipStepScale,
   oneToOneZoom,
   packSliceParams,
+  packSurfaceFrame,
   ProjectionMode,
   projectionModeCode,
   projectionWindow,
@@ -357,5 +360,73 @@ describe('rezoomPan', () => {
     const pan = { x: 0.1, y: -0.2 };
     const next = rezoomPan(pan, 1, 2, anchor);
     expect(planeAt(anchor, next, 2)).toEqual(planeAt(anchor, pan, 1));
+  });
+});
+
+describe('ensureSurfaceSortScratch', () => {
+  it('allocates buffers that hold at least n triangles', () => {
+    const s = ensureSurfaceSortScratch(null, 100);
+    expect(s.cap).toBeGreaterThanOrEqual(100);
+    expect(s.depth.length).toBe(s.cap);
+    expect(s.order.length).toBe(s.cap);
+    expect(s.index.length).toBe(s.cap * 3); // three vertex indices per triangle
+    expect(s.camera.length).toBe(16); // packed camera uniform (4 × vec4)
+  });
+
+  it('reuses the existing scratch (and camera buffer) when it is large enough', () => {
+    const first = ensureSurfaceSortScratch(null, 10);
+    const again = ensureSurfaceSortScratch(first, 5);
+    expect(again).toBe(first);
+    expect(again.camera).toBe(first.camera);
+  });
+
+  it('grows past doubling and keeps the camera buffer across a regrow', () => {
+    const first = ensureSurfaceSortScratch(null, 4096);
+    const grown = ensureSurfaceSortScratch(first, 20000);
+    expect(grown).not.toBe(first);
+    expect(grown.cap).toBeGreaterThanOrEqual(20000);
+    expect(grown.camera).toBe(first.camera); // camera buffer reused, not reallocated
+  });
+});
+
+describe('packSurfaceFrame', () => {
+  /** A camera looking down −z from above (forward = +z into the screen). */
+  const basis: CameraBasis = {
+    eye: [0, 0, 0],
+    forward: [0, 0, 1],
+    axisU: [2, 0, 0],
+    axisV: [0, 3, 0],
+  };
+
+  it('packs the camera uniform at the byte layout the WGSL Camera struct expects', () => {
+    const scratch = ensureSurfaceSortScratch(null, 1);
+    const { camera } = packSurfaceFrame(new Float32Array([0, 0, 1]), 1, basis, [0, 0, 1], scratch);
+    // eye at floats 0..2, pad at 3.
+    expect(Array.from(camera.slice(0, 3))).toEqual([0, 0, 0]);
+    // axisU at 4..6, |axisU|² at 7.
+    expect(Array.from(camera.slice(4, 7))).toEqual([2, 0, 0]);
+    expect(camera[7]).toBeCloseTo(4); // 2²
+    // axisV at 8..10, |axisV|² at 11.
+    expect(Array.from(camera.slice(8, 11))).toEqual([0, 3, 0]);
+    expect(camera[11]).toBeCloseTo(9); // 3²
+    // light at 12..14.
+    expect(Array.from(camera.slice(12, 15))).toEqual([0, 0, 1]);
+  });
+
+  it("sorts triangles far-to-near along forward (painter's order)", () => {
+    // Three centroids at depths z = 1, 5, 3 along forward = +z.
+    const centroids = new Float32Array([0, 0, 1, 0, 0, 5, 0, 0, 3]);
+    const scratch = ensureSurfaceSortScratch(null, 3);
+    const { indices } = packSurfaceFrame(centroids, 3, basis, [0, 0, 1], scratch);
+    expect(indices).toHaveLength(9); // three vertex indices per triangle
+    // Far first: triangle 1 (z=5), then 2 (z=3), then 0 (z=1).
+    expect(Array.from(indices)).toEqual([3, 4, 5, 6, 7, 8, 0, 1, 2]);
+  });
+
+  it('expands each sorted triangle to three consecutive vertex indices', () => {
+    const centroids = new Float32Array([0, 0, 2, 0, 0, 1]); // already far-to-near
+    const scratch = ensureSurfaceSortScratch(null, 2);
+    const { indices } = packSurfaceFrame(centroids, 2, basis, [0, 0, 1], scratch);
+    expect(Array.from(indices)).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });

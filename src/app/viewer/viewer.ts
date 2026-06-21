@@ -27,13 +27,16 @@ import {
   clampPan,
   DEFAULT_CHECKER_CELLS,
   defaultSlabThicknessMm,
+  ensureSurfaceSortScratch,
   isDvr,
   oneToOneZoom,
+  packSurfaceFrame,
   ProjectionMode,
   rezoomPan,
   SliceRenderer,
   type PaneView,
   type SurfaceFrame,
+  type SurfaceSortScratch,
 } from '../../render/slice-renderer';
 import {
   addControlPoint,
@@ -121,8 +124,13 @@ import {
 } from '../../dicom/types';
 import { COLORMAPS } from '../../render/colormap';
 import { clamp, clamp01 } from '../../dicom/math';
-import { add, cross, dot, length, normalize, scale, sub } from '../../dicom/vec3';
-import { loftContours, type Triangle } from '../../render/surface';
+import { add, cross, length, normalize, scale } from '../../dicom/vec3';
+import {
+  flattenSurfaceMeshes,
+  loftRoiMesh,
+  type ColoredSurfaceMesh,
+  type RoiSurfaceMesh,
+} from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult, type MergedLoad } from '../volume-loader';
@@ -271,23 +279,6 @@ const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sa
 const CONTOUR_DECIMATE_UV = 0.0015;
 /** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
 const SURFACE_ALPHA = 0.4;
-
-/**
- * One ROI's 3D surface mesh, flattened for fast per-frame drawing: triangle
- * vertex positions (9 floats each) and precomputed face normals (3 floats each)
- * in patient mm. Built once per structure set; projected/shaded each orbit frame.
- */
-interface RoiSurfaceMesh {
-  readonly setIndex: number;
-  readonly roiNumber: number;
-  /** ROI display colour as [r, g, b] in 0–255, for shading. */
-  readonly baseColor: readonly [number, number, number];
-  /** Triangle vertices, 9 floats (3 × xyz) per triangle. */
-  readonly positions: Float32Array;
-  /** Unit face normals, 3 floats per triangle. */
-  readonly normals: Float32Array;
-  readonly count: number;
-}
 
 /** One ROI listed in the structures panel, with its display controls. */
 export interface RoiLegendEntry {
@@ -1254,11 +1245,9 @@ export class Viewer {
         const loops = roi.contours
           .filter((c) => c.geometricType !== 'OPEN_PLANAR' && c.geometricType !== 'POINT')
           .map((c) => c.points);
-        const triangles = loftContours(loops);
-        if (triangles.length) {
-          const baseColor = roi.color ?? ([200, 200, 200] as const);
-          meshes.push(flattenMesh(setIndex, roi.number, baseColor, triangles));
-        }
+        const baseColor = roi.color ?? ([200, 200, 200] as const);
+        const mesh = loftRoiMesh(setIndex, roi.number, baseColor, loops);
+        if (mesh) meshes.push(mesh);
       }
     });
     return meshes;
@@ -2080,15 +2069,12 @@ export class Viewer {
   /** Triangle centroids (3 floats each) for the visible ROI surface mesh, for depth sorting. */
   private surfaceCentroids: Float32Array | null = null;
   private surfaceTriangleCount = 0;
-  /** Reusable per-frame surface sort scratch, grown as needed (no per-frame alloc). */
-  private surfaceSort: {
-    depth: Float32Array;
-    order: Uint32Array;
-    index: Uint32Array;
-    cap: number;
-  } | null = null;
-  /** Packed surface camera uniform (eye, axisU+uu, axisV+vv, light), reused each frame. */
-  private readonly surfaceCamera = new Float32Array(16);
+  /**
+   * Reusable per-frame surface depth-sort + camera scratch, grown as needed by
+   * {@link ensureSurfaceSortScratch} so a steady orbit allocates nothing. Owned
+   * here but laid out (and filled) by the render layer's {@link packSurfaceFrame}.
+   */
+  private surfaceSort: SurfaceSortScratch | null = null;
   /**
    * Nesting depth of drag-enter over the viewport's children. `dragenter`/
    * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
@@ -2212,13 +2198,14 @@ export class Viewer {
     });
   }
 
-  /** Coalesce surface redraws into a single animation frame. */
   /**
    * Build the WebGPU vertex buffer for the visible ROI surfaces — one flat-shaded
    * triangle list (position + face normal + RGBA per vertex) across every shown
-   * ROI — and hand it to the renderer. Also keeps each triangle's centroid for
-   * the per-frame depth sort. Camera-independent: only rebuilt when the meshes or
-   * ROI visibility / colour / opacity change.
+   * ROI — and hand it to the renderer. The component's job is only to pick the
+   * visible ROIs and resolve each one's display colour and opacity; the interleave
+   * and the per-triangle centroids (kept for the per-frame depth sort) come from
+   * the render layer's {@link flattenSurfaceMeshes}. Camera-independent: only
+   * rebuilt when the meshes or ROI visibility / colour / opacity change.
    */
   private buildSurfaceMesh(
     renderer: SliceRenderer,
@@ -2228,76 +2215,31 @@ export class Viewer {
     opacities: ReadonlyMap<string, number>,
     selectedSet: number,
   ): void {
-    let total = 0;
-    const visible: RoiSurfaceMesh[] = [];
+    // Select the shown ROIs and resolve each one's RGBA (override colour or the
+    // RTSTRUCT display colour, alpha folded with the base surface alpha).
+    const visible: ColoredSurfaceMesh[] = [];
     for (const mesh of meshes) {
       if (!setIsShown(selectedSet, mesh.setIndex)) continue;
       const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
-      if (hidden.has(key) || (opacities.get(key) ?? 1) <= 0) continue;
-      visible.push(mesh);
-      total += mesh.count;
-    }
-    this.surfaceTriangleCount = total;
-    this.canvasRef().nativeElement.dataset['roiSurfaceTriangles'] = String(total);
-    if (total === 0) {
-      renderer.setSurfaceMesh(new Float32Array(0));
-      return;
+      const opacity = opacities.get(key) ?? 1;
+      if (hidden.has(key) || opacity <= 0) continue;
+      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
+      visible.push({ mesh, rgba: [r / 255, g / 255, b / 255, opacity * SURFACE_ALPHA] });
     }
 
-    const verts = new Float32Array(total * 3 * 10); // 3 verts × (pos3 + normal3 + rgba4)
-    const centroids = new Float32Array(total * 3);
-    let v = 0;
-    let c = 0;
-    for (const mesh of visible) {
-      const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
-      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
-      const cr = r / 255;
-      const cg = g / 255;
-      const cb = b / 255;
-      const alpha = (opacities.get(key) ?? 1) * SURFACE_ALPHA;
-      const pos = mesh.positions;
-      const nrm = mesh.normals;
-      for (let i = 0; i < mesh.count; i++) {
-        const p = i * 9;
-        const n = i * 3;
-        const nx = nrm[n];
-        const ny = nrm[n + 1];
-        const nz = nrm[n + 2];
-        let sx = 0;
-        let sy = 0;
-        let sz = 0;
-        for (let vtx = 0; vtx < 3; vtx++) {
-          const o = p + vtx * 3;
-          const px = pos[o];
-          const py = pos[o + 1];
-          const pz = pos[o + 2];
-          verts[v++] = px;
-          verts[v++] = py;
-          verts[v++] = pz;
-          verts[v++] = nx;
-          verts[v++] = ny;
-          verts[v++] = nz;
-          verts[v++] = cr;
-          verts[v++] = cg;
-          verts[v++] = cb;
-          verts[v++] = alpha;
-          sx += px;
-          sy += py;
-          sz += pz;
-        }
-        centroids[c++] = sx / 3;
-        centroids[c++] = sy / 3;
-        centroids[c++] = sz / 3;
-      }
-    }
-    this.surfaceCentroids = centroids;
-    renderer.setSurfaceMesh(verts);
+    const { vertices, centroids, count } = flattenSurfaceMeshes(visible);
+    this.surfaceTriangleCount = count;
+    this.surfaceCentroids = count > 0 ? centroids : null;
+    this.canvasRef().nativeElement.dataset['roiSurfaceTriangles'] = String(count);
+    renderer.setSurfaceMesh(vertices);
   }
 
   /**
    * Per-frame surface data for the WebGPU pass: depth-sort the triangles
-   * back-to-front against the current camera and pack the camera uniform. Null
-   * when there's no 3D pane or no surface mesh.
+   * back-to-front against the current camera and pack the camera uniform. The
+   * sort + packing live in the render layer ({@link packSurfaceFrame}); the
+   * component only supplies the camera basis and reusable scratch. Null when
+   * there's no 3D pane or no surface mesh.
    */
   private surfaceFrame(): SurfaceFrame | null {
     const volume = this.volume();
@@ -2310,60 +2252,8 @@ export class Viewer {
     const camera = this.camera3d();
     const basis = cameraBasis(volume, camera, mip.rect.width, mip.rect.height);
     const light = viewBasis(camera.azimuth, camera.elevation).forward;
-    const sort = this.ensureSurfaceSort(n);
-    const { depth, order, index } = sort;
-
-    const ex = basis.eye[0];
-    const ey = basis.eye[1];
-    const ez = basis.eye[2];
-    const fx = basis.forward[0];
-    const fy = basis.forward[1];
-    const fz = basis.forward[2];
-    for (let i = 0; i < n; i++) {
-      const c = i * 3;
-      depth[i] =
-        (centroids[c] - ex) * fx + (centroids[c + 1] - ey) * fy + (centroids[c + 2] - ez) * fz;
-      order[i] = i;
-    }
-    const ord = order.subarray(0, n);
-    ord.sort((a, b) => depth[b] - depth[a]); // far first (painter's order)
-    for (let k = 0; k < n; k++) {
-      const t = ord[k];
-      index[k * 3] = t * 3;
-      index[k * 3 + 1] = t * 3 + 1;
-      index[k * 3 + 2] = t * 3 + 2;
-    }
-
-    const cam = this.surfaceCamera;
-    cam[0] = ex;
-    cam[1] = ey;
-    cam[2] = ez;
-    cam[4] = basis.axisU[0];
-    cam[5] = basis.axisU[1];
-    cam[6] = basis.axisU[2];
-    cam[7] = dot(basis.axisU, basis.axisU);
-    cam[8] = basis.axisV[0];
-    cam[9] = basis.axisV[1];
-    cam[10] = basis.axisV[2];
-    cam[11] = dot(basis.axisV, basis.axisV);
-    cam[12] = light[0];
-    cam[13] = light[1];
-    cam[14] = light[2];
-    return { indices: index.subarray(0, n * 3), camera: cam };
-  }
-
-  /** Grow (and cache) the per-frame surface depth-sort scratch for `n` triangles. */
-  private ensureSurfaceSort(n: number): NonNullable<typeof this.surfaceSort> {
-    if (!this.surfaceSort || this.surfaceSort.cap < n) {
-      const cap = Math.max(n, (this.surfaceSort?.cap ?? 0) * 2, 4096);
-      this.surfaceSort = {
-        depth: new Float32Array(cap),
-        order: new Uint32Array(cap),
-        index: new Uint32Array(cap * 3),
-        cap,
-      };
-    }
-    return this.surfaceSort;
+    this.surfaceSort = ensureSurfaceSortScratch(this.surfaceSort, n);
+    return packSurfaceFrame(centroids, n, basis, light, this.surfaceSort);
   }
 
   /**
@@ -4500,36 +4390,6 @@ function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): 
 function rgbColor(color: readonly [number, number, number] | null): string {
   if (!color) return 'rgb(200, 200, 200)';
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
-}
-
-/** Flatten lofted triangles into typed-array positions + precomputed face normals. */
-function flattenMesh(
-  setIndex: number,
-  roiNumber: number,
-  baseColor: readonly [number, number, number],
-  triangles: readonly Triangle[],
-): RoiSurfaceMesh {
-  const count = triangles.length;
-  const positions = new Float32Array(count * 9);
-  const normals = new Float32Array(count * 3);
-  for (let t = 0; t < count; t++) {
-    const [a, b, c] = triangles[t];
-    const o = t * 9;
-    positions[o] = a[0];
-    positions[o + 1] = a[1];
-    positions[o + 2] = a[2];
-    positions[o + 3] = b[0];
-    positions[o + 4] = b[1];
-    positions[o + 5] = b[2];
-    positions[o + 6] = c[0];
-    positions[o + 7] = c[1];
-    positions[o + 8] = c[2];
-    const nrm = normalize(cross(sub(b, a), sub(c, a)));
-    normals[t * 3] = nrm[0];
-    normals[t * 3 + 1] = nrm[1];
-    normals[t * 3 + 2] = nrm[2];
-  }
-  return { setIndex, roiNumber, baseColor, positions, normals, count };
 }
 
 /** Parse a `#rrggbb` colour-input value into [r, g, b] (0–255), or null. */
