@@ -297,6 +297,33 @@ export function overlayImageLayer(id: string, volume: Volume): Layer {
 }
 
 /**
+ * Apply the layers panel's user overrides onto the loaded registry: per-layer
+ * visibility, composite opacity, and display transform (grayscale ⇄ colormap),
+ * keyed by {@link Layer.id}. Mirrors the structures panel's override maps — the
+ * loaded layers stay immutable and the panel layers its edits on top, so a reload
+ * starts clean. A layer with no override is returned unchanged (same reference).
+ */
+export function applyLayerOverrides(
+  layers: readonly Layer[],
+  hidden: ReadonlySet<string>,
+  opacities: ReadonlyMap<string, number>,
+  displays: ReadonlyMap<string, LayerDisplay>,
+): Layer[] {
+  return layers.map((layer) => {
+    const opacity = opacities.get(layer.id);
+    const display = displays.get(layer.id);
+    const visible = !hidden.has(layer.id) && layer.visible;
+    if (opacity === undefined && display === undefined && visible === layer.visible) return layer;
+    return {
+      ...layer,
+      visible,
+      opacity: opacity ?? layer.opacity,
+      display: display ?? layer.display,
+    };
+  });
+}
+
+/**
  * The base image layer of a registry: the `'base'`-role layer, falling back to
  * the first entry when none is tagged (a non-empty registry always has one).
  * Every single-layer consumer (reslice, probe, contours, crosshair, capture)
