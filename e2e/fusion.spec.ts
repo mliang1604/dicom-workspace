@@ -66,6 +66,19 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await expect(page.locator('.pane-overlay .pane')).toHaveCount(3);
   await expect(blendBar).toBeVisible();
 
+  // #143: turning the checkerboard on reveals a cell-size slider that changes the
+  // size live (a per-frame uniform — no re-upload, no error).
+  await page.locator('button[data-checkerboard]').click();
+  const cell = page.locator('input.checker-size');
+  await expect(cell).toBeVisible();
+  await expect(cell).toHaveAttribute('data-checker-size', '24');
+  await cell.evaluate((el) => {
+    (el as HTMLInputElement).value = '48';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(cell).toHaveAttribute('data-checker-size', '48');
+  await page.locator('button[data-checkerboard]').click(); // back off for the rest
+
   // Cycle the Layout button to the Compare layout.
   const layoutButton = page.getByRole('button', { name: /Layout/ });
   for (let i = 0; i < 6; i++) {
