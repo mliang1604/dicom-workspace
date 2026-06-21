@@ -5,21 +5,32 @@ import {
   computed,
   effect,
   input,
+  output,
   viewChild,
 } from '@angular/core';
 import type { Series } from '../../../dicom/series';
 import { toImageData, type SeriesThumbnail } from '../series-thumbnail';
 
 /**
+ * The DnD MIME type a dragged chip writes its SeriesInstanceUID under, so the
+ * viewport drop can resolve it back to the series via the catalog. `getData` is
+ * blocked until drop, so only the UID (not the series object) crosses the
+ * boundary — the receiver looks the series up itself.
+ */
+export const SERIES_DND_MIME = 'application/x-dicom-series-uid';
+
+/**
  * One series row/chip: a small preview (the CPU thumbnail, or a modality icon),
  * the series description, its image count and modality.
  *
- * Deliberately presentational and stateless — it takes the series, its already
- * computed {@link SeriesThumbnail} and a `loaded` flag as inputs and renders
- * them. Factored out of the {@link import('./history-panel').HistoryPanel} so the
- * tree toggle (#172) and the alternate B/C timeline layouts can reuse the exact
- * same chip without duplicating its markup or drawing logic. Read-only here;
- * loading and drag-to-load is #173.
+ * Presentational and stateless — it takes the series, its already computed
+ * {@link SeriesThumbnail} and a `loaded` flag as inputs and renders them.
+ * Factored out of the {@link import('./history-panel').HistoryPanel} so the tree
+ * toggle (#172) and the alternate B/C timeline layouts can reuse the exact same
+ * chip without duplicating its markup or drawing logic. It carries no load state
+ * of its own: clicking, pressing Enter/Space, or dragging the chip to the
+ * viewport all resolve to "load this series", surfaced via {@link activate} (and
+ * the {@link SERIES_DND_MIME} drag payload) for the parent to act on (#173).
  */
 @Component({
   selector: 'app-series-chip',
@@ -31,6 +42,14 @@ import { toImageData, type SeriesThumbnail } from '../series-thumbnail';
     '[class.loaded]': 'loaded()',
     // Marks the chip of the series currently displayed in the viewer.
     '[attr.aria-current]': "loaded() ? 'true' : null",
+    // A focusable, draggable button: click / Enter / Space / drag all load it.
+    role: 'button',
+    tabindex: '0',
+    draggable: 'true',
+    '(click)': 'onActivate()',
+    '(keydown.enter)': 'onActivate()',
+    '(keydown.space)': 'onActivateKey($event)',
+    '(dragstart)': 'onDragStart($event)',
   },
 })
 export class SeriesChip {
@@ -40,8 +59,28 @@ export class SeriesChip {
   readonly thumbnail = input.required<SeriesThumbnail>();
   /** Whether this series is the one currently loaded in the viewport (highlight). */
   readonly loaded = input(false);
+  /** Emitted when the chip is clicked, key-activated, or its drag completes a load. */
+  readonly activate = output<Series>();
 
   private readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('thumb');
+
+  /** Request that this chip's series be loaded (click / Enter / Space). */
+  protected onActivate(): void {
+    this.activate.emit(this.series());
+  }
+
+  /** Space activates without scrolling the panel. */
+  protected onActivateKey(event: Event): void {
+    event.preventDefault();
+    this.onActivate();
+  }
+
+  /** Start a drag carrying the series UID so the viewport drop can load it. */
+  protected onDragStart(event: DragEvent): void {
+    if (!event.dataTransfer) return;
+    event.dataTransfer.setData(SERIES_DND_MIME, this.series().uid);
+    event.dataTransfer.effectAllowed = 'copy';
+  }
 
   /** Whether the preview is a rendered image (vs an icon fallback). */
   protected readonly isImage = computed(() => this.thumbnail().kind === 'image');

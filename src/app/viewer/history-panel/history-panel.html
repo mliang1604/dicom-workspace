@@ -73,7 +73,8 @@
                     <app-series-chip
                       [series]="series"
                       [thumbnail]="thumbnailFor(series)"
-                      [loaded]="series.uid === loadedSeriesUid()"
+                      [loaded]="isLoaded(series)"
+                      (activate)="onLoadSeries($event)"
                     />
                   </li>
                 }
@@ -122,7 +123,8 @@
                           <app-series-chip
                             [series]="series"
                             [thumbnail]="thumbnailFor(series)"
-                            [loaded]="series.uid === loadedSeriesUid()"
+                            [loaded]="isLoaded(series)"
+                            (activate)="onLoadSeries($event)"
                           />
                         </li>
                       }

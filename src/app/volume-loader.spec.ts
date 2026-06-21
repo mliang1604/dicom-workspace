@@ -1,11 +1,12 @@
 import {
   baseImageLayer,
   overlayImageLayer,
+  type Slice,
   type Volume,
   type VolumeGeometry,
 } from '../dicom/types';
 import type { Series } from '../dicom/series';
-import { doseOverlaySeries, mergeLoad, type LoadResult } from './volume-loader';
+import { doseOverlaySeries, mergeLoad, VolumeLoader, type LoadResult } from './volume-loader';
 
 /** A unit index→patient affine; real loads always carry one (see buildVolume). */
 const FAKE_GEOMETRY: VolumeGeometry = {
@@ -79,6 +80,68 @@ function fakeLoad(
     sliceCount: 1,
   };
 }
+
+/** A 2×2 axial CT slice at z, enough for {@link buildVolume} to assemble a volume. */
+function axialSlice(z: number, instanceNumber: number): Slice {
+  return {
+    name: `slice-${instanceNumber}`,
+    columns: 2,
+    rows: 2,
+    pixelSpacing: [1, 1],
+    position: [0, 0, z],
+    orientation: [1, 0, 0, 0, 1, 0],
+    instanceNumber,
+    seriesUid: 'series-1',
+    seriesNumber: 1,
+    frameOfReferenceUid: 'frame-1',
+    seriesDescription: 'Axial',
+    studyUid: null,
+    studyDate: null,
+    studyTime: null,
+    studyDescription: null,
+    patientId: null,
+    patientName: null,
+    modality: 'CT',
+    rescaleSlope: 1,
+    rescaleIntercept: 0,
+    windowCenter: null,
+    windowWidth: null,
+    pixels: new Float32Array([0, 1, 2, 3]),
+  };
+}
+
+/** A real (slice-backed) series, as the catalog retains for the lazy build. */
+function seriesWithSlices(uid: string, frameOfReferenceUid: string | null): Series {
+  return {
+    ...fakeSeries(uid, frameOfReferenceUid),
+    imageCount: 2,
+    slices: [axialSlice(0, 1), axialSlice(2, 2)],
+  };
+}
+
+describe('VolumeLoader.loadSeries', () => {
+  it('builds a one-series load from the retained slices on demand', () => {
+    const result = new VolumeLoader().loadSeries(seriesWithSlices('ct', 'frame-1'));
+
+    expect(result.selectedUid).toBe('ct');
+    expect(result.series.map((s) => s.uid)).toEqual(['ct']);
+    expect(result.layers.map((l) => [l.id, l.role])).toEqual([['ct', 'base']]);
+    expect(result.layers[0].volume.dims).toEqual([2, 2, 2]);
+    expect(result.sliceCount).toBe(2);
+  });
+
+  it('associates an earlier structure set with a matching frame of reference', () => {
+    const structureSet = {
+      seriesUid: 'rt',
+      frameOfReferenceUid: 'frame-1',
+      rois: [],
+    } as unknown as LoadResult['allStructureSets'][number];
+    const result = new VolumeLoader().loadSeries(seriesWithSlices('ct', 'frame-1'), [structureSet]);
+
+    expect(result.allStructureSets).toEqual([structureSet]);
+    expect(result.structureSets).toEqual([structureSet]);
+  });
+});
 
 describe('doseOverlaySeries', () => {
   const ct = fakeSeries('ct', 'frame-1', 'CT');

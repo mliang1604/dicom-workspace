@@ -91,6 +91,19 @@ export class VolumeLoader {
   }
 
   /**
+   * Build a load result for a single catalog {@link Series} — the history
+   * panel's on-demand ("lazy") build. The series retains its parsed slices, so
+   * the volume is assembled here ({@link buildVolume}) without re-reading files.
+   * Structure sets parsed in an earlier load are carried through so an RTSTRUCT
+   * still annotates a series it references (matched by frame of reference); pass
+   * the current view's `allStructureSets`, or none. The viewer routes the result
+   * through {@link merge} for the same-FoR-fuses / different-study-replaces rule.
+   */
+  loadSeries(series: Series, allStructureSets: readonly StructureSet[] = []): LoadResult {
+    return this.buildResult([series], series, allStructureSets, series.slices.length);
+  }
+
+  /**
    * Fold a freshly loaded batch into what's already shown. See {@link mergeLoad};
    * the injectable method just delegates so the viewer can go through the loader
    * seam, while the pure decision stays unit-testable.

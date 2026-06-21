@@ -1,4 +1,12 @@
-import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  inject,
+  input,
+  output,
+  signal,
+} from '@angular/core';
 import type { StudyRecord } from '../../../dicom/catalog';
 import type { Series } from '../../../dicom/series';
 import { PatientCatalog } from '../../patient-catalog';
@@ -21,10 +29,12 @@ import { SeriesChip } from './series-chip';
  * The collapsed flag, the chosen view and the last-opened study all persist via
  * {@link PreferencesStore} so the panel restores across sessions.
  *
- * Read-only: it reflects the {@link PatientCatalog} and highlights the chip of
- * the {@link loadedSeriesUid currently-loaded series}. Loading and drag-to-load
- * is #173. The single patient root is shaped so multi-patient catalogs are a
- * natural extension. Hidden entirely when the catalog holds no studies.
+ * It reflects the {@link PatientCatalog} and highlights the chip of every
+ * {@link loadedSeriesUids currently-loaded series} (base + any fusion overlays).
+ * Clicking or dragging a chip to the viewport asks to load that series, surfaced
+ * via {@link loadSeries} for the viewer to build the volume and route through the
+ * load path (#173). The single patient root is shaped so multi-patient catalogs
+ * are a natural extension. Hidden entirely when the catalog holds no studies.
  */
 @Component({
   selector: 'app-history-panel',
@@ -44,8 +54,15 @@ export class HistoryPanel {
   /** Per-series preview cache; deduped by UID, so stable across imports. */
   private readonly thumbnails = new SeriesThumbnailCache();
 
-  /** UID of the series currently displayed in the viewport, to highlight its chip. */
-  readonly loadedSeriesUid = input<string>('');
+  /**
+   * UIDs of the series currently composited in the viewport (the base and any
+   * fusion overlays), to highlight their chips. A set rather than one UID so a
+   * fused load lights up every series it shows, not just the base.
+   */
+  readonly loadedSeriesUids = input<readonly string[]>([]);
+
+  /** Asks the viewer to load the given series (chip click / key / drop). */
+  readonly loadSeries = output<Series>();
 
   /** The focused patient's studies along the timeline (ascending); empty when none. */
   protected readonly studies = computed<readonly StudyRecord[]>(
@@ -54,6 +71,19 @@ export class HistoryPanel {
 
   /** Whether there's anything to show; the panel hides entirely otherwise. */
   protected readonly hasCatalog = computed(() => this.studies().length > 0);
+
+  /** Loaded-series UIDs as a set, for the per-chip highlight membership test. */
+  private readonly loadedSet = computed(() => new Set(this.loadedSeriesUids()));
+
+  /** Whether a series is one of those currently composited (drives its highlight). */
+  protected isLoaded(series: Series): boolean {
+    return this.loadedSet().has(series.uid);
+  }
+
+  /** A chip asked to be loaded: forward it to the viewer's load path. */
+  protected onLoadSeries(series: Series): void {
+    this.loadSeries.emit(series);
+  }
 
   /** A short label for the focused patient (name, else id), shown in the header. */
   protected readonly patientLabel = computed(() => {

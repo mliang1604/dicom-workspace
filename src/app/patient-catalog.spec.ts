@@ -93,6 +93,16 @@ describe('PatientCatalog', () => {
     expect(catalog.currentPatientId()).toBe('p1');
   });
 
+  it('finds a retained series by UID across patients (for a chip drop)', () => {
+    const catalog = new PatientCatalog();
+    catalog.add([series('a', { patientId: 'p1' })]);
+    catalog.add([series('b', { patientId: 'p2' })]);
+
+    expect(catalog.seriesByUid('a')?.uid).toBe('a');
+    expect(catalog.seriesByUid('b')?.uid).toBe('b');
+    expect(catalog.seriesByUid('missing')).toBeUndefined();
+  });
+
   it('clear() empties the catalog and current selection', () => {
     const catalog = new PatientCatalog();
     catalog.add([series('a')]);

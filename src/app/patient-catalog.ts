@@ -1,5 +1,10 @@
 import { Injectable, computed, signal } from '@angular/core';
-import { addSeriesToCatalog, type PatientCatalogMap, type PatientRecord } from '../dicom/catalog';
+import {
+  addSeriesToCatalog,
+  catalogSeries,
+  type PatientCatalogMap,
+  type PatientRecord,
+} from '../dicom/catalog';
 import type { Series } from '../dicom/series';
 
 /**
@@ -49,6 +54,15 @@ export class PatientCatalog {
     if (series.length === 0) return;
     this.catalog.set(addSeriesToCatalog(this.catalog(), series));
     this.current.set(series[0].patientId ?? '');
+  }
+
+  /**
+   * Find a retained series by SeriesInstanceUID across every catalogued patient,
+   * or undefined when absent. Lets a viewport drop resolve a dragged chip's UID
+   * back to the series whose slices it loads (#173).
+   */
+  seriesByUid(uid: string): Series | undefined {
+    return catalogSeries(this.catalog()).find((s) => s.uid === uid);
   }
 
   /** Empty the catalog and clear the current selection — the one-at-a-time reset. */
