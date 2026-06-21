@@ -47,6 +47,7 @@ describe('packSliceParams', () => {
     slicePos: 0.5,
     flipX: true,
     invert: false,
+    colormapBase: false,
     overlay: null,
   };
 
@@ -118,6 +119,14 @@ describe('packSliceParams', () => {
     const uints = new Uint32Array(buffer);
     expect(uints[47]).toBe(0); // colormap
     expect(uints[25]).toBe(0); // checkerboard
+  });
+
+  it('sets the colormap-the-base flag (float 27) for a standalone colormapped layer', () => {
+    expect(new Uint32Array(packSliceParams(base))[27]).toBe(0); // off by default
+    const buffer = packSliceParams({ ...base, colormapBase: true });
+    expect(new Uint32Array(buffer)[27]).toBe(1);
+    // It rides in the pre-overlay pad without disturbing the base window.
+    expect(new Float32Array(buffer)[20]).toBe(40); // windowCenter
   });
 });
 

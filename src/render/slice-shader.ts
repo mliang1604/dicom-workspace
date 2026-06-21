@@ -24,7 +24,8 @@ struct Params {
   // Filling the mat4x4-alignment padding before overlayToTex (floats 25..27):
   overlayCheckerboard : u32, // non-zero: alternate base/overlay per checker cell
   checkerSize : f32,         // checker cell size in framebuffer pixels
-  _pad0 : f32,
+  colormapBase : u32,        // non-zero: map the windowed BASE value through overlayLut
+                             // (the standalone Compare overlay column; no compositing)
   // Fusion overlay: a second volume sharing the patient frame but its own grid.
   // overlayToTex maps the SAME pane (u, v, slicePos) into the overlay's texture
   // coords; the overlay is windowed and composited over the base by overlayOpacity
@@ -89,6 +90,14 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let g = clamp((raw - lo) / max(P.windowWidth - 1.0, 1.0), 0.0, 1.0);
   let shade = select(g, 1.0 - g, P.invert != 0u);
   var rgb = vec3<f32>(shade, shade, shade);
+
+  // Standalone colormapped layer (the Compare overlay column): map the windowed
+  // value through overlayLut so a dose draws in its colormap (jet / hot) instead
+  // of grayscale. There's nothing composited behind it, so the LUT's per-value
+  // alpha is ignored and its colour shown directly.
+  if (P.colormapBase != 0u) {
+    rgb = textureSampleLevel(overlayLut, volSamp, shade, 0.0).rgb;
+  }
 
   // Fusion overlay: sample the second volume at the same pane point via its own
   // affine, window it, and blend over the base. A colormap overlay (e.g. a dose

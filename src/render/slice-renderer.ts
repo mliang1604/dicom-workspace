@@ -254,10 +254,10 @@ export interface MipPaneView {
 export type PaneView = MprPaneView | MipPaneView;
 
 // bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
-// slicePos,flipX (32) + invert + 12 bytes pad (16) = 112; then the fusion-overlay
-// block at byte 112 (16-aligned for its mat4x4): overlayToTex mat4x4 (64) +
-// overlayWindowCenter,overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80.
-// Total 192.
+// slicePos,flipX (32) + invert + 12 bytes pad — overlayCheckerboard, checkerSize,
+// colormapBase (16) = 112; then the fusion-overlay block at byte 112 (16-aligned
+// for its mat4x4): overlayToTex mat4x4 (64) + overlayWindowCenter,
+// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80. Total 192.
 const PARAMS_SIZE = 192;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
@@ -713,9 +713,12 @@ export class SliceRenderer {
       const paneVolume = useOverlay ? this.overlayVolume! : volume;
       const matrices = useOverlay ? this.overlayOwnMatrices! : this.matrices;
       const composite = pane.composite ?? true;
+      // The standalone overlay column draws through the overlay's colormap (when
+      // it has one), so a dose shows in jet/hot instead of grayscale.
+      const colormapBase = useOverlay && this.overlayColormap;
       const bindGroup = useOverlay ? this.overlayAsBaseBindGroup(slot) : slot.bindGroup;
       if (!bindGroup) continue;
-      this.writeParams(slot.buffer, pane, rect, paneVolume, matrices, composite);
+      this.writeParams(slot.buffer, pane, rect, paneVolume, matrices, composite, colormapBase);
       draws.push({ rect, bindGroup, pipeline: this.pipeline });
     }
 
@@ -890,6 +893,7 @@ export class SliceRenderer {
     volume: Volume,
     matrices: readonly Float32Array[],
     composite: boolean,
+    colormapBase: boolean,
   ): void {
     const count = sliceCountFor(volume, view.orientation);
     // Sample the centre of the voxel so the first/last slices aren't clamped away.
@@ -935,6 +939,7 @@ export class SliceRenderer {
       slicePos,
       flipX: !!view.flipX,
       invert: !!view.invert,
+      colormapBase,
       overlay,
     });
     this.device.queue.writeBuffer(buffer, 0, params);
@@ -952,6 +957,13 @@ export interface SliceParams {
   readonly slicePos: number;
   readonly flipX: boolean;
   readonly invert: boolean;
+  /**
+   * Map the windowed BASE value through the overlay colormap LUT (binding 4)
+   * instead of drawing it grayscale — the standalone Compare overlay column,
+   * where the overlay layer is bound as the base and shown in its colormap.
+   * Independent of {@link overlay} (which composites a second layer).
+   */
+  readonly colormapBase: boolean;
   /** The fusion overlay block, or null when no overlay is composited. */
   readonly overlay: {
     readonly matrix: Float32Array | readonly number[];
@@ -972,7 +984,8 @@ export interface SliceParams {
  * expects (see slice-shader.ts): the base reslice matrix + screen fit + window
  * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
  * matrix (28..43), overlay window centre/width and opacity (44..46), and the
- * colormap flag (47, u32). With no overlay the opacity stays 0, so the shader
+ * colormap flag (47, u32). The colormap-the-base flag (27, u32) sits in the
+ * pre-overlay pad. With no overlay the opacity stays 0, so the shader
  * leaves the base untouched. Pure and exported so the layout can be unit-tested
  * without a GPU — the shader and this packing must stay in lockstep.
  */
@@ -990,6 +1003,9 @@ export function packSliceParams(p: SliceParams): ArrayBuffer {
   floats[MATRIX_FLOATS + 6] = p.slicePos;
   uints[MATRIX_FLOATS + 7] = p.flipX ? 1 : 0;
   uints[MATRIX_FLOATS + 8] = p.invert ? 1 : 0;
+  // Colormap-the-base flag (float 27): the standalone Compare overlay column.
+  // Set independently of the overlay block, which the compare column leaves null.
+  uints[MATRIX_FLOATS + 11] = p.colormapBase ? 1 : 0;
   if (p.overlay) {
     // Checkerboard flag + cell size fill the mat4-alignment pad (floats 25, 26).
     uints[MATRIX_FLOATS + 9] = p.overlay.checkerboard ? 1 : 0; // float 25 (u32)
