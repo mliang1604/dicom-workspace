@@ -75,19 +75,40 @@ describe('packSliceParams', () => {
 
   it('packs the overlay block at byte 112 (float 28) without disturbing the base', () => {
     const overlayMatrix = Array.from({ length: 16 }, (_, i) => 100 + i);
-    const floats = new Float32Array(
-      packSliceParams({
-        ...base,
-        overlay: { matrix: overlayMatrix, windowCenter: 1.5, windowWidth: 3, opacity: 0.4 },
-      }),
-    );
+    const buffer = packSliceParams({
+      ...base,
+      overlay: {
+        matrix: overlayMatrix,
+        windowCenter: 1.5,
+        windowWidth: 3,
+        opacity: 0.4,
+        colormap: true,
+      },
+    });
+    const floats = new Float32Array(buffer);
+    const uints = new Uint32Array(buffer);
 
     expect(Array.from(floats.slice(28, 44))).toEqual(overlayMatrix); // overlayToTex
     expect(floats[44]).toBeCloseTo(1.5); // overlayWindowCenter
     expect(floats[45]).toBe(3); // overlayWindowWidth
     expect(floats[46]).toBeCloseTo(0.4); // overlayOpacity
+    expect(uints[47]).toBe(1); // overlayColormap flag (u32)
     // Base fields are untouched by the overlay block.
     expect(floats[20]).toBe(40);
+  });
+
+  it('leaves the colormap flag 0 for a grayscale overlay', () => {
+    const buffer = packSliceParams({
+      ...base,
+      overlay: {
+        matrix: base.matrix,
+        windowCenter: 0,
+        windowWidth: 1,
+        opacity: 0.5,
+        colormap: false,
+      },
+    });
+    expect(new Uint32Array(buffer)[47]).toBe(0);
   });
 });
 

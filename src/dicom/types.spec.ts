@@ -89,6 +89,11 @@ describe('overlayImageLayer', () => {
       visible: true,
     });
   });
+
+  it('defaults a dose overlay to a colormap wash', () => {
+    const layer = overlayImageLayer('dose', fakeVolume('RTDOSE'));
+    expect(layer.display).toEqual({ kind: 'colormap', name: 'jet' });
+  });
 });
 
 describe('baseLayer', () => {

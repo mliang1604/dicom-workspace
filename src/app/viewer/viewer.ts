@@ -1721,7 +1721,8 @@ export class Viewer {
     effect(() => {
       const renderer = this.renderer();
       const overlay = this.selectedOverlay();
-      if (renderer) renderer.setOverlay(overlay?.volume ?? null, overlay?.opacity ?? 0);
+      if (renderer)
+        renderer.setOverlay(overlay?.volume ?? null, overlay?.opacity ?? 0, overlay?.display);
       this.scheduleFrame();
     });
 
