@@ -50,11 +50,9 @@ import {
 } from '../../render/transfer-function';
 import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
 import {
-  clipLineToUnitSquare,
   linkedSliceIndex,
   NO_OBLIQUE,
   planeExtentMm,
-  referenceLine,
   sliceCountFor,
   slicePlaneCorners,
   volumeBounds,
@@ -91,12 +89,19 @@ import {
 } from '../../render/window-level';
 import {
   cameraBasis,
+  clipPlaneGizmoGeometry,
   projectToPane,
   rezoomCameraPan,
   viewBasis,
+  type ClipPlaneGizmoGeometry,
   type OrbitCamera,
 } from '../../render/camera';
-import { axisMarkers } from '../../render/axis-indicator';
+import { axisIndicatorGeometry, type AxisIndicatorOverlay } from '../../render/axis-indicator';
+import {
+  referenceLineGeometry,
+  type ReferenceLineGeometry,
+  type ReferenceLinePane,
+} from '../../render/reference-lines';
 import { pickProjection } from '../../render/pick';
 import { probeVoxel, sampleVolumeAtPatient, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
@@ -124,7 +129,7 @@ import {
 } from '../../dicom/types';
 import { COLORMAPS } from '../../render/colormap';
 import { clamp, clamp01 } from '../../dicom/math';
-import { add, cross, length, normalize, scale } from '../../dicom/vec3';
+import { add, length, scale } from '../../dicom/vec3';
 import {
   flattenSurfaceMeshes,
   loftRoiMesh,
@@ -170,30 +175,6 @@ type PanePlacement =
     }
   | { readonly kind: 'mip'; readonly rect: PaneRect };
 
-/** One projected patient axis, placed in the indicator widget's local pixels. */
-interface AxisOverlayMarker {
-  /** R, L, A, P, S, or I. */
-  readonly label: string;
-  /** Label centre in widget-local CSS pixels (origin at the widget's top-left). */
-  readonly x: number;
-  readonly y: number;
-  /** 0–1 opacity: axes pointing toward the viewer are bright, those behind fade. */
-  readonly opacity: number;
-}
-
-/** The orientation indicator overlaid in a corner of the 3D pane. */
-interface AxisOverlay {
-  /** Widget top-left in CSS pixels relative to the canvas. */
-  readonly left: number;
-  readonly top: number;
-  /** Square widget size in CSS pixels. */
-  readonly size: number;
-  /** Widget-local centre (the axis hub) in CSS pixels. */
-  readonly center: number;
-  /** The six axes, sorted far-to-near so near labels render on top. */
-  readonly markers: readonly AxisOverlayMarker[];
-}
-
 /** One MPR cut-plane outline projected into the 3D pane. */
 interface SlicePlaneOverlay {
   readonly orientation: Orientation;
@@ -208,25 +189,6 @@ interface SlicePlanesOverlay {
   /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
   readonly rect: PaneRect;
   readonly planes: readonly SlicePlaneOverlay[];
-}
-
-/**
- * The interactive cut-plane gizmo drawn in the 3D pane: the plane as a quad
- * outline, a draggable handle at its centre, and a stub along the kept-side
- * normal, all projected through the orbit camera into pane-local CSS pixels.
- */
-interface ClipPlaneGizmo {
-  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
-  readonly rect: PaneRect;
-  /** SVG polygon `points` of the plane square, in pane-local CSS pixels. */
-  readonly outline: string;
-  /** Drag handle centre (the plane centre) in pane-local CSS pixels. */
-  readonly handle: { readonly x: number; readonly y: number };
-  /** Polyline `points` of the kept-side normal stub, in pane-local CSS pixels. */
-  readonly normalLine: string;
-  /** CSS pixels the handle moves per mm of offset along the normal: the drag axis. */
-  readonly axisX: number;
-  readonly axisY: number;
 }
 
 /** One ROI contour shape projected into a pane, in pane-local pixels. */
@@ -442,21 +404,6 @@ interface GroupNav {
   readonly pans: PerOrientationPan;
 }
 
-/** A reference line drawn over an MPR pane where another plane crosses it. */
-interface ReferenceLineOverlay {
-  /** Key of the `into` pane it's drawn on (see {@link Viewer.paneKey}). */
-  readonly key: string;
-  /** The pane's rectangle in CSS pixels; the overlay is clipped to it. */
-  readonly rect: PaneRect;
-  /** Endpoints of the line in CSS pixels relative to the canvas. */
-  readonly x1: number;
-  readonly y1: number;
-  readonly x2: number;
-  readonly y2: number;
-  /** Colour of the crossing plane, matching its 3D cut-plane outline. */
-  readonly color: string;
-}
-
 /** The oblique rotation gizmo drawn over one MPR pane: a ring and a draggable knob. */
 interface ObliqueGizmo {
   /** Key of the pane it controls (see {@link Viewer.paneKey}). */
@@ -592,13 +539,6 @@ const GAP_WARNING_RATIO = 2;
  * Orientation value — distinct hues so the three planes read apart at a glance.
  */
 const SLICE_PLANE_COLORS: readonly [string, string, string] = ['#ff6b6b', '#5ee08a', '#6bb6ff'];
-
-/** Square size (CSS px) of the 3D pane's orientation indicator widget. */
-const AXIS_INDICATOR_SIZE = 72;
-/** Length (CSS px) of each axis spoke from the indicator's hub to its label. */
-const AXIS_INDICATOR_RADIUS = 24;
-/** Inset (CSS px) of the indicator from the 3D pane's top-right corner. */
-const AXIS_INDICATOR_MARGIN = 12;
 
 /** Longest an MPR pane's scale bar may grow: a fraction of the pane width… */
 const SCALE_BAR_MAX_FRACTION = 0.3;
@@ -1086,79 +1026,28 @@ export class Viewer {
   });
 
   /**
-   * Cross-pane reference lines: for each MPR pane, where every *other* MPR pane's
-   * (possibly oblique) plane crosses it, via {@link referenceLine} →
-   * {@link clipLineToUnitSquare} → {@link planePointToPane}. The lines tilt live
-   * as a plane is made oblique, so they show the oblique angle on the panes that
-   * stay orthogonal. Shares the {@link crosshairsEnabled} toggle with the linked
-   * crosshairs and is coloured to match each plane's 3D cut-plane outline.
+   * Cross-pane reference lines: for each MPR pane, where every *other* in-group
+   * pane's (possibly oblique) plane crosses it ({@link referenceLineGeometry}).
+   * The lines tilt live as a plane is made oblique, so they show the oblique angle
+   * on the panes that stay orthogonal. Shares the {@link crosshairsEnabled} toggle
+   * with the linked crosshairs and is coloured to match each plane's 3D cut-plane.
    */
-  protected readonly referenceLines = computed<ReferenceLineOverlay[]>(() => {
+  protected readonly referenceLines = computed<ReferenceLineGeometry[]>(() => {
     const volume = this.volume();
     if (!this.crosshairsEnabled() || !volume) return [];
-
-    const indices = this.sliceIndices();
-    const obliques = this.obliques();
-    const zooms = this.zooms();
-    const pans = this.pans();
-    const flipped = this.sagittalFlipped();
-    const mprPanes = this.panes().filter((pane) => pane.kind === 'mpr');
-    const result: ReferenceLineOverlay[] = [];
-    for (const into of mprPanes) {
-      if (into.kind !== 'mpr') continue;
-      const intoFlip = into.orientation === Orientation.Sagittal && flipped;
-      for (const other of mprPanes) {
-        // Only pair planes within the same compare group; cross-column reference
-        // lines (between two different layers) aren't meaningful.
-        if (other.kind !== 'mpr' || other.orientation === into.orientation) continue;
-        if (other.group !== into.group) continue;
-        const line = referenceLine(
-          volume,
-          {
-            orientation: into.orientation,
-            sliceIndex: indices[into.orientation],
-            rotation: obliques[into.orientation],
-          },
-          {
-            orientation: other.orientation,
-            sliceIndex: indices[other.orientation],
-            rotation: obliques[other.orientation],
-          },
-        );
-        if (!line) continue;
-        const ends = clipLineToUnitSquare(line);
-        if (!ends) continue;
-        const a = planePointToPane(
-          volume,
-          into.orientation,
-          ends[0],
-          zooms[into.orientation],
-          into.rect,
-          intoFlip,
-          pans[into.orientation],
-        );
-        const b = planePointToPane(
-          volume,
-          into.orientation,
-          ends[1],
-          zooms[into.orientation],
-          into.rect,
-          intoFlip,
-          pans[into.orientation],
-        );
-        if (!a || !b) continue;
-        result.push({
-          key: `${into.group}-${into.orientation}-${other.orientation}`,
-          rect: into.rect,
-          x1: a.x,
-          y1: a.y,
-          x2: b.x,
-          y2: b.y,
-          color: SLICE_PLANE_COLORS[other.orientation],
-        });
-      }
-    }
-    return result;
+    const mprPanes: ReferenceLinePane[] = this.panes().filter(
+      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> => pane.kind === 'mpr',
+    );
+    return referenceLineGeometry(
+      volume,
+      mprPanes,
+      this.sliceIndices(),
+      this.obliques(),
+      this.zooms(),
+      this.pans(),
+      this.sagittalFlipped(),
+      SLICE_PLANE_COLORS,
+    );
   });
 
   /**
@@ -1257,84 +1146,38 @@ export class Viewer {
    * The interactive cut-plane gizmo for the 3D pane: the arbitrary clip plane
    * (centre + normal in patient space) projected through the orbit camera into
    * pane-local pixels — a square outline, a draggable handle at its centre, and a
-   * stub along the kept-side normal. The handle drag maps a pointer move onto the
-   * plane's offset via {@link ClipPlaneGizmo.axisX}/`axisY`, the screen projection
-   * of a 1 mm step along the normal. Null unless the handle is enabled.
+   * stub along the kept-side normal ({@link clipPlaneGizmoGeometry}). The handle
+   * drag maps a pointer move onto the plane's offset via `axisX`/`axisY`, the
+   * screen projection of a 1 mm step along the normal. Null unless the handle is
+   * enabled.
    */
-  protected readonly clipPlaneGizmo = computed<ClipPlaneGizmo | null>(() => {
+  protected readonly clipPlaneGizmo = computed<ClipPlaneGizmoGeometry | null>(() => {
     const volume = this.volume();
     if (!this.clipPlaneEnabled() || !this.isReady() || !volume) return null;
     const mip = this.panes().find((pane) => pane.kind === 'mip');
     if (!mip) return null;
-
-    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
-    const { center, radius } = volumeBounds(volume);
-    const normal = this.clipPlaneNormal();
-    const point = add(center, scale(normal, this.clipPlaneOffsetMm()));
-
-    // Two in-plane axes spanning the plane square; pick a reference not parallel
-    // to the normal so the cross products stay well-conditioned.
-    const ref: Vec3 = Math.abs(normal[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
-    const tangent = normalize(cross(normal, ref));
-    const bitangent = normalize(cross(normal, tangent));
-    const toPx = (p: Vec3): { x: number; y: number } => {
-      const { u, v } = projectToPane(basis, p);
-      return { x: u * mip.rect.width, y: v * mip.rect.height };
-    };
-    const corner = (su: number, sv: number): { x: number; y: number } =>
-      toPx(add(point, add(scale(tangent, su * radius), scale(bitangent, sv * radius))));
-    const outline = [corner(1, 1), corner(-1, 1), corner(-1, -1), corner(1, -1)]
-      .map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`)
-      .join(' ');
-
-    const handle = toPx(point);
-    const tip = toPx(add(point, scale(normal, radius * 0.3)));
-    const normalLine = `${handle.x.toFixed(1)},${handle.y.toFixed(1)} ${tip.x.toFixed(1)},${tip.y.toFixed(1)}`;
-
-    // Screen displacement per mm of offset: where a 1 mm step along the normal
-    // lands (orthographic, so this is linear and constant across the pane).
-    const step = toPx(add(point, normal));
-    return {
-      rect: mip.rect,
-      outline,
-      handle,
-      normalLine,
-      axisX: step.x - handle.x,
-      axisY: step.y - handle.y,
-    };
+    return clipPlaneGizmoGeometry(
+      volume,
+      this.camera3d(),
+      this.clipPlaneNormal(),
+      this.clipPlaneOffsetMm(),
+      mip.rect,
+    );
   });
 
   /**
    * Anatomical orientation indicator for the 3D pane: the six patient axes
-   * projected through the orbit camera ({@link axisMarkers}) and placed in a
-   * small widget in the pane's top-right corner, so it rotates live with the
+   * projected through the orbit camera and placed in a small widget in the pane's
+   * top-right corner ({@link axisIndicatorGeometry}), so it rotates live with the
    * orbit. It's a pure-CSS/SVG overlay — no extra GPU pass — keyed only off the
    * camera angles, so panning or scrolling the MPR panes never touches it.
    */
-  protected readonly axisIndicator = computed<AxisOverlay | null>(() => {
+  protected readonly axisIndicator = computed<AxisIndicatorOverlay | null>(() => {
     if (!this.isReady()) return null;
     const mip = this.panes().find((pane) => pane.kind === 'mip');
     if (!mip) return null;
-
-    const size = AXIS_INDICATOR_SIZE;
-    const center = size / 2;
-    const left = mip.rect.x + mip.rect.width - AXIS_INDICATOR_MARGIN - size;
-    const top = mip.rect.y + AXIS_INDICATOR_MARGIN;
-
     const camera = this.camera3d();
-    const markers = axisMarkers(camera.azimuth, camera.elevation)
-      .map((axis) => ({
-        label: axis.label,
-        // Widget-local pixels: +x is screen-right, +y (up) flips to CSS down.
-        x: center + axis.x * AXIS_INDICATOR_RADIUS,
-        y: center - axis.y * AXIS_INDICATOR_RADIUS,
-        depth: axis.depth,
-        // Fade the away-facing axes; keep the near ones fully opaque.
-        opacity: 0.35 + 0.65 * ((axis.depth + 1) / 2),
-      }))
-      // Paint far axes first so the near labels (drawn last) sit on top.
-      .sort((a, b) => a.depth - b.depth);
-    return { left, top, size, center, markers };
+    return axisIndicatorGeometry(mip.rect, camera.azimuth, camera.elevation);
   });
 
   /**

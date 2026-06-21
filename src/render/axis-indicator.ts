@@ -1,6 +1,7 @@
 import type { Vec3 } from '../dicom/types';
 import { dot } from '../dicom/vec3';
 import { viewBasis } from './camera';
+import type { PaneRect } from './layout';
 
 /**
  * Pure maths for the 3D pane's anatomical orientation indicator.
@@ -57,6 +58,70 @@ export function axisMarkers(azimuth: number, elevation: number): AxisMarker[] {
     // forward points into the screen, so negate to make +depth toward the viewer.
     depth: -dot(dir, forward),
   }));
+}
+
+/** Square size (CSS px) of the 3D pane's orientation indicator widget. */
+const AXIS_INDICATOR_SIZE = 72;
+/** Length (CSS px) of each axis spoke from the indicator's hub to its label. */
+const AXIS_INDICATOR_RADIUS = 24;
+/** Inset (CSS px) of the indicator from the 3D pane's top-right corner. */
+const AXIS_INDICATOR_MARGIN = 12;
+
+/** One projected patient axis, placed in the indicator widget's local pixels. */
+export interface AxisIndicatorMarker {
+  /** R, L, A, P, S, or I. */
+  readonly label: string;
+  /** Label centre in widget-local CSS pixels (origin at the widget's top-left). */
+  readonly x: number;
+  readonly y: number;
+  /** 0–1 opacity: axes pointing toward the viewer are bright, those behind fade. */
+  readonly opacity: number;
+}
+
+/** The orientation indicator overlaid in a corner of the 3D pane. */
+export interface AxisIndicatorOverlay {
+  /** Widget top-left in CSS pixels relative to the canvas. */
+  readonly left: number;
+  readonly top: number;
+  /** Square widget size in CSS pixels. */
+  readonly size: number;
+  /** Widget-local centre (the axis hub) in CSS pixels. */
+  readonly center: number;
+  /** The six axes, sorted far-to-near so near labels render on top. */
+  readonly markers: readonly AxisIndicatorMarker[];
+}
+
+/**
+ * Lay out the anatomical orientation indicator in the top-right corner of the 3D
+ * pane `rect`: project the six patient axes ({@link axisMarkers}) onto the orbit
+ * camera's screen plane, place each on a spoke of {@link AXIS_INDICATOR_RADIUS}
+ * (widget-local pixels, +y up flipped to CSS down), fade the away-facing axes,
+ * and sort far-to-near so near labels draw on top. Pure presentation geometry —
+ * keyed only off the camera angles and the pane rectangle — so the viewer can
+ * render it as a CSS/SVG overlay without a GPU pass.
+ */
+export function axisIndicatorGeometry(
+  rect: PaneRect,
+  azimuth: number,
+  elevation: number,
+): AxisIndicatorOverlay {
+  const size = AXIS_INDICATOR_SIZE;
+  const center = size / 2;
+  const left = rect.x + rect.width - AXIS_INDICATOR_MARGIN - size;
+  const top = rect.y + AXIS_INDICATOR_MARGIN;
+
+  const markers = axisMarkers(azimuth, elevation)
+    // Paint far axes first so the near labels (drawn last) sit on top.
+    .sort((a, b) => a.depth - b.depth)
+    .map((axis) => ({
+      label: axis.label,
+      // Widget-local pixels: +x is screen-right, +y (up) flips to CSS down.
+      x: center + axis.x * AXIS_INDICATOR_RADIUS,
+      y: center - axis.y * AXIS_INDICATOR_RADIUS,
+      // Fade the away-facing axes; keep the near ones fully opaque.
+      opacity: 0.35 + 0.65 * ((axis.depth + 1) / 2),
+    }));
+  return { left, top, size, center, markers };
 }
 
 /**
