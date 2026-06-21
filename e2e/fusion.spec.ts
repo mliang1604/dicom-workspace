@@ -72,6 +72,10 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   const cell = page.locator('input.checker-size');
   await expect(cell).toBeVisible();
   await expect(cell).toHaveAttribute('data-checker-size', '24');
+  // The slider fills its rail row (it used to be a 64px stub floating mid-row, so
+  // the thumb couldn't reach the right). It now spans well past that width.
+  const cellBox = await cell.boundingBox();
+  expect(cellBox!.width).toBeGreaterThan(140);
   await cell.evaluate((el) => {
     (el as HTMLInputElement).value = '48';
     el.dispatchEvent(new Event('input', { bubbles: true }));
