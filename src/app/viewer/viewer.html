@@ -212,6 +212,24 @@
       </details>
     }
 
+    @if (isCompare()) {
+      <details class="tool-group" open>
+        <summary class="tool-group-label">Compare</summary>
+        <div class="tool-group-body">
+          <button
+            type="button"
+            (click)="toggleCompareLinked()"
+            [class.active]="compareLinked()"
+            [attr.aria-pressed]="compareLinked()"
+            [attr.data-linked]="compareLinked()"
+            title="Link navigation across compare groups: scroll, pan, and zoom move every group to the same patient level. Unlink to navigate each column on its own."
+          >
+            {{ compareLinked() ? 'Linked 🔗' : 'Unlinked 🔓' }}
+          </button>
+        </div>
+      </details>
+    }
+
     <details
       class="tool-group"
       role="group"

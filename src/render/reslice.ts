@@ -275,6 +275,39 @@ export function referenceLine(
 }
 
 /**
+ * Re-express a slice index from one volume's grid onto another's at the SAME
+ * patient level: the physical plane `fromVolume`'s slice `sliceIndex` sits on,
+ * projected onto `toVolume`'s through-plane axis and rounded to its nearest slice.
+ * Both volumes must share the patient frame of reference (validated at load);
+ * differing grids, spacing, origin, and extent are handled, as is a shared oblique
+ * `rotation`. Keeps linked compare groups on the same anatomy despite different
+ * grids — e.g. a coarse dose grid beside a fine CT.
+ *
+ * Returns 0 for a single-slice or degenerate target. For `fromVolume === toVolume`
+ * it round-trips to `sliceIndex` (clamped), so linking a layer to itself is a no-op.
+ */
+export function linkedSliceIndex(
+  fromVolume: Volume,
+  toVolume: Volume,
+  orientation: Orientation,
+  sliceIndex: number,
+  rotation?: ObliqueRotation,
+): number {
+  const from = planeFrame(fromVolume, { orientation, sliceIndex, rotation });
+  const geom = resolveGeometry(toVolume);
+  const basis = obliqueBasis(planeBasis(orientation, patientBounds(geom, toVolume.dims)), rotation);
+  const count = sliceCountFor(toVolume, orientation);
+  const denom = dot(basis.axisS, basis.axisS);
+  if (count <= 1 || denom === 0) return 0;
+  // Project the source plane's point onto the target's through-plane axis. The
+  // target's in-plane axes are orthogonal to axisS, so any point on the source
+  // plane (here its u=v=0 corner) gives the same through-plane position.
+  const slicePos = dot(sub(from.base, basis.origin), basis.axisS) / denom;
+  const index = Math.round(slicePos * count - 0.5);
+  return Math.min(count - 1, Math.max(0, index));
+}
+
+/**
  * The two endpoints where a {@link PlaneLine} crosses the unit square [0,1]², in
  * pane (u, v) coordinates, or `null` when the line misses the square. Used to
  * draw a reference line as a segment spanning the pane.

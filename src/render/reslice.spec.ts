@@ -5,6 +5,7 @@ import {
   clipPlaneTex,
   clipTRange,
   isOblique,
+  linkedSliceIndex,
   NO_OBLIQUE,
   orientTowardRay,
   overlayPlaneToTexMatrix,
@@ -481,5 +482,55 @@ describe('viewClipHalfSpaces', () => {
     expect(planes).toHaveLength(3);
     // Every kept-side normal points downstream of the ray (kept half is large t).
     for (const plane of planes) expect(dot(plane.normal, rd)).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('linkedSliceIndex', () => {
+  // A fine grid (1 mm voxels) and a coarse one (4 mm slices, 2 mm in-plane) over
+  // the SAME patient frame — the CT-vs-dose case. Both axis-aligned to LPS.
+  // Fine: axial slice i sits at patient z = i. Coarse: axial slice i at z = 4·i.
+  const fine = makeVolume([4, 4, 20], {
+    iStep: [1, 0, 0],
+    jStep: [0, 1, 0],
+    kStep: [0, 0, 1],
+    origin: [0, 0, 0],
+  });
+  const coarse = makeVolume([2, 2, 5], {
+    iStep: [2, 0, 0],
+    jStep: [0, 2, 0],
+    kStep: [0, 0, 4],
+    origin: [0, 0, 0],
+  });
+
+  it('maps a fine slice onto the coarse grid at the same patient level', () => {
+    // z = 0, 4, 8, 16 land exactly on coarse slices 0, 1, 2, 4.
+    expect(linkedSliceIndex(fine, coarse, Orientation.Axial, 0)).toBe(0);
+    expect(linkedSliceIndex(fine, coarse, Orientation.Axial, 4)).toBe(1);
+    expect(linkedSliceIndex(fine, coarse, Orientation.Axial, 8)).toBe(2);
+    expect(linkedSliceIndex(fine, coarse, Orientation.Axial, 16)).toBe(4);
+  });
+
+  it('maps a coarse slice back onto the fine grid at the same patient level', () => {
+    expect(linkedSliceIndex(coarse, fine, Orientation.Axial, 0)).toBe(0);
+    expect(linkedSliceIndex(coarse, fine, Orientation.Axial, 1)).toBe(4);
+    expect(linkedSliceIndex(coarse, fine, Orientation.Axial, 4)).toBe(16);
+  });
+
+  it('clamps to the target slice range', () => {
+    // Fine z = 19 is past the coarse volume's last centre (z = 16); clamp to 4.
+    expect(linkedSliceIndex(fine, coarse, Orientation.Axial, 19)).toBe(4);
+  });
+
+  it('round-trips a volume against itself (linking a layer to itself is a no-op)', () => {
+    // An index in range for each axis: axial has 20 slices, coronal/sagittal 4.
+    expect(linkedSliceIndex(fine, fine, Orientation.Axial, 7)).toBe(7);
+    expect(linkedSliceIndex(fine, fine, Orientation.Coronal, 2)).toBe(2);
+    expect(linkedSliceIndex(fine, fine, Orientation.Sagittal, 3)).toBe(3);
+  });
+
+  it('links across the coronal axis too (per-orientation through-plane axis)', () => {
+    // Coronal walks +y: fine slice i at y = i, coarse slice i at y = 2·i.
+    expect(linkedSliceIndex(fine, coarse, Orientation.Coronal, 2)).toBe(1);
+    expect(linkedSliceIndex(coarse, fine, Orientation.Coronal, 1)).toBe(2);
   });
 });

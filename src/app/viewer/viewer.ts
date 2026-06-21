@@ -47,9 +47,11 @@ import {
 import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
 import {
   clipLineToUnitSquare,
+  linkedSliceIndex,
   NO_OBLIQUE,
   planeExtentMm,
   referenceLine,
+  sliceCountFor,
   slicePlaneCorners,
   volumeBounds,
   type ObliqueRotation,
@@ -400,6 +402,18 @@ type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
 /** An oblique tilt per orientation, indexed by the orientation's numeric value. */
 type PerOrientationOblique = readonly [ObliqueRotation, ObliqueRotation, ObliqueRotation];
 
+/**
+ * Independent navigation state for one Compare group, used only when the groups
+ * are unlinked. Each group then scrolls, pans, and zooms on its own; while linked
+ * (the default) groups follow the shared master signals and this is ignored. Group
+ * 0 always reads the master signals, so its entry here is unused.
+ */
+interface GroupNav {
+  readonly sliceIndices: PerOrientation;
+  readonly zooms: PerOrientation;
+  readonly pans: PerOrientationPan;
+}
+
 /** A reference line drawn over an MPR pane where another plane crosses it. */
 interface ReferenceLineOverlay {
   /** Key of the `into` pane it's drawn on (see {@link Viewer.paneKey}). */
@@ -444,6 +458,8 @@ type Drag =
   | {
       readonly kind: 'pan';
       readonly orientation: Orientation;
+      /** Compare-group the panned pane belongs to (0 outside Compare). */
+      readonly group: number;
       readonly lastX: number;
       readonly lastY: number;
     }
@@ -600,6 +616,20 @@ export class Viewer {
   private readonly zooms = signal<PerOrientation>([1, 1, 1]);
   /** Per-orientation pan offset in screen-uv units; drives shader + probe. */
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
+  /**
+   * Whether the Compare layout's side-by-side groups navigate together (the
+   * default). Linked, scroll/pan/zoom in any group resolve to the same patient
+   * plane in every group (despite different grids); unlinked, each group keeps its
+   * own {@link groupNav}. Only meaningful in {@link LayoutMode.Compare}.
+   */
+  protected readonly compareLinked = signal(true);
+  /**
+   * Per-group independent navigation, indexed by compare group, used only while
+   * {@link compareLinked} is false. Seeded from the current (linked) view when the
+   * groups are unlinked so the panes don't jump; group 0 always reads the master
+   * signals, so its slot is unused.
+   */
+  private readonly groupNav = signal<readonly GroupNav[]>(defaultGroupNav());
   /**
    * Per-orientation oblique tilt; {@link NO_OBLIQUE} (the default) reslices the
    * orthogonal anatomical plane, a non-zero tilt an arbitrary oblique plane. Set
@@ -1603,6 +1633,85 @@ export class Viewer {
   protected readonly isCompare = computed(() => this.layoutMode() === LayoutMode.Compare);
 
   /**
+   * The volume a Compare group draws: the base layer for group 0, the active
+   * overlay for the others (falling back to the base when no overlay is loaded, so
+   * both columns then show the same series). Drives the per-group slice resolution.
+   */
+  private groupVolume(group: number): Volume | null {
+    if (group === 0) return this.volume();
+    return this.selectedOverlay()?.volume ?? this.volume();
+  }
+
+  /** Whether a Compare group navigates on its own (unlinked, and not the base group). */
+  private groupIsIndependent(group: number): boolean {
+    return this.isCompare() && !this.compareLinked() && group > 0;
+  }
+
+  /**
+   * The slice index a pane shows, resolving linked/unlinked Compare navigation: the
+   * master index outside Compare and for group 0; while linked, the same patient
+   * plane mapped onto the group's own grid (so a coarse dose lines up with a fine
+   * CT); while unlinked, the group's independent index.
+   */
+  private paneSliceIndex(group: number, orientation: Orientation): number {
+    const master = this.sliceIndices()[orientation];
+    if (!this.isCompare() || group === 0) return master;
+    if (!this.compareLinked()) return this.groupNav()[group]?.sliceIndices[orientation] ?? master;
+    const base = this.volume();
+    const target = this.groupVolume(group);
+    if (!base || !target) return master;
+    return linkedSliceIndex(base, target, orientation, master, this.obliques()[orientation]);
+  }
+
+  /** The zoom a pane uses: shared while linked, the group's own when unlinked. */
+  private paneZoom(group: number, orientation: Orientation): number {
+    if (!this.groupIsIndependent(group)) return this.zooms()[orientation];
+    return this.groupNav()[group]?.zooms[orientation] ?? this.zooms()[orientation];
+  }
+
+  /** The pan a pane uses: shared while linked, the group's own when unlinked. */
+  private panePan(group: number, orientation: Orientation): Vec2 {
+    if (!this.groupIsIndependent(group)) return this.pans()[orientation];
+    return this.groupNav()[group]?.pans[orientation] ?? this.pans()[orientation];
+  }
+
+  /**
+   * Link or unlink the Compare groups. Unlinking snapshots each group's current
+   * (linked) slice/zoom/pan into {@link groupNav} so the panes hold still; relinking
+   * drops back to the shared master signals.
+   */
+  protected toggleCompareLinked(): void {
+    if (this.compareLinked()) {
+      this.groupNav.set(this.snapshotGroupNav());
+      this.compareLinked.set(false);
+    } else {
+      this.compareLinked.set(true);
+    }
+  }
+
+  /** Snapshot the current per-group view (while still linked) for unlinked editing. */
+  private snapshotGroupNav(): GroupNav[] {
+    const zooms = this.zooms();
+    const pans = this.pans();
+    return Array.from({ length: COMPARE_GROUPS }, (_, group) => ({
+      sliceIndices: [
+        this.paneSliceIndex(group, Orientation.Axial),
+        this.paneSliceIndex(group, Orientation.Coronal),
+        this.paneSliceIndex(group, Orientation.Sagittal),
+      ] as PerOrientation,
+      zooms,
+      pans,
+    }));
+  }
+
+  /** Replace one field of one group's independent nav (used by the unlinked handlers). */
+  private updateGroupNav(group: number, patch: Partial<GroupNav>): void {
+    this.groupNav.update((navs) =>
+      navs.map((nav, i) => (i === group ? { ...nav, ...patch } : nav)),
+    );
+  }
+
+  /**
    * Whether the fusion controls (blend bar, checkerboard) apply: an overlay is
    * active AND we're compositing (not the side-by-side Compare layout).
    */
@@ -1981,8 +2090,6 @@ export class Viewer {
     const panes = this.panes();
     const { dpr } = this.viewport();
     const indices = this.sliceIndices();
-    const zooms = this.zooms();
-    const pans = this.pans();
     const obliques = this.obliques();
     const camera = this.camera3d();
     const projectionMode = this.projectionMode();
@@ -2029,11 +2136,13 @@ export class Viewer {
             return {
               kind: 'mpr',
               orientation: pane.orientation,
-              sliceIndex: indices[pane.orientation],
+              // Resolve the group's slice/zoom/pan: shared (linked) or independent
+              // (unlinked), and patient-plane-matched for non-base Compare groups.
+              sliceIndex: this.paneSliceIndex(pane.group, pane.orientation),
               windowCenter: showOverlay ? overlay!.volume.windowCenter : windowCenter,
               windowWidth: showOverlay ? overlay!.volume.windowWidth : windowWidth,
-              zoom: zooms[pane.orientation],
-              pan: pans[pane.orientation],
+              zoom: this.paneZoom(pane.group, pane.orientation),
+              pan: this.panePan(pane.group, pane.orientation),
               rotation: obliques[pane.orientation],
               flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
               invert,
@@ -2198,6 +2307,12 @@ export class Viewer {
   protected fitView(): void {
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
+    // Fit unlinked groups too, keeping each group's own slice level.
+    if (this.isCompare() && !this.compareLinked()) {
+      this.groupNav.update((navs) =>
+        navs.map((nav) => ({ ...nav, zooms: [1, 1, 1], pans: NO_PANS })),
+      );
+    }
   }
 
   /**
@@ -2216,13 +2331,27 @@ export class Viewer {
       if (pane.kind !== 'mpr') continue;
       const rect = scaleRect(pane.rect, dpr);
       if (rect.width < 1 || rect.height < 1) continue;
+      const independent = this.groupIsIndependent(pane.group);
+      // 1:1 against the grid each pane actually draws (an unlinked overlay group
+      // sizes to its own voxels), keeping that group's slice level.
+      const paneVolume = independent ? this.groupVolume(pane.group) : volume;
+      if (!paneVolume) continue;
       const zoom = clamp(
-        oneToOneZoom(volume, pane.orientation, rect.width, rect.height),
+        oneToOneZoom(paneVolume, pane.orientation, rect.width, rect.height),
         MIN_ZOOM,
         MAX_ZOOM,
       );
-      zooms = withValue(zooms, pane.orientation, zoom);
-      pans = withValue(pans, pane.orientation, NO_PAN);
+      if (independent) {
+        const nav = this.groupNav()[pane.group];
+        if (!nav) continue;
+        this.updateGroupNav(pane.group, {
+          zooms: withValue(nav.zooms, pane.orientation, zoom),
+          pans: withValue(nav.pans, pane.orientation, NO_PAN),
+        });
+      } else {
+        zooms = withValue(zooms, pane.orientation, zoom);
+        pans = withValue(pans, pane.orientation, NO_PAN);
+      }
     }
     this.zooms.set(zooms);
     this.pans.set(pans);
@@ -2940,6 +3069,7 @@ export class Viewer {
           : {
               kind: 'pan',
               orientation: placement.orientation,
+              group: placement.group,
               lastX: event.clientX,
               lastY: event.clientY,
             },
@@ -2976,6 +3106,7 @@ export class Viewer {
         : {
             kind: 'pan',
             orientation: placement.orientation,
+            group: placement.group,
             lastX: event.clientX,
             lastY: event.clientY,
           },
@@ -3060,30 +3191,30 @@ export class Viewer {
   private dragPan(event: PointerEvent, drag: Extract<Drag, { kind: 'pan' }>): void {
     this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
 
+    const { group, orientation } = drag;
     const placement = this.panes().find(
-      (pane) => pane.kind === 'mpr' && pane.orientation === drag.orientation,
+      (pane) => pane.kind === 'mpr' && pane.group === group && pane.orientation === orientation,
     );
-    const volume = this.volume();
+    const independent = this.groupIsIndependent(group);
+    const volume = independent ? this.groupVolume(group) : this.volume();
     if (!placement || !volume || placement.rect.width < 1 || placement.rect.height < 1) return;
 
     const dx = (event.clientX - drag.lastX) / placement.rect.width;
     const dy = (event.clientY - drag.lastY) / placement.rect.height;
-    const zoom = this.zooms()[drag.orientation];
-    this.pans.update((pans) => {
-      const current = pans[drag.orientation];
-      const moved = clampPan(
-        volume,
-        drag.orientation,
-        placement.rect.width,
-        placement.rect.height,
-        zoom,
-        {
-          x: current.x + dx,
-          y: current.y + dy,
-        },
-      );
-      return withValue(pans, drag.orientation, moved);
+    const zoom = this.paneZoom(group, orientation);
+    const current = this.panePan(group, orientation);
+    const moved = clampPan(volume, orientation, placement.rect.width, placement.rect.height, zoom, {
+      x: current.x + dx,
+      y: current.y + dy,
     });
+
+    if (independent) {
+      const nav = this.groupNav()[group];
+      if (!nav) return;
+      this.updateGroupNav(group, { pans: withValue(nav.pans, orientation, moved) });
+    } else {
+      this.pans.update((pans) => withValue(pans, orientation, moved));
+    }
   }
 
   /**
@@ -3123,12 +3254,12 @@ export class Viewer {
       });
     } else if (event.ctrlKey) {
       const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-      this.zoomPane(placement.orientation, event.deltaY, {
+      this.zoomPane(placement, event.deltaY, {
         x: event.clientX - bounds.left,
         y: event.clientY - bounds.top,
       });
     } else {
-      this.scrollSlice(placement.orientation, event.deltaY);
+      this.scrollSlice(placement, event.deltaY);
     }
   }
 
@@ -3155,12 +3286,30 @@ export class Viewer {
     this.markMipSettling();
   }
 
-  private scrollSlice(orientation: Orientation, deltaY: number): void {
+  private scrollSlice(placement: Extract<PanePlacement, { kind: 'mpr' }>, deltaY: number): void {
     const renderer = this.renderer();
     const step = Math.sign(deltaY);
     if (!renderer || step === 0) return;
     this.stopCine(); // a manual scroll takes over from cine playback
 
+    const { group, orientation } = placement;
+    // Unlinked non-base group: step its own index against its own grid.
+    if (this.groupIsIndependent(group)) {
+      const volume = this.groupVolume(group);
+      const nav = this.groupNav()[group];
+      if (!volume || !nav) return;
+      const max = sliceCountFor(volume, orientation) - 1;
+      const next = clamp(nav.sliceIndices[orientation] + step, 0, max);
+      if (next !== nav.sliceIndices[orientation]) {
+        this.updateGroupNav(group, {
+          sliceIndices: withValue(nav.sliceIndices, orientation, next),
+        });
+      }
+      return;
+    }
+
+    // Linked (or group 0): step the master index; linked groups re-derive their
+    // own slice from the shared patient plane, so they follow to the same level.
     const max = renderer.sliceCount(orientation) - 1;
     this.sliceIndices.update((indices) => {
       const next = clamp(indices[orientation] + step, 0, max);
@@ -3168,19 +3317,21 @@ export class Viewer {
     });
   }
 
-  private zoomPane(orientation: Orientation, deltaY: number, cursor: Vec2): void {
+  private zoomPane(
+    placement: Extract<PanePlacement, { kind: 'mpr' }>,
+    deltaY: number,
+    cursor: Vec2,
+  ): void {
     if (deltaY === 0) return;
+    const { group, orientation } = placement;
     const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    const from = this.zooms()[orientation];
+    const from = this.paneZoom(group, orientation);
     const to = clamp(from * factor, MIN_ZOOM, MAX_ZOOM);
     if (to === from) return;
-    this.zooms.update((zooms) => withValue(zooms, orientation, to));
 
-    const placement = this.panes().find(
-      (pane) => pane.kind === 'mpr' && pane.orientation === orientation,
-    );
-    const volume = this.volume();
-    if (!placement || !volume) return;
+    const independent = this.groupIsIndependent(group);
+    const volume = independent ? this.groupVolume(group) : this.volume();
+    if (!volume || placement.rect.width < 1 || placement.rect.height < 1) return;
     // Pivot the zoom on the cursor, not the image centre: holding the plane point
     // under the cursor fixed keeps the spot being inspected in place. The anchor
     // is the cursor in screen-uv (pane-fraction) units. Then re-clamp, since the
@@ -3189,18 +3340,27 @@ export class Viewer {
       x: (cursor.x - placement.rect.x) / placement.rect.width,
       y: (cursor.y - placement.rect.y) / placement.rect.height,
     };
-    this.pans.update((pans) => {
-      const anchored = rezoomPan(pans[orientation], from, to, anchor);
-      const clamped = clampPan(
-        volume,
-        orientation,
-        placement.rect.width,
-        placement.rect.height,
-        to,
-        anchored,
-      );
-      return withValue(pans, orientation, clamped);
-    });
+    const anchored = rezoomPan(this.panePan(group, orientation), from, to, anchor);
+    const pan = clampPan(
+      volume,
+      orientation,
+      placement.rect.width,
+      placement.rect.height,
+      to,
+      anchored,
+    );
+
+    if (independent) {
+      const nav = this.groupNav()[group];
+      if (!nav) return;
+      this.updateGroupNav(group, {
+        zooms: withValue(nav.zooms, orientation, to),
+        pans: withValue(nav.pans, orientation, pan),
+      });
+    } else {
+      this.zooms.update((zooms) => withValue(zooms, orientation, to));
+      this.pans.update((pans) => withValue(pans, orientation, pan));
+    }
   }
 
   protected onWindowCenterInput(event: Event): void {
@@ -3543,6 +3703,9 @@ export class Viewer {
     this.invert.set(false);
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
+    // A fresh base load starts with the Compare groups linked and no per-group nav.
+    this.compareLinked.set(true);
+    this.groupNav.set(defaultGroupNav());
     this.obliques.set(NO_OBLIQUES);
     this.camera3d.set(DEFAULT_CAMERA);
     this.transferFunction.set(transferFunction(TransferFunctionPreset.CtBone));
@@ -3650,6 +3813,15 @@ function placePanes(
 
 /** Number of side-by-side groups in the Compare layout (base + one overlay). */
 const COMPARE_GROUPS = 2;
+
+/** Fresh per-group nav (one slot per Compare group) at the view defaults. */
+function defaultGroupNav(): GroupNav[] {
+  return Array.from({ length: COMPARE_GROUPS }, () => ({
+    sliceIndices: [0, 0, 0],
+    zooms: [1, 1, 1],
+    pans: NO_PANS,
+  }));
+}
 
 /** The pane containing CSS-pixel point (x, y), or null. */
 function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {
