@@ -7,10 +7,17 @@ import { ProjectionMode } from '../render/slice-renderer';
  * changes shape so stale data from an older layout is discarded (not coerced)
  * and the user falls back to defaults instead of a half-read state.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** localStorage key (versioned) under which the view preferences are persisted. */
 const STORAGE_KEY = 'dicom-workspace.preferences';
+
+/**
+ * Layout of the longitudinal history panel: the default date-ordered `timeline`
+ * of study tiles, or a denser collapsible `tree` (Patient ▸ Study ▸ Series) for
+ * patients with many studies/series. Both reuse the same series chip.
+ */
+export type HistoryView = 'timeline' | 'tree';
 
 /**
  * The curated set of *view* preferences remembered across sessions, so reopening
@@ -37,6 +44,8 @@ export interface ViewPreferences {
   readonly slabThicknessMm: number | null;
   /** Whether the longitudinal history panel is collapsed to its header bar. */
   readonly historyCollapsed: boolean;
+  /** Layout of the history panel: date timeline or Patient ▸ Study ▸ Series tree. */
+  readonly historyView: HistoryView;
   /**
    * StudyInstanceUID of the last-opened history study (the single-open accordion),
    * or null when every study is collapsed. Restores the timeline's open tile.
@@ -53,6 +62,7 @@ export const DEFAULT_PREFERENCES: ViewPreferences = {
   windowWidth: null,
   slabThicknessMm: null,
   historyCollapsed: false,
+  historyView: 'timeline',
   lastOpenedStudyUid: null,
 };
 
@@ -118,6 +128,9 @@ export function parsePreferences(raw: string | null): ViewPreferences {
       typeof obj['historyCollapsed'] === 'boolean'
         ? obj['historyCollapsed']
         : DEFAULT_PREFERENCES.historyCollapsed,
+    historyView: isHistoryView(obj['historyView'])
+      ? obj['historyView']
+      : DEFAULT_PREFERENCES.historyView,
     lastOpenedStudyUid:
       typeof obj['lastOpenedStudyUid'] === 'string'
         ? obj['lastOpenedStudyUid']
@@ -135,6 +148,7 @@ function samePreferences(a: ViewPreferences, b: ViewPreferences): boolean {
     a.windowWidth === b.windowWidth &&
     a.slabThicknessMm === b.slabThicknessMm &&
     a.historyCollapsed === b.historyCollapsed &&
+    a.historyView === b.historyView &&
     a.lastOpenedStudyUid === b.lastOpenedStudyUid
   );
 }
@@ -157,6 +171,11 @@ function isProjectionMode(value: unknown): value is ProjectionMode {
     value === ProjectionMode.Mean ||
     value === ProjectionMode.Dvr
   );
+}
+
+/** Type-guard a parsed value as a valid {@link HistoryView}. */
+function isHistoryView(value: unknown): value is HistoryView {
+  return value === 'timeline' || value === 'tree';
 }
 
 /** Coerce a finite number, else null (a stored centre may legitimately be 0). */
