@@ -83,11 +83,16 @@ describe('packSliceParams', () => {
         windowWidth: 3,
         opacity: 0.4,
         colormap: true,
+        checkerboard: true,
+        checkerSize: 24,
       },
     });
     const floats = new Float32Array(buffer);
     const uints = new Uint32Array(buffer);
 
+    // Checkerboard flag + size sit in the alignment pad before the overlay block.
+    expect(uints[25]).toBe(1); // overlayCheckerboard (u32)
+    expect(floats[26]).toBe(24); // checkerSize
     expect(Array.from(floats.slice(28, 44))).toEqual(overlayMatrix); // overlayToTex
     expect(floats[44]).toBeCloseTo(1.5); // overlayWindowCenter
     expect(floats[45]).toBe(3); // overlayWindowWidth
@@ -97,7 +102,7 @@ describe('packSliceParams', () => {
     expect(floats[20]).toBe(40);
   });
 
-  it('leaves the colormap flag 0 for a grayscale overlay', () => {
+  it('leaves the colormap and checkerboard flags 0 for a plain blended overlay', () => {
     const buffer = packSliceParams({
       ...base,
       overlay: {
@@ -106,9 +111,13 @@ describe('packSliceParams', () => {
         windowWidth: 1,
         opacity: 0.5,
         colormap: false,
+        checkerboard: false,
+        checkerSize: 24,
       },
     });
-    expect(new Uint32Array(buffer)[47]).toBe(0);
+    const uints = new Uint32Array(buffer);
+    expect(uints[47]).toBe(0); // colormap
+    expect(uints[25]).toBe(0); // checkerboard
   });
 });
 
