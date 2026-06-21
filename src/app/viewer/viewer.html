@@ -233,15 +233,20 @@
                 <span class="layer-name" [title]="layer.label">{{ layer.label }}</span>
                 <span class="layer-role">{{ layer.roleBadge }}</span>
                 @if (!layer.isBase) {
+                  <!-- Drive the selection from each option's [selected] (evaluated as
+                       the options render) rather than the select's [value], which is
+                       applied before the @for options exist and falls back to the
+                       first option (grayscale). -->
                   <select
                     class="layer-display"
-                    [value]="layer.displayValue"
                     (change)="onLayerDisplay(layer.id, $event)"
                     [attr.aria-label]="layer.label + ' display'"
                     title="Overlay colour map"
                   >
                     @for (opt of displayOptions; track opt) {
-                      <option [value]="opt">{{ opt }}</option>
+                      <option [value]="opt" [selected]="opt === layer.displayValue">
+                        {{ opt }}
+                      </option>
                     }
                   </select>
                   <input

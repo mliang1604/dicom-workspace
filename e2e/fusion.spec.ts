@@ -49,8 +49,14 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await expect(layerPanel).toBeVisible();
   await expect(layerPanel.locator('.layer-item')).toHaveCount(2);
 
+  // The display selector reflects the dose's actual colormap (jet), not the first
+  // option — it must match what's rendered, not default to grayscale.
+  const display = layerPanel.locator('select.layer-display');
+  await expect(display).toHaveValue('jet');
+
   // Change the overlay colormap (jet → hot); recomposites without error.
-  await layerPanel.locator('select.layer-display').selectOption('hot');
+  await display.selectOption('hot');
+  await expect(display).toHaveValue('hot');
 
   // Hiding the overlay drops it from compositing (blend bar goes away); re-show it.
   const overlayRow = layerPanel.locator('.layer-item[data-layer]').last();
