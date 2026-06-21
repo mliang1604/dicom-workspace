@@ -1,5 +1,6 @@
 import type { Vec3, Volume } from '../dicom/types';
 import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
+import type { PaneRect } from './layout';
 import { volumeBounds } from './reslice';
 
 /**
@@ -189,6 +190,78 @@ export function projectPolyline(
     const { u, v } = projectToPane(basis, point);
     return { x: u * width, y: v * height };
   });
+}
+
+/**
+ * The interactive cut-plane gizmo drawn in the 3D pane: the plane as a quad
+ * outline, a draggable handle at its centre, and a stub along the kept-side
+ * normal, all projected through the orbit camera into pane-local CSS pixels.
+ */
+export interface ClipPlaneGizmoGeometry {
+  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
+  readonly rect: PaneRect;
+  /** SVG polygon `points` of the plane square, in pane-local CSS pixels. */
+  readonly outline: string;
+  /** Drag handle centre (the plane centre) in pane-local CSS pixels. */
+  readonly handle: { readonly x: number; readonly y: number };
+  /** Polyline `points` of the kept-side normal stub, in pane-local CSS pixels. */
+  readonly normalLine: string;
+  /** CSS pixels the handle moves per mm of offset along the normal: the drag axis. */
+  readonly axisX: number;
+  readonly axisY: number;
+}
+
+/**
+ * Project the arbitrary clip plane (centre `volumeCentre + normal·offsetMm`,
+ * `normal` in patient space) through the orbit camera into pane-local pixels for
+ * the 3D pane `rect`: a square outline spanning two in-plane axes, a draggable
+ * handle at the plane centre, a stub along the kept-side normal, and the screen
+ * displacement per mm of offset (`axisX`/`axisY`) the handle drag maps onto. The
+ * forward map is {@link projectToPane}, so the gizmo tracks the slice planes and
+ * rotates live with the orbit; the square is sized to the volume's bounding
+ * radius. Pure geometry — no GPU pass — twinned with the per-fragment raycast.
+ */
+export function clipPlaneGizmoGeometry(
+  volume: Volume,
+  camera: OrbitCamera,
+  normal: Vec3,
+  offsetMm: number,
+  rect: PaneRect,
+): ClipPlaneGizmoGeometry {
+  const basis = cameraBasis(volume, camera, rect.width, rect.height);
+  const { center, radius } = volumeBounds(volume);
+  const point = add(center, scale(normal, offsetMm));
+
+  // Two in-plane axes spanning the plane square; pick a reference not parallel
+  // to the normal so the cross products stay well-conditioned.
+  const ref: Vec3 = Math.abs(normal[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const tangent = normalize(cross(normal, ref));
+  const bitangent = normalize(cross(normal, tangent));
+  const toPx = (p: Vec3): { x: number; y: number } => {
+    const { u, v } = projectToPane(basis, p);
+    return { x: u * rect.width, y: v * rect.height };
+  };
+  const corner = (su: number, sv: number): { x: number; y: number } =>
+    toPx(add(point, add(scale(tangent, su * radius), scale(bitangent, sv * radius))));
+  const outline = [corner(1, 1), corner(-1, 1), corner(-1, -1), corner(1, -1)]
+    .map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+    .join(' ');
+
+  const handle = toPx(point);
+  const tip = toPx(add(point, scale(normal, radius * 0.3)));
+  const normalLine = `${handle.x.toFixed(1)},${handle.y.toFixed(1)} ${tip.x.toFixed(1)},${tip.y.toFixed(1)}`;
+
+  // Screen displacement per mm of offset: where a 1 mm step along the normal
+  // lands (orthographic, so this is linear and constant across the pane).
+  const step = toPx(add(point, normal));
+  return {
+    rect,
+    outline,
+    handle,
+    normalLine,
+    axisX: step.x - handle.x,
+    axisY: step.y - handle.y,
+  };
 }
 
 /** Entry/exit parameters of a ray against the unit box; `hit` is false if it misses. */

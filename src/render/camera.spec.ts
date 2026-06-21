@@ -1,6 +1,7 @@
 import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
 import {
   cameraBasis,
+  clipPlaneGizmoGeometry,
   eyeDirection,
   intersectUnitBox,
   projectPolyline,
@@ -273,5 +274,74 @@ describe('patientToTexMatrix', () => {
     expectVec(applyPatientToTex(m, [0, 0, 0]), [0.5 / 4, 0.5 / 4, 0.5 / 4]);
     // Stepping +1 patient-left (+x = k axis) advances the third texcoord by 1/4.
     expectVec(applyPatientToTex(m, [1, 0, 0]), [0.5 / 4, 0.5 / 4, 1.5 / 4]);
+  });
+});
+
+describe('clipPlaneGizmoGeometry', () => {
+  const RECT = { x: 0, y: 0, width: 100, height: 100 };
+  // Per-mm screen step at zoom 1: width / (2·radius) for a [4,4,4] box.
+  const perMm = 100 / Math.hypot(4, 4, 4);
+
+  /** Parse an SVG `points` string into pixel pairs. */
+  function points(s: string): { x: number; y: number }[] {
+    return s
+      .trim()
+      .split(' ')
+      .map((p) => {
+        const [x, y] = p.split(',').map(Number);
+        return { x, y };
+      });
+  }
+
+  it('centres the handle on the pane and echoes the rect at zero offset', () => {
+    const volume = makeVolume([4, 4, 4]); // centre projects to the pane centre
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [1, 0, 0], 0, RECT);
+    expect(g.rect).toBe(RECT);
+    expect(g.handle.x).toBeCloseTo(50, 6);
+    expect(g.handle.y).toBeCloseTo(50, 6);
+  });
+
+  it('draws a square outline of four corners centred on the handle', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [0, 1, 0], 0, RECT);
+    const corners = points(g.outline);
+    expect(corners).toHaveLength(4);
+    const cx = corners.reduce((s, c) => s + c.x, 0) / 4;
+    const cy = corners.reduce((s, c) => s + c.y, 0) / 4;
+    expect(cx).toBeCloseTo(g.handle.x, 6);
+    expect(cy).toBeCloseTo(g.handle.y, 6);
+  });
+
+  it('maps a 1 mm normal step to a screen-right drag axis for an x normal', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [1, 0, 0], 0, RECT);
+    // Patient +x is screen-right at the default view; no vertical component.
+    expect(g.axisX).toBeCloseTo(perMm, 6);
+    expect(g.axisY).toBeCloseTo(0, 6);
+  });
+
+  it('maps a superior normal to an upward (negative-y) drag axis', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [0, 0, 1], 0, RECT);
+    // +z superior is screen-up, which is a smaller CSS y.
+    expect(g.axisX).toBeCloseTo(0, 6);
+    expect(g.axisY).toBeCloseTo(-perMm, 6);
+  });
+
+  it('has no on-screen drag axis when the normal points along the view', () => {
+    const volume = makeVolume([4, 4, 4]);
+    // [0,1,0] is the view forward at the default angles: a step along it only
+    // changes depth, so the handle stays put on screen.
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [0, 1, 0], 0, RECT);
+    expect(g.axisX).toBeCloseTo(0, 6);
+    expect(g.axisY).toBeCloseTo(0, 6);
+  });
+
+  it('slides the handle along the drag axis as the offset grows', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const g = clipPlaneGizmoGeometry(volume, LEVEL, [1, 0, 0], 1, RECT);
+    // One mm of offset moves the centre one drag-axis step from the pane centre.
+    expect(g.handle.x).toBeCloseTo(50 + perMm, 6);
+    expect(g.handle.y).toBeCloseTo(50, 6);
   });
 });

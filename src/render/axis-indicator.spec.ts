@@ -1,4 +1,10 @@
-import { axisMarkers, type AxisMarker } from './axis-indicator';
+import {
+  axisIndicatorGeometry,
+  axisMarkers,
+  type AxisIndicatorMarker,
+  type AxisMarker,
+} from './axis-indicator';
+import type { PaneRect } from './layout';
 
 /** Look up a marker by its anatomical label. */
 function marker(markers: readonly AxisMarker[], label: string): AxisMarker {
@@ -84,5 +90,57 @@ describe('axisMarkers', () => {
       expect(m.y).toBeCloseTo(-n.y, 6);
       expect(m.depth).toBeCloseTo(-n.depth, 6);
     }
+  });
+});
+
+/** Look up an overlay marker by its anatomical label. */
+function widget(markers: readonly AxisIndicatorMarker[], label: string): AxisIndicatorMarker {
+  const found = markers.find((m) => m.label === label);
+  if (!found) throw new Error(`no marker labelled ${label}`);
+  return found;
+}
+
+const RECT: PaneRect = { x: 200, y: 100, width: 300, height: 240 };
+
+describe('axisIndicatorGeometry', () => {
+  it('insets a fixed-size widget into the pane top-right corner', () => {
+    const o = axisIndicatorGeometry(RECT, 0, 0);
+    expect(o.size).toBe(72);
+    expect(o.center).toBe(36);
+    // Margin 12 from the pane's top-right corner.
+    expect(o.left).toBe(RECT.x + RECT.width - 12 - 72);
+    expect(o.top).toBe(RECT.y + 12);
+  });
+
+  it('places all six axes on spokes from the widget hub, +y flipped to CSS down', () => {
+    const { markers, center } = axisIndicatorGeometry(RECT, 0, 0);
+    expect(markers.map((m) => m.label).sort()).toEqual(['A', 'I', 'L', 'P', 'R', 'S']);
+    const radius = 24;
+    // Default view: patient-left to the screen right, superior up (smaller CSS y).
+    expect(widget(markers, 'L').x).toBeCloseTo(center + radius, 6);
+    expect(widget(markers, 'L').y).toBeCloseTo(center, 6);
+    expect(widget(markers, 'R').x).toBeCloseTo(center - radius, 6);
+    expect(widget(markers, 'S').y).toBeCloseTo(center - radius, 6); // up = toward the top
+    expect(widget(markers, 'I').y).toBeCloseTo(center + radius, 6);
+  });
+
+  it('fades away-facing axes and keeps near ones bright', () => {
+    const { markers } = axisIndicatorGeometry(RECT, 0, 0);
+    // Anterior points out of the screen (depth +1) → full opacity; posterior away.
+    expect(widget(markers, 'A').opacity).toBeCloseTo(1, 6);
+    expect(widget(markers, 'P').opacity).toBeCloseTo(0.35, 6);
+    // In-plane axes sit at the mid fade.
+    expect(widget(markers, 'L').opacity).toBeCloseTo(0.675, 6);
+    for (const m of markers) expect(m.opacity).toBeGreaterThanOrEqual(0.35);
+  });
+
+  it('sorts markers far-to-near so the nearest label renders last', () => {
+    const { markers } = axisIndicatorGeometry(RECT, 0, 0);
+    // Opacity rises monotonically with depth, so a far→near sort is non-decreasing.
+    for (let i = 1; i < markers.length; i++) {
+      expect(markers[i].opacity).toBeGreaterThanOrEqual(markers[i - 1].opacity);
+    }
+    expect(markers[0].label).toBe('P'); // farthest
+    expect(markers[markers.length - 1].label).toBe('A'); // nearest
   });
 });
