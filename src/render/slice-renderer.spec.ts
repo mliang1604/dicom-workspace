@@ -7,10 +7,12 @@ import {
   isDvr,
   mipStepScale,
   oneToOneZoom,
+  packSliceParams,
   ProjectionMode,
   projectionModeCode,
   projectionWindow,
   rezoomPan,
+  type SliceParams,
 } from './slice-renderer';
 
 /** A minimal volume; only dims/spacing matter to the pan geometry. */
@@ -32,6 +34,62 @@ function makeVolume(
     modality: 'CT',
   };
 }
+
+describe('packSliceParams', () => {
+  const baseMatrix = Array.from({ length: 16 }, (_, i) => i + 1);
+  const base: SliceParams = {
+    matrix: baseMatrix,
+    scaleX: 1.5,
+    scaleY: 2.5,
+    pan: { x: 0.1, y: 0.2 },
+    windowCenter: 40,
+    windowWidth: 400,
+    slicePos: 0.5,
+    flipX: true,
+    invert: false,
+    overlay: null,
+  };
+
+  it('packs the base block at the layout the WGSL Params struct expects', () => {
+    const floats = new Float32Array(packSliceParams(base));
+    const uints = new Uint32Array(packSliceParams(base));
+
+    expect(Array.from(floats.slice(0, 16))).toEqual(baseMatrix); // planeToTex
+    expect(floats[16]).toBeCloseTo(1.5); // scaleX
+    expect(floats[17]).toBeCloseTo(2.5); // scaleY
+    expect(floats[18]).toBeCloseTo(0.1); // pan.x
+    expect(floats[19]).toBeCloseTo(0.2); // pan.y
+    expect(floats[20]).toBe(40); // windowCenter
+    expect(floats[21]).toBe(400); // windowWidth
+    expect(floats[22]).toBe(0.5); // slicePos
+    expect(uints[23]).toBe(1); // flipX
+    expect(uints[24]).toBe(0); // invert
+  });
+
+  it('is 192 bytes and leaves overlay opacity 0 when there is no overlay', () => {
+    const buffer = packSliceParams(base);
+    expect(buffer.byteLength).toBe(192);
+    // Overlay opacity lives at float 46; zero means the shader skips the overlay.
+    expect(new Float32Array(buffer)[46]).toBe(0);
+  });
+
+  it('packs the overlay block at byte 112 (float 28) without disturbing the base', () => {
+    const overlayMatrix = Array.from({ length: 16 }, (_, i) => 100 + i);
+    const floats = new Float32Array(
+      packSliceParams({
+        ...base,
+        overlay: { matrix: overlayMatrix, windowCenter: 1.5, windowWidth: 3, opacity: 0.4 },
+      }),
+    );
+
+    expect(Array.from(floats.slice(28, 44))).toEqual(overlayMatrix); // overlayToTex
+    expect(floats[44]).toBeCloseTo(1.5); // overlayWindowCenter
+    expect(floats[45]).toBe(3); // overlayWindowWidth
+    expect(floats[46]).toBeCloseTo(0.4); // overlayOpacity
+    // Base fields are untouched by the overlay block.
+    expect(floats[20]).toBe(40);
+  });
+});
 
 describe('clampPan', () => {
   it('leaves a pan within bounds untouched', () => {

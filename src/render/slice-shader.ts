@@ -21,11 +21,21 @@ struct Params {
   slicePos : f32,           // normalized position along the slicing axis, 0..1
   flipX : u32,              // non-zero mirrors the in-plane horizontal axis
   invert : u32,             // non-zero inverts the windowed gray (display inversion)
+  // Fusion overlay: a second volume sharing the patient frame but its own grid.
+  // overlayToTex maps the SAME pane (u, v, slicePos) into the overlay's texture
+  // coords; the overlay is windowed and composited over the base by overlayOpacity
+  // (0 = no overlay). mat4x4 alignment lands this block at byte 112.
+  overlayToTex : mat4x4<f32>,
+  overlayWindowCenter : f32,
+  overlayWindowWidth : f32,
+  overlayOpacity : f32,
+  _pad : f32,
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
 @group(0) @binding(1) var volSamp : sampler;
 @group(0) @binding(2) var<uniform> P : Params;
+@group(0) @binding(3) var overlayTex : texture_3d<f32>;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -72,7 +82,20 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // DICOM windowing (PS3.3 C.11.2.1.2 linear form).
   let lo = P.windowCenter - 0.5 - (P.windowWidth - 1.0) * 0.5;
   let g = clamp((raw - lo) / max(P.windowWidth - 1.0, 1.0), 0.0, 1.0);
-  let shade = select(g, 1.0 - g, P.invert != 0u);
+  var shade = select(g, 1.0 - g, P.invert != 0u);
+
+  // Fusion overlay: sample the second volume at the same pane point via its own
+  // affine, window it to gray, and blend over the base. Outside the overlay's
+  // grid (or with no overlay, opacity 0) the base shows through unchanged.
+  if (P.overlayOpacity > 0.0) {
+    let ocoord = (P.overlayToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+    if (all(ocoord >= vec3<f32>(0.0)) && all(ocoord <= vec3<f32>(1.0))) {
+      let oraw = textureSampleLevel(overlayTex, volSamp, ocoord, 0.0).r;
+      let olo = P.overlayWindowCenter - 0.5 - (P.overlayWindowWidth - 1.0) * 0.5;
+      let og = clamp((oraw - olo) / max(P.overlayWindowWidth - 1.0, 1.0), 0.0, 1.0);
+      shade = mix(shade, og, P.overlayOpacity);
+    }
+  }
   return vec4<f32>(shade, shade, shade, 1.0);
 }
 `;
