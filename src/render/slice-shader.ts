@@ -102,12 +102,17 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
       let olo = P.overlayWindowCenter - 0.5 - (P.overlayWindowWidth - 1.0) * 0.5;
       let og = clamp((oraw - olo) / max(P.overlayWindowWidth - 1.0, 1.0), 0.0, 1.0);
       var orgb = vec3<f32>(og, og, og);
+      // Grayscale overlay contributes fully; a colormap carries a per-value alpha
+      // ramp (≈0 at the low end) so low/background dose lets the base show through.
+      var oalpha = 1.0;
       if (P.overlayColormap != 0u) {
-        orgb = textureSampleLevel(overlayLut, volSamp, og, 0.0).rgb;
+        let lut = textureSampleLevel(overlayLut, volSamp, og, 0.0);
+        orgb = lut.rgb;
+        oalpha = lut.a;
       }
       // Checkerboard mode shows the overlay only in alternating cells (a
       // registration QA tool); otherwise it's a uniform opacity blend.
-      var amount = P.overlayOpacity;
+      var amount = P.overlayOpacity * oalpha;
       if (P.overlayCheckerboard != 0u) {
         let cell = (floor(in.pos.x / P.checkerSize) + floor(in.pos.y / P.checkerSize)) % 2.0;
         amount = amount * cell;

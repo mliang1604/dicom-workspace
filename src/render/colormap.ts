@@ -53,6 +53,14 @@ export const COLORMAPS: Record<string, Colormap> = {
 /** The default overlay colormap (a dose/PET wash) when none is otherwise chosen. */
 export const DEFAULT_COLORMAP = 'jet';
 
+/**
+ * Fraction of the value range over which a colormap's alpha ramps from 0 to 1.
+ * Below it the wash fades out, so background / low-dose voxels are transparent and
+ * the base shows through; above it the overlay is fully opaque (at the composite
+ * opacity). Makes a dose wash read as an isodose overlay, not a full-frame tint.
+ */
+export const COLORMAP_ALPHA_RAMP = 0.15;
+
 /** Resolve a colormap by name, falling back to {@link DEFAULT_COLORMAP}. */
 export function colormap(name: string): Colormap {
   return COLORMAPS[name] ?? COLORMAPS[DEFAULT_COLORMAP];
@@ -82,19 +90,22 @@ export function sampleColormap(map: Colormap, t: number): [number, number, numbe
 }
 
 /**
- * Bake a colormap into a flat RGBA LUT of `size` texels (alpha 1), evenly spaced
- * across [0, 1]. Uploaded to a 1-D texture the slice shader samples with the
- * windowed overlay value; the per-layer composite opacity is applied separately.
+ * Bake a colormap into a flat RGBA LUT of `size` texels, evenly spaced across
+ * [0, 1]. Alpha ramps from 0 at the low end up to 1 over {@link COLORMAP_ALPHA_RAMP}
+ * of the range, so low/background values are transparent (the base shows through)
+ * and only meaningful signal washes in; the slice shader multiplies the overlay
+ * contribution by this alpha. The per-layer composite opacity is applied on top.
  */
 export function colormapLut(map: Colormap, size: number = COLORMAP_LUT_SIZE): Float32Array {
   const n = Math.max(2, Math.floor(size));
   const out = new Float32Array(n * 4);
   for (let i = 0; i < n; i++) {
-    const [r, g, b] = sampleColormap(map, i / (n - 1));
+    const t = i / (n - 1);
+    const [r, g, b] = sampleColormap(map, t);
     out[i * 4 + 0] = r;
     out[i * 4 + 1] = g;
     out[i * 4 + 2] = b;
-    out[i * 4 + 3] = 1;
+    out[i * 4 + 3] = Math.min(1, t / COLORMAP_ALPHA_RAMP);
   }
   return out;
 }
