@@ -83,6 +83,7 @@ import {
   windowLevelDrag,
   windowLevelSensitivity,
   windowPresets,
+  type WindowLevel,
   type WindowPreset,
 } from '../../render/window-level';
 import {
@@ -502,6 +503,8 @@ type Drag =
     }
   | {
       readonly kind: 'windowLevel';
+      /** The overlay layer's id whose window this drag edits, or null for the base. */
+      readonly layerId: string | null;
       readonly startCenter: number;
       readonly startWidth: number;
       readonly startX: number;
@@ -892,6 +895,22 @@ export class Viewer {
    */
   private readonly layerDisplays = signal<ReadonlyMap<string, LayerDisplay>>(new Map());
   /**
+   * Per-layer window/level overrides keyed by {@link Layer.id}, for the Compare
+   * layout's independent per-column windowing. The base layer is never keyed here
+   * — it always reads the shared {@link windowCenter}/{@link windowWidth} signals
+   * (so Fusion and single-layer windowing are untouched); an overlay column absent
+   * from the map falls back to its volume's default window. Reset on a fresh load.
+   */
+  private readonly layerWindows = signal<ReadonlyMap<string, WindowLevel>>(new Map());
+  /**
+   * The Compare column the toolbar window/level controls (preset selector, WL/WW
+   * inputs) target: the index of the last MPR pane hovered. Sticky — it survives
+   * the pointer moving off the panes onto the toolbar, so the controls keep
+   * editing the column you were over rather than snapping back to the base. Only
+   * meaningful in {@link LayoutMode.Compare}; reset on a fresh load.
+   */
+  private readonly activeCompareGroup = signal(0);
+  /**
    * Which structure set the panel and overlays show: an index into
    * {@link structureSets}, or -1 for all of them. Only meaningful when more than
    * one structure set annotates the series; reset to "all" on each load.
@@ -908,9 +927,13 @@ export class Viewer {
   protected readonly windowCenter = signal(0);
   protected readonly windowWidth = signal(1);
 
-  /** Window/level presets offered for the loaded volume (CT windows, or default). */
+  /**
+   * Window/level presets offered for the window/level controls' active target: the
+   * base volume normally, or the hovered Compare column's overlay volume — so a
+   * dose column gets its own presets (e.g. its full range) rather than the CT's.
+   */
   protected readonly wlPresets = computed<WindowPreset[]>(() => {
-    const volume = this.volume();
+    const volume = this.activeWlLayer()?.volume ?? this.volume();
     return volume ? windowPresets(volume) : [];
   });
 
@@ -1685,6 +1708,57 @@ export class Viewer {
     () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
   );
 
+  /**
+   * The layer the window/level controls (preset, WL/WW inputs, right-drag) target.
+   * Outside Compare it's always the base. In Compare it's the hovered column's
+   * layer: the overlay for the right column (group ≥ 1), the base otherwise — so
+   * each column windows independently. Null until a volume loads.
+   */
+  private readonly activeWlLayer = computed<Layer | null>(() => {
+    const base = baseLayer(this.layers()) ?? null;
+    if (!this.isCompare()) return base;
+    const overlay = this.selectedOverlay();
+    if (!overlay) return base;
+    return this.activeCompareGroup() >= 1 ? overlay : base;
+  });
+
+  /**
+   * Resolve a layer's window/level: the base (or null) reads the shared
+   * {@link windowCenter}/{@link windowWidth} signals; an overlay reads its
+   * per-layer override ({@link layerWindows}), falling back to its volume's default
+   * window. The single reader both the controls and {@link composePaneViews} use.
+   */
+  private layerWindow(layer: Layer | null): WindowLevel {
+    if (!layer || layer.role === 'base') {
+      return { center: this.windowCenter(), width: this.windowWidth() };
+    }
+    return (
+      this.layerWindows().get(layer.id) ?? {
+        center: layer.volume.windowCenter,
+        width: layer.volume.windowWidth,
+      }
+    );
+  }
+
+  /** Write a layer's window/level: the base updates the shared signals, an overlay its override. */
+  private setLayerWindow(layer: Layer | null, next: WindowLevel): void {
+    if (!layer || layer.role === 'base') {
+      this.windowCenter.set(next.center);
+      this.windowWidth.set(next.width);
+    } else {
+      this.layerWindows.update((map) => new Map(map).set(layer.id, next));
+    }
+  }
+
+  /** The active target's window centre, shown in the WL input (the hovered Compare column's). */
+  protected readonly activeWindowCenter = computed(
+    () => this.layerWindow(this.activeWlLayer()).center,
+  );
+  /** The active target's window width, shown in the WW input. */
+  protected readonly activeWindowWidth = computed(
+    () => this.layerWindow(this.activeWlLayer()).width,
+  );
+
   /** Whether the layers panel applies: more than the lone base layer is loaded. */
   protected readonly hasLayersPanel = computed(() => this.layers().length > 1);
 
@@ -2259,6 +2333,9 @@ export class Viewer {
     // windowed by its own defaults.
     const compareMode = this.layoutMode() === LayoutMode.Compare;
     const overlay = this.selectedOverlay();
+    // The overlay column windows on its own per-layer window/level (independent of
+    // the base column's shared window), falling back to its volume's default.
+    const overlayWindow = overlay ? this.layerWindow(overlay) : null;
 
     return panes.map((pane) =>
       pane.kind === 'mip'
@@ -2286,8 +2363,8 @@ export class Viewer {
               // Resolve the group's slice/zoom/pan: shared (linked) or independent
               // (unlinked), and patient-plane-matched for non-base Compare groups.
               sliceIndex: this.paneSliceIndex(pane.group, pane.orientation),
-              windowCenter: showOverlay ? overlay!.volume.windowCenter : windowCenter,
-              windowWidth: showOverlay ? overlay!.volume.windowWidth : windowWidth,
+              windowCenter: showOverlay ? overlayWindow!.center : windowCenter,
+              windowWidth: showOverlay ? overlayWindow!.width : windowWidth,
               zoom: this.paneZoom(pane.group, pane.orientation),
               pan: this.panePan(pane.group, pane.orientation),
               rotation: obliques[pane.orientation],
@@ -3186,17 +3263,21 @@ export class Viewer {
     const placement = this.placementAtEvent(event);
     if (!placement) return;
 
-    // Right-button drag adjusts the shared window/level over any pane — the
-    // standard PACS gesture, picked because it never clashes with the
-    // left-button pan/orbit or the Ctrl+wheel zoom. Horizontal moves the centre,
-    // vertical the width (see dragWindow). The context menu is suppressed below.
+    // Right-button drag adjusts window/level over any pane — the standard PACS
+    // gesture, picked because it never clashes with the left-button pan/orbit or
+    // the Ctrl+wheel zoom. Horizontal moves the centre, vertical the width (see
+    // dragWindow). It targets the pane's own column: the overlay layer over a
+    // Compare overlay column, the base elsewhere. The context menu is suppressed below.
     if (event.button === 2) {
       event.preventDefault();
       this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
+      const layer = this.wlTargetForPlacement(placement);
+      const start = this.layerWindow(layer);
       this.drag.set({
         kind: 'windowLevel',
-        startCenter: this.windowCenter(),
-        startWidth: this.windowWidth(),
+        layerId: layer && layer.role !== 'base' ? layer.id : null,
+        startCenter: start.center,
+        startWidth: start.width,
         startX: event.clientX,
         startY: event.clientY,
       });
@@ -3278,6 +3359,9 @@ export class Viewer {
     this.cursor.set({ x, y });
     const hovered = placementAt(this.panes(), x, y);
     this.hoveredKey.set(hovered ? this.paneKey(hovered) : null);
+    // Remember the last MPR column hovered so the toolbar window/level controls
+    // keep targeting it once the pointer moves off the panes onto the toolbar.
+    if (hovered?.kind === 'mpr') this.activeCompareGroup.set(hovered.group);
   }
 
   protected onPointerUp(event: PointerEvent): void {
@@ -3369,8 +3453,22 @@ export class Viewer {
    * shifts the centre, vertical the width, both measured from where the drag
    * began so the window tracks total movement rather than accumulating jitter.
    */
+  /**
+   * The layer a window/level gesture over a pane targets: the overlay layer for a
+   * Compare overlay column (group ≥ 1), the base otherwise — so right-dragging the
+   * right column windows only that column. Mirrors {@link activeWlLayer}, but keyed
+   * to a specific pane rather than the hovered one.
+   */
+  private wlTargetForPlacement(placement: PanePlacement): Layer | null {
+    const base = baseLayer(this.layers()) ?? null;
+    if (placement.kind !== 'mpr' || !this.isCompare()) return base;
+    const overlay = this.selectedOverlay();
+    return placement.group >= 1 && overlay ? overlay : base;
+  }
+
   private dragWindow(event: PointerEvent, drag: Extract<Drag, { kind: 'windowLevel' }>): void {
-    const volume = this.volume();
+    const layer = drag.layerId ? (this.layers().find((l) => l.id === drag.layerId) ?? null) : null;
+    const volume = layer?.volume ?? this.volume();
     if (!volume) return;
     const next = windowLevelDrag(
       { center: drag.startCenter, width: drag.startWidth },
@@ -3378,8 +3476,7 @@ export class Viewer {
       event.clientY - drag.startY,
       windowLevelSensitivity(volume.min, volume.max),
     );
-    this.windowCenter.set(next.center);
-    this.windowWidth.set(next.width);
+    this.setLayerWindow(layer, next);
     this.markMipSettling();
   }
 
@@ -3511,23 +3608,30 @@ export class Viewer {
   }
 
   protected onWindowCenterInput(event: Event): void {
-    this.windowCenter.set(intValue(event));
+    const layer = this.activeWlLayer();
+    this.setLayerWindow(layer, { center: intValue(event), width: this.layerWindow(layer).width });
     this.markMipSettling();
   }
 
   protected onWindowWidthInput(event: Event): void {
-    this.windowWidth.set(Math.max(1, intValue(event)));
+    const layer = this.activeWlLayer();
+    this.setLayerWindow(layer, {
+      center: this.layerWindow(layer).center,
+      width: Math.max(1, intValue(event)),
+    });
     this.markMipSettling();
   }
 
-  /** Apply the chosen window/level preset, then reset the selector to its label. */
+  /**
+   * Apply the chosen window/level preset to the active target (the hovered Compare
+   * column's layer, else the base), then reset the selector to its label.
+   */
   protected onPresetChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
     const preset = this.wlPresets()[Number(event.target.value)];
     event.target.selectedIndex = 0; // back to the "Preset…" placeholder so re-picking fires
     if (!preset) return;
-    this.windowCenter.set(preset.center);
-    this.windowWidth.set(preset.width);
+    this.setLayerWindow(this.activeWlLayer(), { center: preset.center, width: preset.width });
     this.markMipSettling();
   }
 
@@ -3849,6 +3953,8 @@ export class Viewer {
     this.hiddenLayers.set(new Set());
     this.layerOpacities.set(new Map());
     this.layerDisplays.set(new Map());
+    this.layerWindows.set(new Map()); // per-column windows back to volume defaults
+    this.activeCompareGroup.set(0); // window/level controls target the base column
     this.selectedSetIndex.set(-1); // showing every associated structure set
     // Per-volume view state is per-session: always reset to volume-derived defaults.
     this.invert.set(false);

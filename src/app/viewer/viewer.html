@@ -72,7 +72,7 @@
         type="number"
         step="1"
         aria-label="Window level (centre)"
-        [value]="windowCenter()"
+        [value]="activeWindowCenter()"
         (input)="onWindowCenterInput($event)"
         [disabled]="!isReady()"
       />
@@ -85,7 +85,7 @@
         step="1"
         min="1"
         aria-label="Window width"
-        [value]="windowWidth()"
+        [value]="activeWindowWidth()"
         (input)="onWindowWidthInput($event)"
         [disabled]="!isReady()"
       />
