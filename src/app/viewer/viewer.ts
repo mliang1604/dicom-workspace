@@ -133,6 +133,7 @@ import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
+import { SERIES_DND_MIME } from './history-panel/series-chip';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -951,6 +952,16 @@ export class Viewer {
   protected readonly selectedSeriesUid = computed(() => {
     const state = this.load();
     return state.status === 'ready' ? state.result.selectedUid : '';
+  });
+  /**
+   * UIDs of every series currently composited — the base and any fusion overlay
+   * layers (their layer ids are the source series' UIDs). Drives the history
+   * panel's active-series highlight so a fused load lights up both chips, not
+   * just the base. Empty when nothing is loaded.
+   */
+  protected readonly loadedSeriesUids = computed<readonly string[]>(() => {
+    const state = this.load();
+    return state.status === 'ready' ? state.result.layers.map((layer) => layer.id) : [];
   });
   /** Only show the picker when a folder held more than one series. */
   protected readonly hasMultipleSeries = computed(() => this.seriesList().length > 1);
@@ -3205,33 +3216,74 @@ export class Viewer {
    * counter keeps it up while the pointer moves between child elements.
    */
   protected onDragEnter(event: DragEvent): void {
-    if (!hasFiles(event)) return;
+    if (!isLoadableDrag(event)) return;
     this.dragDepth++;
     this.isDraggingFiles.set(true);
   }
 
-  /** Allow the drop and show the copy cursor while a file drag hovers the viewport. */
+  /** Allow the drop and show the copy cursor while a loadable drag hovers the viewport. */
   protected onDragOver(event: DragEvent): void {
-    if (!hasFiles(event)) return;
+    if (!isLoadableDrag(event)) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
   }
 
   /** A drag left a child (or the viewport): lower the overlay once fully outside. */
   protected onDragLeave(event: DragEvent): void {
-    if (!hasFiles(event)) return;
+    if (!isLoadableDrag(event)) return;
     this.dragDepth = Math.max(0, this.dragDepth - 1);
     if (this.dragDepth === 0) this.isDraggingFiles.set(false);
   }
 
-  /** Load the dropped folder/files, walking dropped directories for their slices. */
+  /**
+   * Handle a drop on the viewport: a history-panel series chip (its UID payload)
+   * loads that retained series through the smart-auto path; otherwise the dropped
+   * folder/files are read, walking dropped directories for their slices.
+   */
   protected async onDrop(event: DragEvent): Promise<void> {
     event.preventDefault();
     this.dragDepth = 0;
     this.isDraggingFiles.set(false);
     if (!event.dataTransfer) return;
+    const seriesUid = event.dataTransfer.getData(SERIES_DND_MIME);
+    if (seriesUid) {
+      const series = this.catalog.seriesByUid(seriesUid);
+      if (series) this.loadSeriesFromPanel(series);
+      return;
+    }
     const { files, entry } = await readDropped(event.dataTransfer);
     if (files.length > 0) await this.loadFiles(files, entry);
+  }
+
+  /**
+   * Load a series picked from the history panel (clicked, key-activated, or
+   * dropped onto the viewport). Its volume is built on demand from the retained
+   * slices ({@link VolumeLoader.loadSeries}) and routed through the same
+   * smart-auto {@link VolumeLoader.merge} rule as a file load: a series sharing
+   * the current base's frame of reference fuses as an overlay, a different study
+   * replaces. A series already composited (base or overlay) is a no-op, so a
+   * second click neither resets the view nor stacks a duplicate.
+   */
+  protected loadSeriesFromPanel(series: Series): void {
+    if (!this.renderer()) return; // GPU not ready; nothing to draw into yet
+    const previous = this.load();
+    if (previous.status === 'ready' && previous.result.layers.some((l) => l.id === series.uid)) {
+      return;
+    }
+    let incoming: LoadResult;
+    try {
+      const known = previous.status === 'ready' ? previous.result.allStructureSets : [];
+      incoming = this.loader.loadSeries(series, known);
+    } catch (error) {
+      this.load.set({ status: 'error', message: messageOf(error) });
+      return;
+    }
+    const merged =
+      previous.status === 'ready'
+        ? this.loader.merge(previous.result, incoming)
+        : { result: incoming, added: false };
+    if (merged.added) this.addLayer(merged.result);
+    else this.applyVolume(merged.result);
   }
 
   /**
@@ -4144,6 +4196,17 @@ function confirmPatientSwitch(): boolean {
 function hasFiles(event: DragEvent): boolean {
   const types = event.dataTransfer?.types;
   return types ? Array.from(types).includes('Files') : false;
+}
+
+/** Whether a drag carries a history-panel series chip (its UID payload). */
+function hasSeriesDrag(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+  return types ? Array.from(types).includes(SERIES_DND_MIME) : false;
+}
+
+/** Whether a drag is something the viewport can load: dropped files or a series chip. */
+function isLoadableDrag(event: DragEvent): boolean {
+  return hasFiles(event) || hasSeriesDrag(event);
 }
 
 /**
