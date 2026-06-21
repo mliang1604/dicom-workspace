@@ -1,5 +1,8 @@
 import {
   buildRoiLegend,
+  cantFuseMessage,
+  dropHeadlineText,
+  dropIntentOf,
   filterRawTags,
   isEditableTarget,
   loadingText,
@@ -125,6 +128,40 @@ describe('filterRawTags', () => {
 
   it('returns nothing when there is no match', () => {
     expect(filterRawTags(tags, 'zzz')).toEqual([]);
+  });
+});
+
+describe('dropIntentOf', () => {
+  it('loads as primary with no modifier held', () => {
+    expect(dropIntentOf({ altKey: false, shiftKey: false })).toBe('primary');
+  });
+
+  it('forces a fusion overlay when ⌥/Alt is held', () => {
+    expect(dropIntentOf({ altKey: true, shiftKey: false })).toBe('overlay');
+  });
+
+  it('adds a compare column when ⇧/Shift is held', () => {
+    expect(dropIntentOf({ altKey: false, shiftKey: true })).toBe('compare');
+  });
+
+  it('lets ⌥ overlay win when both modifiers are held', () => {
+    expect(dropIntentOf({ altKey: true, shiftKey: true })).toBe('overlay');
+  });
+});
+
+describe('dropHeadlineText', () => {
+  it('reflects the held modifier in the drop overlay headline', () => {
+    expect(dropHeadlineText('primary')).toBe('Drop to load as primary');
+    expect(dropHeadlineText('overlay')).toBe('Drop to fuse as an overlay');
+    expect(dropHeadlineText('compare')).toBe('Drop to add a compare column');
+  });
+});
+
+describe('cantFuseMessage', () => {
+  it('names the action that could not apply and the frame-of-reference reason', () => {
+    expect(cantFuseMessage('overlay')).toContain('fuse');
+    expect(cantFuseMessage('compare')).toContain('compare');
+    expect(cantFuseMessage('overlay')).toContain('frame of reference');
   });
 });
 
