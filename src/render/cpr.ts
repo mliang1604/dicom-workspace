@@ -1,3 +1,8 @@
+// NOTE: Not yet wired into the viewer. This is staged CPR (curved planar
+// reformation) support with no production consumer — there is no CPR pane, so
+// this module and its spec currently exercise only each other. Keep as planned
+// work; see #207 before treating it as dead code or building the CPR view.
+
 import { clamp01, clampIndex } from '../dicom/math';
 import type { Vec3, Volume, VolumeGeometry } from '../dicom/types';
 import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
