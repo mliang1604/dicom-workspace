@@ -1,6 +1,14 @@
-import { Orientation, type Volume } from '../dicom/types';
+import { Orientation, type Vec3, type Volume } from '../dicom/types';
 import type { PaneRect, Vec2 } from './layout';
-import { planeToTex, sliceCountFor, texCoordAt, type ObliqueRotation } from './reslice';
+import {
+  patientToTexMatrix,
+  planeToTex,
+  resolveGeometry,
+  sliceCountFor,
+  texCoordAt,
+  type ObliqueRotation,
+} from './reslice';
+import { add, scale } from '../dicom/vec3';
 import { aspectScale } from './slice-renderer';
 
 /** A voxel sampled under the cursor: its volume index and value. */
@@ -11,6 +19,12 @@ export interface VoxelProbe {
   readonly value: number;
   /** Raw stored value before the modality LUT, recovered via slope/intercept. */
   readonly rawValue: number;
+  /**
+   * Patient-space (LPS, mm) location of the sample. Lets a caller read other
+   * layers (e.g. a dose grid) at the same physical point via
+   * {@link sampleVolumeAtPatient}, even when their grids differ.
+   */
+  readonly patient: Vec3;
 }
 
 /**
@@ -66,15 +80,46 @@ export function probeVoxel(
   const coord = texCoordAt(planeToTex(volume, orientation, rotation), px, planeY, slicePos);
   if (coord.some((c) => c < 0 || c > 1)) return null; // outside the volume
 
+  // The patient point of the cursor on this plane: invert the voxel-centre texture
+  // mapping (index = coord·dim − ½) and place it through the volume's geometry.
   const [dimX, dimY, dimZ] = volume.dims;
-  const vx = clampIndex(Math.floor(coord[0] * dimX), dimX);
-  const vy = clampIndex(Math.floor(coord[1] * dimY), dimY);
-  const vz = clampIndex(Math.floor(coord[2] * dimZ), dimZ);
+  const geom = resolveGeometry(volume);
+  const patient = add(
+    geom.origin,
+    add(
+      add(scale(geom.iStep, coord[0] * dimX - 0.5), scale(geom.jStep, coord[1] * dimY - 0.5)),
+      scale(geom.kStep, coord[2] * dimZ - 0.5),
+    ),
+  );
+  return sampleTex(volume, coord[0], coord[1], coord[2], patient);
+}
 
+/**
+ * Sample `volume` at a patient-space point — for reading a second layer (e.g. a
+ * dose grid) at the location the cursor probe found on the displayed layer. Maps
+ * the point through {@link patientToTexMatrix} into this volume's own grid and
+ * returns null when it lies outside it; the grids need only share the patient
+ * frame of reference, not bounds or spacing.
+ */
+export function sampleVolumeAtPatient(volume: Volume, patient: Vec3): VoxelProbe | null {
+  const m = patientToTexMatrix(volume); // column-major patient → texcoord
+  const tx = m[0] * patient[0] + m[4] * patient[1] + m[8] * patient[2] + m[12];
+  const ty = m[1] * patient[0] + m[5] * patient[1] + m[9] * patient[2] + m[13];
+  const tz = m[2] * patient[0] + m[6] * patient[1] + m[10] * patient[2] + m[14];
+  if (tx < 0 || tx > 1 || ty < 0 || ty > 1 || tz < 0 || tz > 1) return null;
+  return sampleTex(volume, tx, ty, tz, patient);
+}
+
+/** Floor a texture coordinate into `volume`'s grid and read the value there. */
+function sampleTex(volume: Volume, tx: number, ty: number, tz: number, patient: Vec3): VoxelProbe {
+  const [dimX, dimY, dimZ] = volume.dims;
+  const vx = clampIndex(Math.floor(tx * dimX), dimX);
+  const vy = clampIndex(Math.floor(ty * dimY), dimY);
+  const vz = clampIndex(Math.floor(tz * dimZ), dimZ);
   const value = volume.data[(vz * dimY + vy) * dimX + vx];
   const rawValue =
     volume.rescaleSlope !== 0 ? (value - volume.rescaleIntercept) / volume.rescaleSlope : value;
-  return { voxel: [vx, vy, vz], value, rawValue };
+  return { voxel: [vx, vy, vz], value, rawValue, patient };
 }
 
 function clampIndex(index: number, dim: number): number {

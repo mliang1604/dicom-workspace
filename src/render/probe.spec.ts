@@ -1,6 +1,6 @@
-import { Orientation, type Volume, type VolumeGeometry } from '../dicom/types';
+import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
 import type { PaneRect } from './layout';
-import { probeVoxel } from './probe';
+import { probeVoxel, sampleVolumeAtPatient } from './probe';
 import { rezoomPan } from './slice-renderer';
 
 /** A dims[0]×dims[1]×dims[2] volume whose every voxel holds its flat index. */
@@ -217,5 +217,44 @@ describe('probeVoxel', () => {
 
     expect(probe?.value).toBe(stored);
     expect(probe?.rawValue).toBe((stored + 1024) / 2);
+  });
+
+  it('reports the patient-space point of the sampled plane location', () => {
+    const volume = makeVolume([4, 4, 4]); // default geometry: voxel (i,j,k) at (i,j,k)
+    // Pane centre of axial slice 2: u=v=0.5 → continuous index 1.5 in plane, z=2.
+    const probe = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 50, 50);
+    expect(probe?.patient[0]).toBeCloseTo(1.5, 6);
+    expect(probe?.patient[1]).toBeCloseTo(1.5, 6);
+    expect(probe?.patient[2]).toBeCloseTo(2.0, 6);
+  });
+});
+
+describe('sampleVolumeAtPatient', () => {
+  it('round-trips the probe: the same volume reads the same voxel/value at its patient point', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const probe = probeVoxel(volume, Orientation.Axial, 2, 1, SQUARE, 50, 50)!;
+    const resampled = sampleVolumeAtPatient(volume, probe.patient);
+    expect(resampled?.voxel).toEqual(probe.voxel);
+    expect(resampled?.value).toBe(probe.value);
+  });
+
+  it('reads a coarser overlay sharing the patient frame at the same point', () => {
+    // 2× spacing: overlay voxel (i,j,k) sits at patient (2i, 2j, 2k).
+    const overlay = makeVolume([2, 2, 2], 1, 0, {
+      iStep: [2, 0, 0],
+      jStep: [0, 2, 0],
+      kStep: [0, 0, 2],
+      origin: [0, 0, 0],
+    });
+    // Patient (1.5, 1.5, 2.0) falls in overlay voxel (1, 1, 1) → value 7.
+    const sample = sampleVolumeAtPatient(overlay, [1.5, 1.5, 2.0]);
+    expect(sample?.voxel).toEqual([1, 1, 1]);
+    expect(sample?.value).toBe((1 * 2 + 1) * 2 + 1);
+  });
+
+  it('returns null when the point lies outside the volume', () => {
+    const volume = makeVolume([4, 4, 4]);
+    const far: Vec3 = [100, 100, 100];
+    expect(sampleVolumeAtPatient(volume, far)).toBeNull();
   });
 });

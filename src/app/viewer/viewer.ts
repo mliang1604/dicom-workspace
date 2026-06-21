@@ -93,7 +93,7 @@ import {
 } from '../../render/camera';
 import { axisMarkers } from '../../render/axis-indicator';
 import { pickProjection } from '../../render/pick';
-import { probeVoxel, type VoxelProbe } from '../../render/probe';
+import { probeVoxel, sampleVolumeAtPatient, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import {
   classifyContour,
@@ -974,6 +974,12 @@ export class Viewer {
    * pane via {@link focusPanePoint} — the forward map the probe inverts — so each
    * mark tracks pan, zoom, scroll and flip. A pane is dropped when the point falls
    * outside its rect (panned/zoomed off-screen).
+   *
+   * Layer-stack rule (#132): the crosshair, measurements ({@link measurementOverlays})
+   * and contours ({@link contourOverlays}) are all keyed to the BASE layer's geometry
+   * — the focus voxel, measurement points and RTSTRUCT contours live in the base's
+   * patient frame. Overlays share that frame, so the marks register over a fusion
+   * overlay; only the live probe ({@link probeText}) reads per-layer values.
    */
   protected readonly crosshairs = computed<CrosshairOverlay[]>(() => {
     const voxel = this.focusVoxel();
@@ -1864,30 +1870,50 @@ export class Viewer {
     return volume ? Math.round(2 * volumeBounds(volume).radius) : 0;
   });
 
-  /** Live readout of the voxel under the cursor, or null when none is hovered. */
+  /**
+   * Live readout of the voxel under the cursor, or null when none is hovered.
+   *
+   * The hovered pane's own layer drives the geometry (the base in fusion / group 0;
+   * the overlay in a Compare overlay column); every *other* visible layer is then
+   * read at the same patient point, so a fused CT+dose hover reports HU and Gy
+   * together. Crosshairs and measurements stay keyed to the base — see
+   * {@link crosshairs}.
+   */
   protected readonly probeText = computed<string | null>(() => {
     if (!this.isReady()) return null;
     const cursor = this.cursor();
-    const volume = this.volume();
-    if (!cursor || !volume) return null;
+    if (!cursor) return null;
 
     const pane = placementAt(this.panes(), cursor.x, cursor.y);
     if (!pane || pane.kind !== 'mpr') return null; // no voxel probe over the 3D pane
 
+    const group = pane.group;
+    const hoveredVolume = this.groupVolume(group);
+    if (!hoveredVolume) return null;
+    const orientation = pane.orientation;
     const sample = probeVoxel(
-      volume,
-      pane.orientation,
-      this.sliceIndices()[pane.orientation],
-      this.zooms()[pane.orientation],
+      hoveredVolume,
+      orientation,
+      this.paneSliceIndex(group, orientation),
+      this.paneZoom(group, orientation),
       pane.rect,
       cursor.x,
       cursor.y,
-      pane.orientation === Orientation.Sagittal && this.sagittalFlipped(),
-      this.pans()[pane.orientation],
-      this.obliques()[pane.orientation],
+      orientation === Orientation.Sagittal && this.sagittalFlipped(),
+      this.panePan(group, orientation),
+      this.obliques()[orientation],
     );
     if (!sample) return null;
-    return formatProbe(this.orientationName(pane.orientation), sample, volume);
+
+    // Read every other visible layer at the probed patient point (e.g. dose Gy
+    // under the CT HU). A layer that doesn't cover the point is dropped.
+    const others = this.layers()
+      .filter((layer) => layer.visible && layer.volume !== hoveredVolume)
+      .flatMap((layer) => {
+        const s = sampleVolumeAtPatient(layer.volume, sample.patient);
+        return s ? [{ layer, sample: s }] : [];
+      });
+    return formatProbe(this.orientationName(orientation), sample, hoveredVolume, others);
   });
 
   private gpu: GpuContext | null = null;
@@ -3981,13 +4007,25 @@ function withinRect(rect: PaneRect, x: number, y: number): boolean {
 }
 
 /** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */
-function formatProbe(name: string, probe: VoxelProbe, volume: Volume): string {
+function formatProbe(
+  name: string,
+  probe: VoxelProbe,
+  volume: Volume,
+  others: ReadonlyArray<{ readonly layer: Layer; readonly sample: VoxelProbe }> = [],
+): string {
   const [x, y, z] = probe.voxel;
   const unit = modalityUnit(volume.modality);
   const value = `${formatValue(probe.value)}${unit ? ` ${unit}` : ''}`;
   const trivialLut = volume.rescaleSlope === 1 && volume.rescaleIntercept === 0;
   const stored = trivialLut ? '' : ` · stored ${formatValue(probe.rawValue)}`;
-  return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}`;
+  // Append each other visible layer read at the same patient point (e.g. dose Gy).
+  const overlays = others
+    .map(({ layer, sample }) => {
+      const u = modalityUnit(layer.modality);
+      return ` · ${layer.modality ?? 'Image'} ${formatValue(sample.value)}${u ? ` ${u}` : ''}`;
+    })
+    .join('');
+  return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}${overlays}`;
 }
 
 function formatValue(value: number): string {

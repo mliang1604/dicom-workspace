@@ -82,6 +82,15 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   // The fusion blend bar is a composited-view control, hidden in Compare.
   await expect(blendBar).toHaveCount(0);
 
+  // #132: the live probe reads every layer at the cursor. Hovering the overlay
+  // column (group 1, top-right axial pane) probes the dose (Gy) as the primary and
+  // reads the underlying CT (HU) at the same patient point — both in one readout.
+  await page.mouse.move(961, 131);
+  const probe = page.locator('.probe');
+  await expect(probe).toBeVisible();
+  await expect(probe).toContainText('Gy');
+  await expect(probe).toContainText('HU');
+
   // #129: the Compare groups are linked by default; the toggle unlinks them so each
   // column navigates on its own. Both states must re-render the two-texture path
   // without error (group 1 re-reads its independent nav when unlinked).
