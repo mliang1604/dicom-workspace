@@ -1,5 +1,6 @@
+import { orderSlicesThroughPlane, throughPlaneNormal } from './slice-order';
 import type { MissingSlices, Slice, Vec3, Volume, VolumeGeometry } from './types';
-import { cross, dot, normalize, scale, sub } from './vec3';
+import { cross, dot, scale, sub } from './vec3';
 
 export class VolumeBuildError extends Error {}
 
@@ -52,7 +53,7 @@ export function buildVolume(slices: Slice[]): Volume {
     }
   }
 
-  const ordered = sortSlices(slices);
+  const ordered = orderSlicesThroughPlane(slices);
   const sliceVoxels = rows * columns;
   const [sx, sy] = inPlaneSpacing(ordered[0]);
 
@@ -109,10 +110,9 @@ interface Frame {
  */
 function assemble(ordered: Slice[], sliceVoxels: number, sx: number, sy: number): Frame {
   const first = ordered[0];
-  const ori = first.orientation;
-  const hasSpatial = !!ori && ordered.every((s) => s.position);
+  const normal = throughPlaneNormal(ordered);
 
-  if (!hasSpatial || !ori) {
+  if (!normal) {
     return {
       data: stackByIndex(ordered, sliceVoxels),
       depth: ordered.length,
@@ -121,9 +121,9 @@ function assemble(ordered: Slice[], sliceVoxels: number, sx: number, sy: number)
     };
   }
 
+  const ori = first.orientation!;
   const rowDir: Vec3 = [ori[0], ori[1], ori[2]];
   const colDir: Vec3 = [ori[3], ori[4], ori[5]];
-  const normal = normalize(cross(rowDir, colDir));
   const proj = ordered.map((s) => dot(s.position!, normal));
 
   const gaps = consecutiveGaps(proj);
@@ -227,20 +227,6 @@ function resampleAlongNormal(
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;
-}
-
-/** Sort key: projection of the image position onto the slice normal. */
-function sortSlices(slices: Slice[]): Slice[] {
-  const first = slices[0];
-  if (first.orientation && slices.every((s) => s.position)) {
-    const rowDir = first.orientation.slice(0, 3);
-    const colDir = first.orientation.slice(3, 6);
-    const normal = cross(rowDir, colDir);
-    const proj = (s: Slice) =>
-      s.position![0] * normal[0] + s.position![1] * normal[1] + s.position![2] * normal[2];
-    return [...slices].sort((a, b) => proj(a) - proj(b));
-  }
-  return [...slices].sort((a, b) => a.instanceNumber - b.instanceNumber);
 }
 
 /** PixelSpacing is [rowSpacing, colSpacing] -> [x (col), y (row)]. */
