@@ -1,4 +1,9 @@
-import { baseImageLayer, type Volume, type VolumeGeometry } from '../dicom/types';
+import {
+  baseImageLayer,
+  overlayImageLayer,
+  type Volume,
+  type VolumeGeometry,
+} from '../dicom/types';
 import type { Series } from '../dicom/series';
 import { doseOverlaySeries, mergeLoad, type LoadResult } from './volume-loader';
 
@@ -157,6 +162,39 @@ describe('mergeLoad', () => {
     const { result } = mergeLoad(once, fakeLoad('mr', 'frame-1', 'MR'));
 
     expect(result.layers.map((l) => l.id)).toEqual(['ct', 'mr', 'mr#2']);
+  });
+
+  it('does not stack the current base series over itself when it is re-loaded (#160)', () => {
+    // Re-picking the already-loaded study (same base series UID) must not add the
+    // base as an overlay on itself: it replaces, leaving a single CT, not 'ct#2'.
+    const current = fakeLoad('ct', 'frame-1');
+    const reload = fakeLoad('ct', 'frame-1');
+
+    const { result, added } = mergeLoad(current, reload);
+
+    expect(added).toBe(false);
+    expect(result.layers.map((l) => l.id)).toEqual(['ct']);
+  });
+
+  it('replaces a re-loaded fused study rather than duplicating its base (#160)', () => {
+    // A CT + same-frame RTDOSE load is itself two layers. Re-loading it (e.g. via
+    // Recent) must not re-promote the CT base to an overlay; the registry stays
+    // [CT base, dose overlay] with no 'ct#2'.
+    const fused: LoadResult = {
+      ...fakeLoad('ct', 'frame-1'),
+      layers: [
+        baseImageLayer('ct', fakeVolume('CT')),
+        overlayImageLayer('dose', fakeVolume('RTDOSE')),
+      ],
+    };
+
+    const { result, added } = mergeLoad(fused, fused);
+
+    expect(added).toBe(false);
+    expect(result.layers.map((l) => [l.id, l.role])).toEqual([
+      ['ct', 'base'],
+      ['dose', 'overlay'],
+    ]);
   });
 
   it('does not mutate the current registry', () => {
