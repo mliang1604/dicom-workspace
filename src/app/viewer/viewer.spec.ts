@@ -8,6 +8,7 @@ import {
   loadingText,
   missingSliceWarning,
   nextCineIndex,
+  releaseSelectFocus,
   roiKeyOf,
 } from './viewer';
 import type { RawTag } from '../../dicom/metadata';
@@ -100,6 +101,33 @@ describe('isEditableTarget', () => {
     expect(isEditableTarget(document.createElement('div'))).toBe(false);
     expect(isEditableTarget(document.createElement('canvas'))).toBe(false);
     expect(isEditableTarget(null)).toBe(false);
+  });
+});
+
+describe('releaseSelectFocus', () => {
+  it('blurs a changed select so shortcuts work again', () => {
+    const select = document.createElement('select');
+    document.body.append(select);
+    select.focus();
+    expect(document.activeElement).toBe(select);
+
+    releaseSelectFocus(select);
+
+    expect(document.activeElement).not.toBe(select);
+    select.remove();
+  });
+
+  it('leaves other controls and null untouched', () => {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    document.body.append(checkbox);
+    checkbox.focus();
+
+    releaseSelectFocus(checkbox);
+    releaseSelectFocus(null);
+
+    expect(document.activeElement).toBe(checkbox);
+    checkbox.remove();
   });
 });
 
