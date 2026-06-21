@@ -1,6 +1,7 @@
 import {
   buildRoiLegend,
   filterRawTags,
+  isEditableTarget,
   loadingText,
   missingSliceWarning,
   nextCineIndex,
@@ -74,6 +75,28 @@ describe('nextCineIndex', () => {
 
   it('clamps an out-of-range index for a degenerate stack', () => {
     expect(nextCineIndex(5, 1, 1)).toBe(0);
+  });
+});
+
+describe('isEditableTarget', () => {
+  it('guards text inputs, selects, and textareas so typing wins over shortcuts', () => {
+    expect(isEditableTarget(document.createElement('input'))).toBe(true);
+    expect(isEditableTarget(document.createElement('select'))).toBe(true);
+    expect(isEditableTarget(document.createElement('textarea'))).toBe(true);
+  });
+
+  it('guards contenteditable hosts', () => {
+    // jsdom doesn't derive isContentEditable from the attribute, so stub the getter
+    // the real-browser code path reads.
+    const host = document.createElement('div');
+    Object.defineProperty(host, 'isContentEditable', { value: true });
+    expect(isEditableTarget(host)).toBe(true);
+  });
+
+  it('lets shortcuts through for non-editable targets and null', () => {
+    expect(isEditableTarget(document.createElement('div'))).toBe(false);
+    expect(isEditableTarget(document.createElement('canvas'))).toBe(false);
+    expect(isEditableTarget(null)).toBe(false);
   });
 });
 
