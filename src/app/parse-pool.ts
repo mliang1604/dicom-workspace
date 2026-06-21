@@ -22,6 +22,9 @@ function createWorker(): Worker {
   return new Worker(new URL('./parse.worker', import.meta.url), { type: 'module' });
 }
 
+/** Factory for the pool's workers; overridable so tests can inject a fake. */
+export type WorkerFactory = () => Worker;
+
 /**
  * Parse a batch of DICOM files off the main thread, keeping the UI responsive.
  *
@@ -38,6 +41,7 @@ function createWorker(): Worker {
 export async function parseFilesInWorkers(
   files: readonly File[],
   onProgress?: LoadProgress,
+  spawnWorker: WorkerFactory = createWorker,
 ): Promise<ParsedFiles> {
   const total = files.length;
   onProgress?.(0, total);
@@ -51,7 +55,7 @@ export async function parseFilesInWorkers(
 
   const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || MAX_WORKERS;
   const workerCount = Math.min(MAX_WORKERS, total, cores);
-  const workers = Array.from({ length: workerCount }, createWorker);
+  const workers = Array.from({ length: workerCount }, spawnWorker);
 
   /** Pull files off the shared queue until it's drained, parsing each in turn. */
   const runWorker = async (worker: Worker): Promise<void> => {
