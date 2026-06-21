@@ -614,16 +614,11 @@ const MIP_SETTLE_MS = 200;
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
-    '(window:keydown.x)': 'onSwapKey($event)',
-    '(window:keydown.f)': 'onFlipKey($event)',
-    '(window:keydown.c)': 'onCrosshairKey($event)',
-    '(window:keydown.p)': 'onCineKey($event)',
-    '(window:keydown.l)': 'onLayoutKey($event)',
-    '(window:keydown.i)': 'onInfoKey($event)',
     '(window:keydown.escape)': 'onEscapeKey($event)',
-    // The viewport controls and the help overlay key off characters (digits, '?')
-    // that Angular's per-key bindings don't parse cleanly, so route them through
-    // one handler that reads event.key itself.
+    // Every single-letter and viewport shortcut goes through one handler that reads
+    // event.key itself and case-folds it. Angular's per-key bindings (keydown.x)
+    // match event.key exactly, so Shift / Caps Lock (reported as 'X') would silently
+    // miss; and they'd need a separate focus guard from the digit/'?' shortcuts.
     '(window:keydown)': 'onShortcutKey($event)',
   },
 })
@@ -2486,12 +2481,6 @@ export class Viewer {
     });
   }
 
-  protected onLayoutKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
-    event.preventDefault();
-    this.cycleLayout();
-  }
-
   protected swapMain(): void {
     this.stopCine(); // swapping reshuffles the panes, so stop the cined one
     this.mainOrientation.update((current) => {
@@ -2504,26 +2493,8 @@ export class Viewer {
     this.sagittalFlipped.update((flipped) => !flipped);
   }
 
-  protected onSwapKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
-    event.preventDefault();
-    this.swapMain();
-  }
-
-  protected onFlipKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
-    event.preventDefault();
-    this.toggleSagittalFlip();
-  }
-
   protected toggleCrosshairs(): void {
     this.crosshairsEnabled.update((enabled) => !enabled);
-  }
-
-  protected onCrosshairKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
-    event.preventDefault();
-    this.toggleCrosshairs();
   }
 
   /**
@@ -2711,32 +2682,55 @@ export class Viewer {
   }
 
   /**
-   * Viewport-control and help shortcuts that key off raw characters: fit (0),
-   * native 1:1 (1), reset (R), invert (V), and the help overlay (?). Routed
-   * through one handler because Angular's per-key host bindings don't parse the
-   * digit and '?' keys cleanly. Ignored while typing in a field.
+   * The single code path for every keyboard shortcut bar Escape: the single-letter
+   * actions (swap x, flip f, crosshair c, cine p, layout l, info i, reset r, invert
+   * v), the viewport controls (fit 0, native 1:1 1), and the help overlay (?).
+   *
+   * Reads {@link KeyboardEvent.key} and case-folds it so Shift / Caps Lock (which
+   * report 'X', 'R', …) still match, and applies one {@link isEditableTarget} focus
+   * guard so every shortcut is suppressed uniformly while typing in a field.
    */
   protected onShortcutKey(event: KeyboardEvent): void {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
-      return;
-    }
-    if (event.key === '?') {
-      if (!this.isReady()) return;
-      event.preventDefault();
-      this.toggleHelp();
-      return;
-    }
-    if (!this.isReady()) return;
-    switch (event.key) {
+    if (isEditableTarget(event.target) || !this.isReady()) return;
+    // Case-fold single characters; '?', '0', '1' are unaffected by toLowerCase().
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    switch (key) {
+      case 'x':
+        event.preventDefault();
+        this.swapMain();
+        break;
+      case 'f':
+        event.preventDefault();
+        this.toggleSagittalFlip();
+        break;
+      case 'c':
+        event.preventDefault();
+        this.toggleCrosshairs();
+        break;
+      case 'p':
+        if (!this.hasMprPane()) return;
+        event.preventDefault();
+        this.toggleCine();
+        break;
+      case 'l':
+        event.preventDefault();
+        this.cycleLayout();
+        break;
+      case 'i':
+        event.preventDefault();
+        this.toggleInfoPanel();
+        break;
       case 'r':
-      case 'R':
         event.preventDefault();
         this.resetView();
         break;
       case 'v':
-      case 'V':
         event.preventDefault();
         this.toggleInvert();
+        break;
+      case '?':
+        event.preventDefault();
+        this.toggleHelp();
         break;
       case '0':
         if (!this.hasMprPane()) return;
@@ -2760,12 +2754,6 @@ export class Viewer {
   protected toggleCine(): void {
     if (this.cinePlaying()) this.stopCine();
     else this.startCine();
-  }
-
-  protected onCineKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady() || !this.hasMprPane()) return;
-    event.preventDefault();
-    this.toggleCine();
   }
 
   /** Change the cine speed; re-arm the running timer so the new fps takes effect at once. */
@@ -2824,12 +2812,6 @@ export class Viewer {
   /** Open/close the metadata & raw-tag inspector panel. */
   protected toggleInfoPanel(): void {
     this.infoPanelOpen.update((open) => !open);
-  }
-
-  protected onInfoKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement || !this.isReady()) return;
-    event.preventDefault();
-    this.toggleInfoPanel();
   }
 
   protected onRawTagFilterInput(event: Event): void {
@@ -2925,7 +2907,7 @@ export class Viewer {
    * press peels off one layer.
    */
   protected onEscapeKey(event: Event): void {
-    if (event.target instanceof HTMLInputElement) return;
+    if (isEditableTarget(event.target)) return;
     if (this.helpOpen()) {
       this.helpOpen.set(false);
       return;
@@ -4124,6 +4106,20 @@ function downloadBlob(blob: Blob, filename: string): void {
 function hasFiles(event: DragEvent): boolean {
   const types = event.dataTransfer?.types;
   return types ? Array.from(types).includes('Files') : false;
+}
+
+/**
+ * Whether a key event originates from a control where typing should win over the
+ * viewer's shortcuts: text inputs, selects, textareas, and contenteditable hosts.
+ * Used as the one focus guard shared by every keyboard handler.
+ */
+export function isEditableTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLSelectElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable === true)
+  );
 }
 
 /** Whether CSS-pixel point (x, y) lies within a rectangle. */
