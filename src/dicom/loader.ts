@@ -91,6 +91,13 @@ interface FileContext {
   readonly seriesNumber: number | null;
   readonly seriesDescription: string | null;
   readonly frameOfReferenceUid: string | null;
+  readonly studyUid: string | null;
+  /** StudyDate/StudyTime/PatientName kept raw (DICOM DA/TM/PN); formatting is a UI concern. */
+  readonly studyDate: string | null;
+  readonly studyTime: string | null;
+  readonly studyDescription: string | null;
+  readonly patientId: string | null;
+  readonly patientName: string | null;
   readonly modality: string | null;
   /** True for an RT Dose object, decoded as a Gy-scaled grid rather than an image. */
   readonly isDose: boolean;
@@ -220,6 +227,12 @@ function setupFile(name: string, buffer: ArrayBuffer): FileSetup | null {
     seriesNumber: intOrNull(dataSet, 'x00200011'), // SeriesNumber
     seriesDescription: dataSet.string('x0008103e')?.trim() || null, // SeriesDescription
     frameOfReferenceUid: dataSet.string('x00200052')?.trim() || null, // FrameOfReferenceUID
+    studyUid: dataSet.string('x0020000d')?.trim() || null, // StudyInstanceUID
+    studyDate: dataSet.string('x00080020')?.trim() || null, // StudyDate (raw DA)
+    studyTime: dataSet.string('x00080030')?.trim() || null, // StudyTime (raw TM)
+    studyDescription: dataSet.string('x00081030')?.trim() || null, // StudyDescription
+    patientId: dataSet.string('x00100020')?.trim() || null, // PatientID
+    patientName: dataSet.string('x00100010')?.trim() || null, // PatientName (raw PN)
     modality,
     isDose,
     pixelElement,
@@ -291,6 +304,12 @@ function parseDose(ctx: FileContext, frames: number): Slice[] {
       seriesNumber: ctx.seriesNumber,
       seriesDescription: ctx.seriesDescription,
       frameOfReferenceUid: ctx.frameOfReferenceUid,
+      studyUid: ctx.studyUid,
+      studyDate: ctx.studyDate,
+      studyTime: ctx.studyTime,
+      studyDescription: ctx.studyDescription,
+      patientId: ctx.patientId,
+      patientName: ctx.patientName,
       // Canonical modality so the unit lookup yields Gy even for a SOP-class-detected
       // (or non-canonically-cased) dose object.
       modality: 'RTDOSE',
@@ -385,6 +404,12 @@ function parseSingleFrame(ctx: FileContext, raw: FramePixels): Slice {
     seriesNumber: ctx.seriesNumber,
     seriesDescription: ctx.seriesDescription,
     frameOfReferenceUid: ctx.frameOfReferenceUid,
+    studyUid: ctx.studyUid,
+    studyDate: ctx.studyDate,
+    studyTime: ctx.studyTime,
+    studyDescription: ctx.studyDescription,
+    patientId: ctx.patientId,
+    patientName: ctx.patientName,
     modality: ctx.modality,
     rescaleSlope: m.slope,
     rescaleIntercept: m.intercept,
@@ -436,6 +461,12 @@ function parseMultiframe(ctx: FileContext, frames: number, raw: FramePixels[]): 
       seriesNumber: ctx.seriesNumber,
       seriesDescription: ctx.seriesDescription,
       frameOfReferenceUid: ctx.frameOfReferenceUid,
+      studyUid: ctx.studyUid,
+      studyDate: ctx.studyDate,
+      studyTime: ctx.studyTime,
+      studyDescription: ctx.studyDescription,
+      patientId: ctx.patientId,
+      patientName: ctx.patientName,
       modality: ctx.modality,
       rescaleSlope: m.slope,
       rescaleIntercept: m.intercept,

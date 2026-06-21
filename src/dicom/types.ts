@@ -18,6 +18,28 @@ export interface Slice {
   readonly instanceNumber: number;
   /** SeriesInstanceUID, Tag (0020,000E). Groups slices into a series; null if absent. */
   readonly seriesUid: string | null;
+  /** StudyInstanceUID, Tag (0020,000D). Groups series into a study; null if absent. */
+  readonly studyUid: string | null;
+  /**
+   * StudyDate, Tag (0008,0020). Kept raw (DICOM `DA`, `YYYYMMDD`); formatting is a
+   * UI concern. Null if absent.
+   */
+  readonly studyDate: string | null;
+  /**
+   * StudyTime, Tag (0008,0030). Kept raw (DICOM `TM`); formatting is a UI concern.
+   * Null if absent.
+   */
+  readonly studyTime: string | null;
+  /** StudyDescription, Tag (0008,1030). Labels the study; null if absent. */
+  readonly studyDescription: string | null;
+  /** PatientID, Tag (0010,0020). Identifies the patient; null if absent. */
+  readonly patientId: string | null;
+  /**
+   * PatientName, Tag (0010,0010). Kept raw (DICOM `PN`,
+   * `Family^Given^Middle^Prefix^Suffix`); formatting is a UI concern. Null if
+   * absent.
+   */
+  readonly patientName: string | null;
   /**
    * FrameOfReferenceUID, Tag (0020,0052). The spatial frame the patient
    * coordinates live in; an RTSTRUCT is associated to a series by matching this.

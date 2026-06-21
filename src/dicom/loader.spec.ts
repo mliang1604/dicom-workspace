@@ -171,8 +171,14 @@ function dicomFile(dataSetBody: Uint8Array, transferSyntax = EXPLICIT_VR_LE): Ar
 /** A classic single-frame CT, 2×2, with top-level geometry. */
 function singleFrameCt(): ArrayBuffer {
   const body = concat([
+    element(0x0008, 0x0020, 'DA', text('20240115')), // StudyDate
+    element(0x0008, 0x0030, 'TM', text('143000')), // StudyTime
     element(0x0008, 0x0060, 'CS', text('CT')), // Modality
+    element(0x0008, 0x1030, 'LO', text('Chest Study')), // StudyDescription
     element(0x0008, 0x103e, 'LO', text('Axial CT')), // SeriesDescription
+    element(0x0010, 0x0010, 'PN', text('Doe^John')), // PatientName
+    element(0x0010, 0x0020, 'LO', text('PID-42')), // PatientID
+    element(0x0020, 0x000d, 'UI', uid('1.2.3')), // StudyInstanceUID
     element(0x0020, 0x0011, 'IS', numbers([4])), // SeriesNumber
     element(0x0020, 0x0013, 'IS', numbers([7])), // InstanceNumber
     element(0x0020, 0x000e, 'UI', uid('1.2.3.4')), // SeriesInstanceUID
@@ -242,6 +248,8 @@ function multiframeMr(): ArrayBuffer {
 
   const body = concat([
     element(0x0008, 0x0060, 'CS', text('MR')), // Modality
+    element(0x0010, 0x0010, 'PN', text('Roe^Jane')), // PatientName
+    element(0x0020, 0x000d, 'UI', uid('1.2.mr.study')), // StudyInstanceUID
     element(0x0028, 0x0002, 'US', u16le(1)), // SamplesPerPixel
     element(0x0028, 0x0008, 'IS', numbers([3])), // NumberOfFrames
     element(0x0028, 0x0010, 'US', u16le(2)), // Rows
@@ -401,6 +409,13 @@ describe('parseFile — single frame', () => {
     expect(s.seriesUid).toBe('1.2.3.4');
     expect(s.seriesNumber).toBe(4);
     expect(s.seriesDescription).toBe('Axial CT');
+    // Study & patient identity, raw (PN/DA/TM unformatted — formatting is a UI concern).
+    expect(s.studyUid).toBe('1.2.3');
+    expect(s.studyDate).toBe('20240115');
+    expect(s.studyTime).toBe('143000');
+    expect(s.studyDescription).toBe('Chest Study');
+    expect(s.patientId).toBe('PID-42');
+    expect(s.patientName).toBe('Doe^John');
     expect(s.instanceNumber).toBe(7);
     expect(s.position).toEqual([10, 20, 30]);
     expect(s.orientation).toEqual([1, 0, 0, 0, 1, 0]);
@@ -444,6 +459,9 @@ describe('parseFile — multiframe', () => {
       expect(s.windowCenter).toBe(100);
       expect(s.windowWidth).toBe(200);
       expect(s.modality).toBe('MR');
+      // Study & patient identity carried onto every frame.
+      expect(s.studyUid).toBe('1.2.mr.study');
+      expect(s.patientName).toBe('Roe^Jane');
     }
   });
 
@@ -575,6 +593,8 @@ function rtDose(
   const body = concat([
     element(0x0008, 0x0060, 'CS', text(modality)), // Modality
     element(0x0008, 0x0016, 'UI', uid('1.2.840.10008.5.1.4.1.1.481.2')), // SOPClassUID (RT Dose)
+    element(0x0010, 0x0020, 'LO', text('PID-99')), // PatientID
+    element(0x0020, 0x000d, 'UI', uid('1.2.dose.study')), // StudyInstanceUID
     element(0x0020, 0x000e, 'UI', uid('1.2.dose')), // SeriesInstanceUID
     element(0x0020, 0x0052, 'UI', uid('1.2.frame')), // FrameOfReferenceUID
     element(0x0020, 0x0032, 'DS', numbers([10, 20, 30])), // ImagePositionPatient
@@ -610,6 +630,11 @@ describe('parseFile — RT Dose', () => {
     // GridFrameOffsetVector [0,5] places the frames 5 mm apart along +z.
     expect(slices[0].position).toEqual([10, 20, 30]);
     expect(slices[1].position).toEqual([10, 20, 35]);
+    // Study & patient identity threaded onto every dose plane.
+    for (const s of slices) {
+      expect(s.studyUid).toBe('1.2.dose.study');
+      expect(s.patientId).toBe('PID-99');
+    }
   });
 
   it('reads 32-bit dose PixelData', () => {
