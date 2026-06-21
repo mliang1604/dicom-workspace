@@ -99,6 +99,50 @@ export function groupPatients(series: readonly Series[]): PatientRecord[] {
   return patients.sort((a, b) => compareStrings(a.patientId, b.patientId));
 }
 
+/**
+ * A patient catalog keyed by PatientID — the accumulated, multi-patient
+ * hierarchy {@link addSeriesToCatalog} grows across imports. The empty string
+ * keys series that carry no PatientID, mirroring {@link groupPatients}.
+ */
+export type PatientCatalogMap = ReadonlyMap<string, PatientRecord>;
+
+/**
+ * Flatten a catalog back to the series it was grouped from, in patient → study →
+ * series order. The inverse of {@link groupPatients}: the hierarchy retains every
+ * series whole (slices included), so re-merging an import is lossless.
+ */
+export function catalogSeries(catalog: PatientCatalogMap): Series[] {
+  const series: Series[] = [];
+  for (const patient of catalog.values()) {
+    for (const study of patient.studies) series.push(...study.series);
+  }
+  return series;
+}
+
+/**
+ * Fold a freshly imported batch of `series` into the accumulated `catalog`,
+ * deduping by SeriesInstanceUID and rebuilding the patient → study → series
+ * hierarchy. A series already present (same UID) is kept as-is — the import
+ * doesn't drop or replace what's there — so re-picking a folder is idempotent.
+ *
+ * No {@link import('./volume').Volume} is built: each series' parsed slices are
+ * retained for an on-demand build at load time. Pure for unit testing the
+ * accumulation and dedup.
+ */
+export function addSeriesToCatalog(
+  catalog: PatientCatalogMap,
+  incoming: readonly Series[],
+): Map<string, PatientRecord> {
+  const merged = catalogSeries(catalog);
+  const seen = new Set(merged.map((s) => s.uid));
+  for (const s of incoming) {
+    if (seen.has(s.uid)) continue;
+    seen.add(s.uid);
+    merged.push(s);
+  }
+  return new Map(groupPatients(merged).map((p) => [p.patientId, p]));
+}
+
 /** The distinct, non-null modalities across a study's series, in encounter order. */
 function distinctModalities(series: readonly Series[]): string[] {
   const seen = new Set<string>();
