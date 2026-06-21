@@ -2072,6 +2072,10 @@ export class Viewer {
   private cineHandle: ReturnType<typeof setInterval> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
+  /** Handle of the in-flight rotation-capture animation frame, or null when idle. */
+  private captureHandle: number | null = null;
+  /** The active rotation-capture recorder, or null when not recording. */
+  private captureRecorder: MediaRecorder | null = null;
   /** Triangle centroids (3 floats each) for the visible ROI surface mesh, for depth sorting. */
   private surfaceCentroids: Float32Array | null = null;
   private surfaceTriangleCount = 0;
@@ -2194,8 +2198,16 @@ export class Viewer {
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
+      if (this.captureHandle !== null) cancelAnimationFrame(this.captureHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.cineHandle !== null) clearInterval(this.cineHandle);
+      if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
+      // Stop an in-flight rotation capture so its recorder/stream don't outlive us.
+      if (this.captureRecorder !== null && this.captureRecorder.state !== 'inactive') {
+        this.captureRecorder.stop();
+      }
+      // Free the renderer's GPU resources (uniform buffers, LUTs, volume textures).
+      this.renderer()?.dispose();
     });
   }
 
@@ -2682,6 +2694,7 @@ export class Viewer {
     const canvas = this.canvasRef().nativeElement;
     const stream = canvas.captureStream(ROTATION_FPS);
     const recorder = new MediaRecorder(stream, { mimeType });
+    this.captureRecorder = recorder;
     const chunks: Blob[] = [];
     const filename = this.captureName('rotation', 'webm');
     const startAzimuth = this.camera3d().azimuth;
@@ -2692,6 +2705,7 @@ export class Viewer {
     };
     recorder.onstop = () => {
       stream.getTracks().forEach((track) => track.stop());
+      this.captureRecorder = null;
       this.camera3d.update((camera) => ({ ...camera, azimuth: startAzimuth }));
       this.recordingRotation.set(false);
       if (chunks.length > 0) downloadBlob(new Blob(chunks, { type: mimeType }), filename);
@@ -2703,6 +2717,7 @@ export class Viewer {
     let frame = 0;
     const step = () => {
       if (frame >= azimuths.length) {
+        this.captureHandle = null;
         recorder.stop();
         return;
       }
@@ -2713,9 +2728,9 @@ export class Viewer {
         renderer.renderPanes(views);
       }
       frame++;
-      requestAnimationFrame(step);
+      this.captureHandle = requestAnimationFrame(step);
     };
-    requestAnimationFrame(step);
+    this.captureHandle = requestAnimationFrame(step);
   }
 
   /** The pane an export targets: the hovered pane, else the first (main) pane. */
@@ -4029,13 +4044,34 @@ export class Viewer {
 
   private async initGpu(): Promise<void> {
     const canvas = this.canvasRef().nativeElement;
+    // Free any prior renderer's GPU resources before rebuilding (e.g. a retry
+    // after a device loss) so a re-init doesn't leak the old buffers/textures.
+    this.renderer()?.dispose();
+    this.renderer.set(null);
     try {
-      this.gpu = await initWebGpu(canvas);
+      this.gpu = await initWebGpu(canvas, {
+        onDeviceLost: (info) => this.onDeviceLost(info),
+        onUncapturedError: (error) => console.error('WebGPU error:', error.message),
+      });
       this.renderer.set(new SliceRenderer(this.gpu));
+      this.gpuError.set(null); // a successful (re)init clears any prior GPU error
       this.observeResize(canvas);
     } catch (error) {
       this.gpuError.set(messageOf(error));
     }
+  }
+
+  /**
+   * Surface a runtime device loss as a recoverable error rather than letting the
+   * canvas silently stop updating. The lost device and its renderer are dead, so
+   * drop them; {@link statusIsError} then shows the message (a reload re-runs
+   * {@link initGpu} and rebuilds the GPU stack).
+   */
+  private onDeviceLost(info: GPUDeviceLostInfo): void {
+    this.gpu = null;
+    this.renderer.set(null);
+    const reason = info.message ? ` (${info.message})` : '';
+    this.gpuError.set(`The GPU device was lost${reason}. Reload the page to continue.`);
   }
 
   private async loadFiles(
