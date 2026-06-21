@@ -62,3 +62,50 @@ app-root {
   display: block;
   height: 100%;
 }
+
+/* Range sliders, themed app-wide. The native control insets the thumb within a
+   padded track, so the knob never reaches the ends — it stops short of the left at
+   the minimum and the right at the maximum. Restyling with appearance:none gives a
+   full-width track and a thumb that travels edge to edge, so the knob sits hard
+   left at min and hard right at max. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px; /* centre the 14px thumb on the 4px track */
+  border-radius: 50%;
+  background: var(--accent);
+}
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+input[type='range']:focus-visible {
+  outline: none;
+}
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--accent-ring);
+}
+input[type='range']:focus-visible::-moz-range-thumb {
+  box-shadow: var(--accent-ring);
+}
