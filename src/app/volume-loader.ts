@@ -178,6 +178,15 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
     return { result: incoming, added: false };
   }
 
+  // Re-loading the series that's already the base would stack the image on top of
+  // itself — the "double CT in overlays" of issue #160 (e.g. re-picking the same
+  // study from Recent, which re-opens the picker for the same folder). Replace
+  // with the freshly built registry instead, so the study — and any same-frame
+  // dose it auto-promotes to an overlay — shows exactly once rather than twice.
+  if (baseLayer(current.layers)?.id === incoming.selectedUid) {
+    return { result: incoming, added: false };
+  }
+
   const overlay = overlayImageLayer(
     uniqueLayerId(current.layers, incoming.selectedUid),
     overlayVolume,
