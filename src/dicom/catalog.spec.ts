@@ -1,4 +1,4 @@
-import { groupPatients, groupStudies } from './catalog';
+import { addSeriesToCatalog, catalogSeries, groupPatients, groupStudies } from './catalog';
 import type { Series } from './series';
 
 /** A minimal series carrying just the study/patient-grouping fields under test. */
@@ -142,5 +142,61 @@ describe('groupPatients', () => {
 
   it('returns an empty list for no series', () => {
     expect(groupPatients([])).toEqual([]);
+  });
+});
+
+describe('addSeriesToCatalog', () => {
+  it('merges series across imports into one keyed-by-PatientID hierarchy', () => {
+    const first = addSeriesToCatalog(new Map(), [series('s1', { uid: 'a', patientId: 'p1' })]);
+    const second = addSeriesToCatalog(first, [series('s1', { uid: 'b', patientId: 'p1' })]);
+
+    expect([...second.keys()]).toEqual(['p1']);
+    expect(catalogSeries(second).map((s) => s.uid)).toEqual(['a', 'b']);
+  });
+
+  it('dedups by SeriesInstanceUID, keeping the series already present', () => {
+    const original = series('s1', { uid: 'a', patientId: 'p1' });
+    const first = addSeriesToCatalog(new Map(), [original]);
+    const second = addSeriesToCatalog(first, [
+      series('s1', { uid: 'a', patientId: 'p1', description: 're-import' }),
+      series('s1', { uid: 'b', patientId: 'p1' }),
+    ]);
+
+    const merged = catalogSeries(second);
+    expect(merged.map((s) => s.uid)).toEqual(['a', 'b']);
+    expect(merged.find((s) => s.uid === 'a')).toBe(original);
+  });
+
+  it('keeps distinct patients across imports', () => {
+    const first = addSeriesToCatalog(new Map(), [series('s1', { uid: 'a', patientId: 'p1' })]);
+    const second = addSeriesToCatalog(first, [series('s1', { uid: 'b', patientId: 'p2' })]);
+
+    expect([...second.keys()]).toEqual(['p1', 'p2']);
+  });
+
+  it('does not mutate the input catalog', () => {
+    const first = addSeriesToCatalog(new Map(), [series('s1', { uid: 'a', patientId: 'p1' })]);
+    addSeriesToCatalog(first, [series('s1', { uid: 'b', patientId: 'p1' })]);
+
+    expect(catalogSeries(first).map((s) => s.uid)).toEqual(['a']);
+  });
+});
+
+describe('catalogSeries', () => {
+  it('flattens a catalog back to its series, the inverse of grouping', () => {
+    const catalog = addSeriesToCatalog(new Map(), [
+      series('s1', { uid: 'a', patientId: 'p1' }),
+      series('s2', { uid: 'b', patientId: 'p1' }),
+    ]);
+
+    expect(
+      catalogSeries(catalog)
+        .map((s) => s.uid)
+        .sort(),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('is empty for an empty catalog', () => {
+    expect(catalogSeries(new Map())).toEqual([]);
   });
 });
