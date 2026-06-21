@@ -12,11 +12,13 @@ import {
 } from '@angular/core';
 import { initWebGpu, type GpuContext } from '../../render/device';
 import {
+  blendBarPlacement,
   LayoutMode,
   mprLayout,
   scaleRect,
   singleLayout,
   triLayout,
+  type BlendBar,
   type PaneRect,
   type Vec2,
 } from '../../render/layout';
@@ -101,6 +103,7 @@ import {
 } from '../../render/contours';
 import {
   baseLayer,
+  DEFAULT_OVERLAY_OPACITY,
   modalityUnit,
   Orientation,
   type Layer,
@@ -1585,6 +1588,30 @@ export class Viewer {
     () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
   );
 
+  /** Composite opacity of the active overlay, driven by the in-pane blend bar. */
+  protected readonly blendOpacity = signal(DEFAULT_OVERLAY_OPACITY);
+
+  /** Blend opacity as a 0..100 percentage, for the range input and its readout. */
+  protected readonly blendPercent = computed(() => Math.round(this.blendOpacity() * 100));
+
+  /**
+   * Placement of the in-pane blend bar over the largest MPR pane, or null when no
+   * fusion overlay is active (so the bar is hidden) or no MPR pane can host it.
+   */
+  protected readonly blendBar = computed<BlendBar | null>(() => {
+    if (!this.selectedOverlay()) return null;
+    const mprRects = this.panes()
+      .filter((pane) => pane.kind === 'mpr')
+      .map((pane) => pane.rect);
+    return blendBarPlacement(mprRects);
+  });
+
+  /** Drag/keyboard the blend bar: set the overlay opacity from its 0..100 value. */
+  protected onBlendInput(event: Event): void {
+    const value = Number((event.target as HTMLInputElement).value);
+    this.blendOpacity.set(Math.min(1, Math.max(0, value / 100)));
+  }
+
   /**
    * The volume's full depth (mm): the upper bound and default for the slab
    * thickness control, at which the slab covers the whole volume.
@@ -1721,8 +1748,10 @@ export class Viewer {
     effect(() => {
       const renderer = this.renderer();
       const overlay = this.selectedOverlay();
-      if (renderer)
-        renderer.setOverlay(overlay?.volume ?? null, overlay?.opacity ?? 0, overlay?.display);
+      // The in-pane blend bar drives the opacity (not the layer's stored default),
+      // so dragging it re-runs setOverlay and redraws.
+      const opacity = overlay ? this.blendOpacity() : 0;
+      if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
       this.scheduleFrame();
     });
 

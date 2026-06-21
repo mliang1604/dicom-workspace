@@ -1,4 +1,30 @@
-import { MAIN_WIDTH_FRACTION, mprLayout, scaleRect, singleLayout, triLayout } from './layout';
+import {
+  blendBarPlacement,
+  MAIN_WIDTH_FRACTION,
+  mprLayout,
+  scaleRect,
+  singleLayout,
+  triLayout,
+} from './layout';
+
+describe('blendBarPlacement', () => {
+  it('centres a bar near the bottom of the largest MPR pane', () => {
+    const small = { x: 0, y: 0, width: 100, height: 200 };
+    const large = { x: 200, y: 0, width: 600, height: 400 };
+    const bar = blendBarPlacement([small, large]);
+
+    expect(bar).not.toBeNull();
+    const width = Math.min(260, Math.round(600 * 0.6)); // 260
+    expect(bar!.width).toBe(width);
+    expect(bar!.x).toBe(Math.round(200 + (600 - width) / 2)); // centred in the large pane
+    expect(bar!.y).toBe(0 + 400 - 30); // near its bottom
+  });
+
+  it('returns null when there is no pane or the host is too small', () => {
+    expect(blendBarPlacement([])).toBeNull();
+    expect(blendBarPlacement([{ x: 0, y: 0, width: 100, height: 60 }])).toBeNull();
+  });
+});
 
 describe('mprLayout', () => {
   it('splits the area into four equal cells', () => {
