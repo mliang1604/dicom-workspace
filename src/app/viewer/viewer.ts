@@ -1588,8 +1588,19 @@ export class Viewer {
     () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
   );
 
+  /** Whether a fusion overlay is active (drives the blend bar + checkerboard toggle). */
+  protected readonly hasOverlay = computed(() => this.selectedOverlay() !== null);
+
   /** Composite opacity of the active overlay, driven by the in-pane blend bar. */
   protected readonly blendOpacity = signal(DEFAULT_OVERLAY_OPACITY);
+
+  /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
+  protected readonly checkerboardEnabled = signal(false);
+
+  /** Toggle checkerboard compositing of the fusion overlay. */
+  protected toggleCheckerboard(): void {
+    this.checkerboardEnabled.update((on) => !on);
+  }
 
   /** Blend opacity as a 0..100 percentage, for the range input and its readout. */
   protected readonly blendPercent = computed(() => Math.round(this.blendOpacity() * 100));
@@ -1752,6 +1763,14 @@ export class Viewer {
       // so dragging it re-runs setOverlay and redraws.
       const opacity = overlay ? this.blendOpacity() : 0;
       if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
+      this.scheduleFrame();
+    });
+
+    // Checkerboard vs. uniform-blend overlay compositing — a per-frame mode flag,
+    // no texture re-upload, so this is its own effect off the toggle.
+    effect(() => {
+      const renderer = this.renderer();
+      if (renderer) renderer.setOverlayCheckerboard(this.checkerboardEnabled());
       this.scheduleFrame();
     });
 

@@ -21,6 +21,10 @@ struct Params {
   slicePos : f32,           // normalized position along the slicing axis, 0..1
   flipX : u32,              // non-zero mirrors the in-plane horizontal axis
   invert : u32,             // non-zero inverts the windowed gray (display inversion)
+  // Filling the mat4x4-alignment padding before overlayToTex (floats 25..27):
+  overlayCheckerboard : u32, // non-zero: alternate base/overlay per checker cell
+  checkerSize : f32,         // checker cell size in framebuffer pixels
+  _pad0 : f32,
   // Fusion overlay: a second volume sharing the patient frame but its own grid.
   // overlayToTex maps the SAME pane (u, v, slicePos) into the overlay's texture
   // coords; the overlay is windowed and composited over the base by overlayOpacity
@@ -101,7 +105,14 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
       if (P.overlayColormap != 0u) {
         orgb = textureSampleLevel(overlayLut, volSamp, og, 0.0).rgb;
       }
-      rgb = mix(rgb, orgb, P.overlayOpacity);
+      // Checkerboard mode shows the overlay only in alternating cells (a
+      // registration QA tool); otherwise it's a uniform opacity blend.
+      var amount = P.overlayOpacity;
+      if (P.overlayCheckerboard != 0u) {
+        let cell = (floor(in.pos.x / P.checkerSize) + floor(in.pos.y / P.checkerSize)) % 2.0;
+        amount = amount * cell;
+      }
+      rgb = mix(rgb, orgb, amount);
     }
   }
   return vec4<f32>(rgb, 1.0);

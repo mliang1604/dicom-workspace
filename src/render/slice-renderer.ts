@@ -250,6 +250,8 @@ export type PaneView = MprPaneView | MipPaneView;
 const PARAMS_SIZE = 192;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
+/** Fusion checkerboard cell size, in framebuffer pixels. */
+const CHECKER_SIZE_PX = 24;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 const MIP_PARAMS_SIZE = 256;
@@ -336,6 +338,8 @@ export class SliceRenderer {
   private readonly overlayLut: GPUTexture;
   /** Whether the active overlay is colour-mapped through {@link overlayLut}. */
   private overlayColormap = false;
+  /** Whether the overlay is composited as a checkerboard (vs. a uniform blend). */
+  private overlayCheckerboard = false;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -605,6 +609,15 @@ export class SliceRenderer {
   }
 
   /**
+   * Toggle checkerboard compositing of the overlay (alternating base/overlay cells
+   * for registration QA) vs. a uniform opacity blend. A per-frame mode flag — no
+   * texture work — so the caller just redraws.
+   */
+  setOverlayCheckerboard(on: boolean): void {
+    this.overlayCheckerboard = on;
+  }
+
+  /**
    * Replace the ROI surface mesh (patient-space vertices: pos3 + normal3 + rgba4
    * per vertex). Uploaded once when the structures/visibility change, then drawn
    * each frame via {@link renderPanes}; pass an empty array to clear.
@@ -824,6 +837,8 @@ export class SliceRenderer {
             windowWidth: this.overlayVolume.windowWidth,
             opacity: this.overlayOpacity,
             colormap: this.overlayColormap,
+            checkerboard: this.overlayCheckerboard,
+            checkerSize: CHECKER_SIZE_PX,
           }
         : null;
 
@@ -862,6 +877,10 @@ export interface SliceParams {
     readonly opacity: number;
     /** Map the windowed overlay value through the colormap LUT (vs. grayscale). */
     readonly colormap: boolean;
+    /** Composite as a checkerboard (alternating cells) vs. a uniform blend. */
+    readonly checkerboard: boolean;
+    /** Checkerboard cell size in framebuffer pixels. */
+    readonly checkerSize: number;
   } | null;
 }
 
@@ -889,6 +908,9 @@ export function packSliceParams(p: SliceParams): ArrayBuffer {
   uints[MATRIX_FLOATS + 7] = p.flipX ? 1 : 0;
   uints[MATRIX_FLOATS + 8] = p.invert ? 1 : 0;
   if (p.overlay) {
+    // Checkerboard flag + cell size fill the mat4-alignment pad (floats 25, 26).
+    uints[MATRIX_FLOATS + 9] = p.overlay.checkerboard ? 1 : 0; // float 25 (u32)
+    floats[MATRIX_FLOATS + 10] = p.overlay.checkerSize; // float 26
     floats.set(p.overlay.matrix as ArrayLike<number>, OVERLAY_FLOATS); // overlayToTex, 28..43
     floats[OVERLAY_FLOATS + 16] = p.overlay.windowCenter; // float 44
     floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45

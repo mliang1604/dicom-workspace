@@ -194,6 +194,24 @@
       </div>
     </details>
 
+    @if (hasOverlay()) {
+      <details class="tool-group" open>
+        <summary class="tool-group-label">Fusion</summary>
+        <div class="tool-group-body">
+          <button
+            type="button"
+            (click)="toggleCheckerboard()"
+            [class.active]="checkerboardEnabled()"
+            [attr.aria-pressed]="checkerboardEnabled()"
+            [attr.data-checkerboard]="checkerboardEnabled()"
+            title="Show the overlay in alternating checkerboard cells (registration QA) instead of a blend"
+          >
+            Checkerboard ▦ {{ checkerboardEnabled() ? 'on' : 'off' }}
+          </button>
+        </div>
+      </details>
+    }
+
     <details
       class="tool-group"
       role="group"
