@@ -284,20 +284,23 @@
             Checkerboard ▦ {{ checkerboardEnabled() ? 'on' : 'off' }}
           </button>
           @if (checkerboardEnabled()) {
-            <label class="ctrl" title="Checkerboard cell size (px at 1× zoom); scales with zoom">
-              Cell
+            <label
+              class="ctrl"
+              title="Checkerboard density (cells across the image); scales with zoom"
+            >
+              Cells
               <input
                 type="range"
                 class="checker-size"
-                min="16"
-                max="96"
-                step="4"
-                [value]="checkerSize()"
-                (input)="onCheckerSizeInput($event)"
-                [attr.data-checker-size]="checkerSize()"
-                aria-label="Checkerboard cell size"
+                min="2"
+                max="20"
+                step="1"
+                [value]="checkerCells()"
+                (input)="onCheckerCellsInput($event)"
+                [attr.data-checker-size]="checkerCells()"
+                aria-label="Checkerboard density (cells across the image)"
               />
-              {{ checkerSize() }}px
+              {{ checkerCells() }}
             </label>
           }
         </div>
