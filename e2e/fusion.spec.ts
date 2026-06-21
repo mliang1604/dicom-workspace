@@ -57,6 +57,17 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   // The fusion blend bar is a composited-view control, hidden in Compare.
   await expect(blendBar).toHaveCount(0);
 
+  // #129: the Compare groups are linked by default; the toggle unlinks them so each
+  // column navigates on its own. Both states must re-render the two-texture path
+  // without error (group 1 re-reads its independent nav when unlinked).
+  const linkToggle = page.locator('button[data-linked]');
+  await expect(linkToggle).toHaveAttribute('data-linked', 'true');
+  await linkToggle.click();
+  await expect(linkToggle).toHaveAttribute('data-linked', 'false');
+  await expect(page.locator('.pane-overlay .pane')).toHaveCount(6);
+  await linkToggle.click();
+  await expect(linkToggle).toHaveAttribute('data-linked', 'true');
+
   // No Angular/render errors during the load + fusion + Compare interaction.
   expect(errors, errors.join('\n')).toEqual([]);
 });
