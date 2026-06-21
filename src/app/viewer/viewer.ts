@@ -124,7 +124,7 @@ import { add, cross, dot, length, normalize, scale, sub } from '../../dicom/vec3
 import { loftContours, type Triangle } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
-import { VolumeLoader, type LoadResult } from '../volume-loader';
+import { VolumeLoader, type LoadResult, type MergedLoad } from '../volume-loader';
 import { PatientCatalog } from '../patient-catalog';
 import { importKeepsOnePatient } from '../../dicom/catalog';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
@@ -134,6 +134,13 @@ import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } f
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
 import { SERIES_DND_MIME } from './history-panel/series-chip';
+
+/**
+ * What a viewport drop will do, selected by the modifier held while dropping: a
+ * plain drop loads as the primary series (smart-auto), ⌥/Alt forces a fusion
+ * overlay, and ⇧/Shift adds a side-by-side compare column. See {@link dropIntentOf}.
+ */
+export type DropIntent = 'primary' | 'overlay' | 'compare';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -611,6 +618,9 @@ const MEASURE_LABEL_OFFSET = 8;
  */
 const MIP_SETTLE_MS = 200;
 
+/** How long a transient drop notice stays up before it auto-clears. */
+const NOTICE_MS = 3600;
+
 @Component({
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -922,6 +932,21 @@ export class Viewer {
   protected readonly hoveredKey = signal<string | null>(null);
   /** True while files are being dragged over the viewport, for the drop overlay. */
   protected readonly isDraggingFiles = signal(false);
+  /**
+   * What releasing the current drag will do, from the modifier held over the
+   * viewport (⌥ fuse / ⇧ compare / plain primary). Tracked live off `dragover` so
+   * the drop overlay's hint follows the key as it's pressed or released mid-drag.
+   */
+  protected readonly dropIntent = signal<DropIntent>('primary');
+  /** The drop-overlay headline for the modifier currently held (see {@link dropIntent}). */
+  protected readonly dropHeadline = computed(() => dropHeadlineText(this.dropIntent()));
+  /**
+   * A transient status notice shown over the viewport — e.g. a ⌥/⇧ drop that
+   * couldn't fuse — auto-cleared after {@link NOTICE_MS}. Null when none is up.
+   */
+  protected readonly notice = signal<string | null>(null);
+  /** Pending auto-clear of {@link notice}, so a fresh notice cancels the previous. */
+  private noticeHandle: ReturnType<typeof setTimeout> | null = null;
   /** The recent loads, most recent first, surfaced for the toolbar re-pick list. */
   protected readonly recent = this.recentStore.entries;
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
@@ -3218,6 +3243,7 @@ export class Viewer {
   protected onDragEnter(event: DragEvent): void {
     if (!isLoadableDrag(event)) return;
     this.dragDepth++;
+    this.dropIntent.set(dropIntentOf(event));
     this.isDraggingFiles.set(true);
   }
 
@@ -3225,6 +3251,9 @@ export class Viewer {
   protected onDragOver(event: DragEvent): void {
     if (!isLoadableDrag(event)) return;
     event.preventDefault();
+    // `dragover` fires continuously with the live modifier state, so the overlay
+    // hint follows ⌥/⇧ as they're pressed or released without moving the pointer.
+    this.dropIntent.set(dropIntentOf(event));
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
   }
 
@@ -3232,27 +3261,34 @@ export class Viewer {
   protected onDragLeave(event: DragEvent): void {
     if (!isLoadableDrag(event)) return;
     this.dragDepth = Math.max(0, this.dragDepth - 1);
-    if (this.dragDepth === 0) this.isDraggingFiles.set(false);
+    if (this.dragDepth === 0) {
+      this.isDraggingFiles.set(false);
+      this.dropIntent.set('primary');
+    }
   }
 
   /**
-   * Handle a drop on the viewport: a history-panel series chip (its UID payload)
-   * loads that retained series through the smart-auto path; otherwise the dropped
-   * folder/files are read, walking dropped directories for their slices.
+   * Handle a drop on the viewport: the modifier held selects the {@link DropIntent}
+   * (⌥ fuse / ⇧ compare / plain primary). A history-panel series chip (its UID
+   * payload) loads that retained series; otherwise the dropped folder/files are
+   * read, walking dropped directories for their slices. Both route through the
+   * smart-auto merge, with ⌥/⇧ forcing the overlay/compare path.
    */
   protected async onDrop(event: DragEvent): Promise<void> {
     event.preventDefault();
     this.dragDepth = 0;
     this.isDraggingFiles.set(false);
+    this.dropIntent.set('primary');
     if (!event.dataTransfer) return;
+    const intent = dropIntentOf(event);
     const seriesUid = event.dataTransfer.getData(SERIES_DND_MIME);
     if (seriesUid) {
       const series = this.catalog.seriesByUid(seriesUid);
-      if (series) this.loadSeriesFromPanel(series);
+      if (series) this.loadSeriesFromPanel(series, intent);
       return;
     }
     const { files, entry } = await readDropped(event.dataTransfer);
-    if (files.length > 0) await this.loadFiles(files, entry);
+    if (files.length > 0) await this.loadFiles(files, entry, intent);
   }
 
   /**
@@ -3262,12 +3298,16 @@ export class Viewer {
    * smart-auto {@link VolumeLoader.merge} rule as a file load: a series sharing
    * the current base's frame of reference fuses as an overlay, a different study
    * replaces. A series already composited (base or overlay) is a no-op, so a
-   * second click neither resets the view nor stacks a duplicate.
+   * second click neither resets the view nor stacks a duplicate — except ⇧, which
+   * still opens the side-by-side compare columns for the already-fused series. The
+   * {@link intent} (set by the held modifier on a drop) routes ⌥ through the fusion
+   * overlay and ⇧ through the compare layout; clicks/keys default to primary.
    */
-  protected loadSeriesFromPanel(series: Series): void {
+  protected loadSeriesFromPanel(series: Series, intent: DropIntent = 'primary'): void {
     if (!this.renderer()) return; // GPU not ready; nothing to draw into yet
     const previous = this.load();
     if (previous.status === 'ready' && previous.result.layers.some((l) => l.id === series.uid)) {
+      if (intent === 'compare') this.layoutMode.set(LayoutMode.Compare);
       return;
     }
     let incoming: LoadResult;
@@ -3282,8 +3322,41 @@ export class Viewer {
       previous.status === 'ready'
         ? this.loader.merge(previous.result, incoming)
         : { result: incoming, added: false };
-    if (merged.added) this.addLayer(merged.result);
-    else this.applyVolume(merged.result);
+    this.applyMerged(merged, intent);
+  }
+
+  /**
+   * Apply a smart-auto {@link MergedLoad} honouring the drop {@link DropIntent}. A
+   * plain (primary) drop takes the merge as-is — fuse a same-frame series as an
+   * overlay, else replace the view. A held modifier instead forces the overlay
+   * path: ⌥ and ⇧ proceed only when the series actually fused ({@link
+   * MergedLoad.added}), with ⇧ also switching to the side-by-side Compare layout;
+   * a series that can't fuse degrades to a graceful no-op with a flashed notice.
+   * Returns whether an overlay layer was added (for the recent-list overlay flag).
+   */
+  private applyMerged(merged: MergedLoad, intent: DropIntent): boolean {
+    if (intent === 'primary') {
+      if (merged.added) this.addLayer(merged.result);
+      else this.applyVolume(merged.result);
+      return merged.added;
+    }
+    if (!merged.added) {
+      this.flashNotice(cantFuseMessage(intent));
+      return false;
+    }
+    this.addLayer(merged.result);
+    if (intent === 'compare') this.layoutMode.set(LayoutMode.Compare);
+    return true;
+  }
+
+  /** Flash a transient notice over the viewport, replacing any still showing. */
+  private flashNotice(message: string): void {
+    this.notice.set(message);
+    if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
+    this.noticeHandle = setTimeout(() => {
+      this.notice.set(null);
+      this.noticeHandle = null;
+    }, NOTICE_MS);
   }
 
   /**
@@ -3931,7 +4004,11 @@ export class Viewer {
     }
   }
 
-  private async loadFiles(files: readonly File[], entry: RecentEntry | null): Promise<void> {
+  private async loadFiles(
+    files: readonly File[],
+    entry: RecentEntry | null,
+    intent: DropIntent = 'primary',
+  ): Promise<void> {
     // The load already showing; a same-frame-of-reference series adds atop it.
     const previous = this.load();
     this.load.set({ status: 'loading', loaded: 0, total: files.length });
@@ -3940,6 +4017,26 @@ export class Viewer {
         // Ignore stragglers from a superseded load (a new load already started).
         if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
       });
+      // A held modifier (⌥ fuse / ⇧ compare) forces the fusion overlay path, which
+      // only applies to a same-patient, same-frame series of what's already shown.
+      // A different patient or study can't fuse, so it's a graceful no-op with
+      // feedback — and never prompts the patient-switch confirm a plain load would.
+      if (intent !== 'primary') {
+        const samePatient = importKeepsOnePatient(this.catalog.currentPatientId(), result.series);
+        const merged =
+          previous.status === 'ready' && samePatient
+            ? this.loader.merge(previous.result, result)
+            : { result, added: false };
+        if (!merged.added) {
+          this.load.set(previous);
+          this.flashNotice(cantFuseMessage(intent));
+          return;
+        }
+        this.catalog.add(result.series);
+        this.applyMerged(merged, intent);
+        if (entry) this.recentStore.record({ ...entry, overlay: true });
+        return;
+      }
       // One-patient guard: every parsed series is folded into the patient catalog,
       // but only after making sure the import doesn't silently mix patients. A batch
       // with a different (or several) PatientID prompts to switch — clearing the
@@ -4207,6 +4304,43 @@ function hasSeriesDrag(event: DragEvent): boolean {
 /** Whether a drag is something the viewport can load: dropped files or a series chip. */
 function isLoadableDrag(event: DragEvent): boolean {
   return hasFiles(event) || hasSeriesDrag(event);
+}
+
+/**
+ * The {@link DropIntent} a held modifier selects: ⌥/Alt forces a fusion overlay,
+ * ⇧/Shift adds a side-by-side compare column, and a plain drop loads as the
+ * primary series (smart-auto). Alt wins when both are held. Pure for unit testing.
+ */
+export function dropIntentOf(modifiers: { altKey: boolean; shiftKey: boolean }): DropIntent {
+  if (modifiers.altKey) return 'overlay';
+  if (modifiers.shiftKey) return 'compare';
+  return 'primary';
+}
+
+/** Drop-overlay headline reflecting what the held modifier will do on release. */
+export function dropHeadlineText(intent: DropIntent): string {
+  switch (intent) {
+    case 'overlay':
+      return 'Drop to fuse as an overlay';
+    case 'compare':
+      return 'Drop to add a compare column';
+    case 'primary':
+      return 'Drop to load as primary';
+    default: {
+      const exhaustive: never = intent;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Feedback when a held-modifier drop can't apply: ⌥ fuse and ⇧ compare both need a
+ * series sharing the current scan's frame of reference, so a different study (or
+ * nothing loaded to fuse against) degrades to this notice instead of replacing.
+ */
+export function cantFuseMessage(intent: 'overlay' | 'compare'): string {
+  const action = intent === 'overlay' ? 'fuse' : 'compare';
+  return `Can’t ${action}: drop a series that shares the current scan’s frame of reference.`;
 }
 
 /**

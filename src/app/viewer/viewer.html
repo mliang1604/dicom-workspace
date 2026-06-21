@@ -1162,8 +1162,19 @@
 
     @if (isDraggingFiles()) {
       <div class="drop-overlay" role="status">
-        <div class="drop-message">Drop a DICOM folder or files to load</div>
+        <div class="drop-message">
+          <div class="drop-headline">{{ dropHeadline() }}</div>
+          <div class="drop-modifiers">
+            <span class="drop-mod" [class.active]="dropIntent() === 'primary'">Drop · primary</span>
+            <span class="drop-mod" [class.active]="dropIntent() === 'overlay'">⌥ fuse overlay</span>
+            <span class="drop-mod" [class.active]="dropIntent() === 'compare'">⇧ compare</span>
+          </div>
+        </div>
       </div>
+    }
+
+    @if (notice(); as notice) {
+      <div class="notice" role="status">{{ notice }}</div>
     }
   </main>
 </div>

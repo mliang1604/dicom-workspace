@@ -649,8 +649,10 @@ button.active {
   stroke-width: 3px;
 }
 
-/* Missing-slice interpolation warning, centred along the top of the viewport. */
-.warning {
+/* Top-centred amber pill: the missing-slice interpolation warning and the
+   transient drop notice (e.g. a ⌥/⇧ drop that couldn't fuse) share its styling. */
+.warning,
+.notice {
   position: absolute;
   top: 10px;
   left: 50%;
@@ -728,15 +730,38 @@ button.active {
   pointer-events: none;
 }
 
-.drop-message {
-  padding: 10px 18px;
+/* The glass pills floating over the viewport: the drop hint and the live voxel
+   readout share one frosted card; each adds its own layout below. */
+.drop-message,
+.probe {
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-pill);
   box-shadow: var(--shadow-sm);
   color: var(--text);
+}
+
+.drop-message {
+  padding: 12px 20px;
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+/* The modifier legend under the headline: Drop / ⌥ fuse / ⇧ compare, with the one
+   the held key selects accented so the hint tracks the active modifier. The
+   smaller, muted text sets it below the headline above. */
+.drop-modifiers {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.drop-mod.active {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 /* Live voxel readout, anchored opposite the status line. */
@@ -745,13 +770,7 @@ button.active {
   right: 12px;
   bottom: 12px;
   padding: 6px 10px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
-  color: var(--text);
   pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
@@ -911,7 +930,8 @@ button.active {
     background: var(--panel);
   }
 
-  .warning {
+  .warning,
+  .notice {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: rgba(60, 42, 8, 0.95);
