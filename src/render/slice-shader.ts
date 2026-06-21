@@ -119,12 +119,14 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
         orgb = lut.rgb;
         oalpha = lut.a;
       }
-      // Checkerboard mode shows the overlay only in alternating cells (a
-      // registration QA tool); otherwise it's a uniform opacity blend.
+      // Checkerboard mode (a registration QA tool) shows whole cells from one
+      // image or the other, never a blend: overlay cells show the overlay at full
+      // strength and base cells show the base, ignoring overlayOpacity. Otherwise
+      // it's a uniform opacity blend.
       var amount = P.overlayOpacity * oalpha;
       if (P.overlayCheckerboard != 0u) {
         let cell = (floor(in.pos.x / P.checkerSize) + floor(in.pos.y / P.checkerSize)) % 2.0;
-        amount = amount * cell;
+        amount = oalpha * cell;
       }
       rgb = mix(rgb, orgb, amount);
     }
