@@ -122,7 +122,12 @@ function samePreferences(a: ViewPreferences, b: ViewPreferences): boolean {
 
 /** Type-guard a parsed value as a valid {@link LayoutMode}. */
 function isLayoutMode(value: unknown): value is LayoutMode {
-  return value === LayoutMode.TriMpr || value === LayoutMode.Quad || value === LayoutMode.Volume3d;
+  return (
+    value === LayoutMode.TriMpr ||
+    value === LayoutMode.Quad ||
+    value === LayoutMode.Volume3d ||
+    value === LayoutMode.Compare
+  );
 }
 
 /** Type-guard a parsed value as a valid {@link ProjectionMode}. */

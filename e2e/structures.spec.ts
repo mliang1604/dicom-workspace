@@ -137,9 +137,14 @@ test('middle-drag pans the 3D view', async ({ page }) => {
     .setInputFiles([...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
   await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
 
-  await page.locator('body').click();
-  await page.keyboard.press('l');
-  await page.keyboard.press('l'); // 3D-only
+  // Cycle the layout to 3D-only (robust to the number of layouts in the cycle).
+  const layoutButton = page.getByRole('button', { name: /Layout/ });
+  for (let i = 0; i < 6; i++) {
+    if (((await layoutButton.textContent()) ?? '').includes('3D only')) break;
+    await layoutButton.click();
+    await page.waitForTimeout(60); // let the label re-render before re-reading
+  }
+  await expect(layoutButton).toContainText('3D only');
 
   const panX = () =>
     page

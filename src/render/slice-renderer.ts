@@ -175,6 +175,17 @@ export interface MprPaneView {
   readonly flipX?: boolean;
   /** Invert the windowed grayscale (white ⇄ black); omitted/false renders normally. */
   readonly invert?: boolean;
+  /**
+   * Which volume this pane draws: 0 (default) = the base; ≥ 1 = the overlay layer
+   * drawn standalone (the Compare layout's second column). Out of the loaded set
+   * it falls back to the base.
+   */
+  readonly group?: number;
+  /**
+   * Composite the fusion overlay over this pane (the default). False in Compare,
+   * where each column shows a single layer with no blend.
+   */
+  readonly composite?: boolean;
   /** Destination rectangle in device pixels, origin top-left. */
   readonly rect: PaneRect;
 }
@@ -260,8 +271,9 @@ const BYTES_PER_HALF = 2;
 const SURFACE_VERTEX_FLOATS = 10;
 /** Surface camera uniform bytes: eye, axisU+uu, axisV+vv, light (4 × vec4). */
 const SURFACE_CAMERA_SIZE = 64;
-/** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. */
-const MAX_MPR_PANES = 3;
+/** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. Six
+ * covers the Compare layout (two columns × axial/coronal/sagittal). */
+const MAX_MPR_PANES = 6;
 const ORIGIN: Vec2 = { x: 0, y: 0 };
 /** Float offset of the per-frame params that follow the 4×4 reslice matrix. */
 const MATRIX_FLOATS = 16;
@@ -330,8 +342,10 @@ export class SliceRenderer {
   /** The active fusion overlay (a second volume), or null when none is shown. */
   private overlayVolume: Volume | null = null;
   private overlayTexture: GPUTexture | null = null;
-  /** Overlay per-orientation plane→texture matrices (its own grid), or null. */
+  /** Overlay co-registration matrices (base pane plane → overlay grid), or null. */
   private overlayMatrices: readonly Float32Array[] | null = null;
+  /** Overlay matrices on its OWN bounds, for drawing it standalone (Compare). */
+  private overlayOwnMatrices: readonly Float32Array[] | null = null;
   /** Composite opacity of the overlay over the base, 0 when no overlay. */
   private overlayOpacity = 0;
   /** 1-D RGBA colormap LUT for a colormap overlay (e.g. a dose wash). */
@@ -534,6 +548,7 @@ export class SliceRenderer {
     this.overlayTexture = null;
     this.overlayVolume = null;
     this.overlayMatrices = null;
+    this.overlayOwnMatrices = null;
     this.overlayOpacity = 0;
     this.overlayColormap = false;
   }
@@ -605,6 +620,11 @@ export class SliceRenderer {
           overlayPlaneToTexMatrix(base, volume, orientation),
         )
       : null;
+    // Standalone matrices on the overlay's own bounds — the Compare layout draws
+    // the overlay as a base in its column, not co-registered onto the base plane.
+    this.overlayOwnMatrices = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map(
+      (orientation) => planeToTexMatrix(volume, orientation),
+    );
     this.rebuildMprBindGroups();
   }
 
@@ -661,9 +681,22 @@ export class SliceRenderer {
         continue;
       }
       const slot = this.slots[mprIndex++];
-      if (!slot || !slot.bindGroup) continue;
-      this.writeParams(slot.buffer, pane, rect, volume);
-      draws.push({ rect, bindGroup: slot.bindGroup, pipeline: this.pipeline });
+      if (!slot) continue;
+      // Compare's second column (group ≥ 1) draws the overlay layer standalone on
+      // its own grid; everything else draws the base. Fall back to the base when
+      // there's no overlay to compare against.
+      const useOverlay =
+        (pane.group ?? 0) >= 1 &&
+        !!this.overlayTexture &&
+        !!this.overlayVolume &&
+        !!this.overlayOwnMatrices;
+      const paneVolume = useOverlay ? this.overlayVolume! : volume;
+      const matrices = useOverlay ? this.overlayOwnMatrices! : this.matrices;
+      const composite = pane.composite ?? true;
+      const bindGroup = useOverlay ? this.overlayAsBaseBindGroup(slot) : slot.bindGroup;
+      if (!bindGroup) continue;
+      this.writeParams(slot.buffer, pane, rect, paneVolume, matrices, composite);
+      draws.push({ rect, bindGroup, pipeline: this.pipeline });
     }
 
     const drawSurface = this.prepareSurface(mipRect, surface);
@@ -809,7 +842,35 @@ export class SliceRenderer {
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 
-  private writeParams(buffer: GPUBuffer, view: MprPaneView, rect: PaneRect, volume: Volume): void {
+  /**
+   * Bind group that draws the OVERLAY texture as the base (binding 0) — the
+   * Compare layout's second column, where the overlay layer is shown standalone.
+   * Built per pane (cheap) since it's only the compare path. Returns null without
+   * an overlay texture.
+   */
+  private overlayAsBaseBindGroup(slot: PaneSlot): GPUBindGroup | null {
+    if (!this.overlayTexture) return null;
+    const view = this.overlayTexture.createView();
+    return this.device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: view },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: slot.buffer } },
+        { binding: 3, resource: view }, // overlay binding unused (composite off)
+        { binding: 4, resource: this.overlayLut.createView({ dimension: '1d' }) },
+      ],
+    });
+  }
+
+  private writeParams(
+    buffer: GPUBuffer,
+    view: MprPaneView,
+    rect: PaneRect,
+    volume: Volume,
+    matrices: readonly Float32Array[],
+    composite: boolean,
+  ): void {
     const count = sliceCountFor(volume, view.orientation);
     // Sample the centre of the voxel so the first/last slices aren't clamped away.
     const slicePos = count > 1 ? (view.sliceIndex + 0.5) / count : 0.5;
@@ -822,13 +883,13 @@ export class SliceRenderer {
     // needs a fresh matrix built from its live tilt (cheap, only while tilted).
     const matrix = isOblique(view.rotation)
       ? planeToTexMatrix(volume, view.orientation, view.rotation)
-      : this.matrices[view.orientation];
+      : matrices[view.orientation];
 
     // The overlay shares the pane plane but samples its own grid, so it gets its
     // own (possibly oblique) plane→texture matrix and is windowed by its own
-    // volume's defaults. Null when there's no overlay (the shader then skips it).
+    // volume's defaults. Null when not compositing (Compare) or there's no overlay.
     const overlay =
-      this.overlayVolume && this.overlayMatrices
+      composite && this.overlayVolume && this.overlayMatrices
         ? {
             matrix: isOblique(view.rotation)
               ? overlayPlaneToTexMatrix(volume, this.overlayVolume, view.orientation, view.rotation)

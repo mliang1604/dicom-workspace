@@ -13,6 +13,7 @@ import {
 import { initWebGpu, type GpuContext } from '../../render/device';
 import {
   blendBarPlacement,
+  compareLayout,
   LayoutMode,
   mprLayout,
   scaleRect,
@@ -131,7 +132,13 @@ type LoadState =
 
 /** A pane's placement on screen, in CSS pixels, plus what it shows. */
 type PanePlacement =
-  | { readonly kind: 'mpr'; readonly orientation: Orientation; readonly rect: PaneRect }
+  | {
+      readonly kind: 'mpr';
+      readonly orientation: Orientation;
+      readonly rect: PaneRect;
+      /** Compare-group index (0 unless the Compare layout splits into columns). */
+      readonly group: number;
+    }
   | { readonly kind: 'mip'; readonly rect: PaneRect };
 
 /** One projected patient axis, placed in the indicator widget's local pixels. */
@@ -874,6 +881,7 @@ export class Viewer {
   protected readonly layoutModes = [
     { value: LayoutMode.TriMpr, label: '3-pane MPR' },
     { value: LayoutMode.Quad, label: '4-pane' },
+    { value: LayoutMode.Compare, label: 'Compare' },
     { value: LayoutMode.Volume3d, label: '3D only' },
   ] as const;
   /** Human label for the current layout, shown on the cycle button. */
@@ -949,7 +957,10 @@ export class Viewer {
       if (into.kind !== 'mpr') continue;
       const intoFlip = into.orientation === Orientation.Sagittal && flipped;
       for (const other of mprPanes) {
+        // Only pair planes within the same compare group; cross-column reference
+        // lines (between two different layers) aren't meaningful.
         if (other.kind !== 'mpr' || other.orientation === into.orientation) continue;
+        if (other.group !== into.group) continue;
         const line = referenceLine(
           volume,
           {
@@ -986,7 +997,7 @@ export class Viewer {
         );
         if (!a || !b) continue;
         result.push({
-          key: `${into.orientation}-${other.orientation}`,
+          key: `${into.group}-${into.orientation}-${other.orientation}`,
           rect: into.rect,
           x1: a.x,
           y1: a.y,
@@ -1588,8 +1599,16 @@ export class Viewer {
     () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
   );
 
-  /** Whether a fusion overlay is active (drives the blend bar + checkerboard toggle). */
-  protected readonly hasOverlay = computed(() => this.selectedOverlay() !== null);
+  /** True in the side-by-side Compare layout (vs. the composited fusion views). */
+  protected readonly isCompare = computed(() => this.layoutMode() === LayoutMode.Compare);
+
+  /**
+   * Whether the fusion controls (blend bar, checkerboard) apply: an overlay is
+   * active AND we're compositing (not the side-by-side Compare layout).
+   */
+  protected readonly hasOverlay = computed(
+    () => this.selectedOverlay() !== null && !this.isCompare(),
+  );
 
   /** Composite opacity of the active overlay, driven by the in-pane blend bar. */
   protected readonly blendOpacity = signal(DEFAULT_OVERLAY_OPACITY);
@@ -1610,7 +1629,7 @@ export class Viewer {
    * fusion overlay is active (so the bar is hidden) or no MPR pane can host it.
    */
   protected readonly blendBar = computed<BlendBar | null>(() => {
-    if (!this.selectedOverlay()) return null;
+    if (!this.hasOverlay()) return null;
     const mprRects = this.panes()
       .filter((pane) => pane.kind === 'mpr')
       .map((pane) => pane.rect);
@@ -1981,6 +2000,12 @@ export class Viewer {
     const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
     if (!renderer || !volume) return null;
 
+    // In the Compare layout each column draws its own layer standalone (no
+    // fusion compositing); the right column (group ≥ 1) shows the overlay layer
+    // windowed by its own defaults.
+    const compareMode = this.layoutMode() === LayoutMode.Compare;
+    const overlay = this.selectedOverlay();
+
     return panes.map((pane) =>
       pane.kind === 'mip'
         ? {
@@ -1999,19 +2024,26 @@ export class Viewer {
             invert,
             rect: scaleRect(pane.rect, dpr),
           }
-        : {
-            kind: 'mpr',
-            orientation: pane.orientation,
-            sliceIndex: indices[pane.orientation],
-            windowCenter,
-            windowWidth,
-            zoom: zooms[pane.orientation],
-            pan: pans[pane.orientation],
-            rotation: obliques[pane.orientation],
-            flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
-            invert,
-            rect: scaleRect(pane.rect, dpr),
-          },
+        : ((): PaneView => {
+            const showOverlay = compareMode && pane.group >= 1 && overlay !== null;
+            return {
+              kind: 'mpr',
+              orientation: pane.orientation,
+              sliceIndex: indices[pane.orientation],
+              windowCenter: showOverlay ? overlay!.volume.windowCenter : windowCenter,
+              windowWidth: showOverlay ? overlay!.volume.windowWidth : windowWidth,
+              zoom: zooms[pane.orientation],
+              pan: pans[pane.orientation],
+              rotation: obliques[pane.orientation],
+              flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
+              invert,
+              rect: scaleRect(pane.rect, dpr),
+              // Which layer this pane draws and whether to composite the overlay
+              // over it: group ≥ 1 in Compare draws the overlay layer standalone.
+              group: showOverlay ? pane.group : 0,
+              composite: !compareMode,
+            };
+          })(),
     );
   }
 
@@ -2058,7 +2090,7 @@ export class Viewer {
 
   /** Stable identity for a placement, used for `@for` tracking and hover state. */
   protected paneKey(pane: PanePlacement): string {
-    return pane.kind === 'mip' ? 'mip' : `mpr-${pane.orientation}`;
+    return pane.kind === 'mip' ? 'mip' : `mpr-${pane.group}-${pane.orientation}`;
   }
 
   /** Show or hide one ROI's contours, from the structures panel checkbox. */
@@ -3580,19 +3612,32 @@ function placePanes(
     case LayoutMode.TriMpr: {
       const layout = triLayout(width, height);
       return [
-        { kind: 'mpr', orientation: main, rect: layout.main },
-        { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
-        { kind: 'mpr', orientation: sides[1], rect: layout.bottomRight },
+        { kind: 'mpr', orientation: main, rect: layout.main, group: 0 },
+        { kind: 'mpr', orientation: sides[0], rect: layout.topRight, group: 0 },
+        { kind: 'mpr', orientation: sides[1], rect: layout.bottomRight, group: 0 },
       ];
     }
     case LayoutMode.Quad: {
       const layout = mprLayout(width, height);
       return [
-        { kind: 'mpr', orientation: main, rect: layout.topLeft },
-        { kind: 'mpr', orientation: sides[0], rect: layout.topRight },
-        { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft },
+        { kind: 'mpr', orientation: main, rect: layout.topLeft, group: 0 },
+        { kind: 'mpr', orientation: sides[0], rect: layout.topRight, group: 0 },
+        { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft, group: 0 },
         { kind: 'mip', rect: layout.bottomRight },
       ];
+    }
+    case LayoutMode.Compare: {
+      // Two side-by-side columns, each a full axial/coronal/sagittal stack; the
+      // left column shows the base layer, the right the second (overlay) layer.
+      const cols = compareLayout(width, height, COMPARE_GROUPS);
+      return cols.flatMap((rows, group) =>
+        ORIENTATION_ORDER.map((orientation, row) => ({
+          kind: 'mpr' as const,
+          orientation,
+          rect: rows[row],
+          group,
+        })),
+      );
     }
     case LayoutMode.Volume3d:
       return [{ kind: 'mip', rect: singleLayout(width, height) }];
@@ -3602,6 +3647,9 @@ function placePanes(
     }
   }
 }
+
+/** Number of side-by-side groups in the Compare layout (base + one overlay). */
+const COMPARE_GROUPS = 2;
 
 /** The pane containing CSS-pixel point (x, y), or null. */
 function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {

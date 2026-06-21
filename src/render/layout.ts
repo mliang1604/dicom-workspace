@@ -24,6 +24,9 @@ export enum LayoutMode {
   Quad,
   /** The 3D pane filling the whole viewport. */
   Volume3d,
+  // Appended last: the numeric value is persisted, so don't renumber the above.
+  /** Side-by-side MPR groups (a column of axial/coronal/sagittal per layer). */
+  Compare,
 }
 
 /**
@@ -99,6 +102,35 @@ export function triLayout(width: number, height: number, gap = 6): TriLayout {
 /** A single pane filling the whole `width × height` area (the 3D-only layout). */
 export function singleLayout(width: number, height: number): PaneRect {
   return { x: 0, y: 0, width: clampNonNegative(width), height: clampNonNegative(height) };
+}
+
+/**
+ * Split a `width × height` area into `groups` equal columns, each stacked into 3
+ * equal rows — the side-by-side compare layout (one column of axial/coronal/
+ * sagittal per group). Returns rects indexed `[group][row]`. The last column/row
+ * absorbs the rounding remainder so the panes reach the far edges exactly.
+ */
+export function compareLayout(
+  width: number,
+  height: number,
+  groups: number,
+  gap = 6,
+): PaneRect[][] {
+  const colWidth = clampNonNegative(Math.round((width - (groups - 1) * gap) / groups));
+  const rowHeight = clampNonNegative(Math.round((height - 2 * gap) / 3));
+  const cols: PaneRect[][] = [];
+  for (let g = 0; g < groups; g++) {
+    const x = g * (colWidth + gap);
+    const w = g === groups - 1 ? clampNonNegative(width - x) : colWidth;
+    const rows: PaneRect[] = [];
+    for (let r = 0; r < 3; r++) {
+      const y = r * (rowHeight + gap);
+      const h = r === 2 ? clampNonNegative(height - y) : rowHeight;
+      rows.push({ x, y, width: w, height: h });
+    }
+    cols.push(rows);
+  }
+  return cols;
 }
 
 /**
