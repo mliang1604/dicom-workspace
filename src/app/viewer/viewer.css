@@ -478,7 +478,9 @@ button.active {
 
 .roi-name,
 .layer-name {
-  flex: 1 1 auto;
+  /* Take content width (truncating when tight) rather than growing, so the
+     opacity slider beside it can fill the row and reach the right edge. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -499,8 +501,11 @@ button.active {
 
 .roi-opacity,
 .layer-opacity {
-  flex: 0 0 auto;
-  width: 64px;
+  /* Fill the free space so the slider reaches the right edge (it was a 64px stub
+     whose thumb stopped well short of it). flex-basis 0 lets the name show fully
+     first, then the slider takes the slack. */
+  flex: 1;
+  min-width: 56px;
   cursor: pointer;
 }
 
