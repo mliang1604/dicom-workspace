@@ -7,7 +7,7 @@ import { ProjectionMode } from '../render/slice-renderer';
  * changes shape so stale data from an older layout is discarded (not coerced)
  * and the user falls back to defaults instead of a half-read state.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** localStorage key (versioned) under which the view preferences are persisted. */
 const STORAGE_KEY = 'dicom-workspace.preferences';
@@ -35,6 +35,13 @@ export interface ViewPreferences {
   readonly windowWidth: number | null;
   /** Last 3D slab thickness in mm (≥ 1), or null to use the full-depth default. */
   readonly slabThicknessMm: number | null;
+  /** Whether the longitudinal history panel is collapsed to its header bar. */
+  readonly historyCollapsed: boolean;
+  /**
+   * StudyInstanceUID of the last-opened history study (the single-open accordion),
+   * or null when every study is collapsed. Restores the timeline's open tile.
+   */
+  readonly lastOpenedStudyUid: string | null;
 }
 
 /** The preferences applied when nothing valid is stored. */
@@ -45,6 +52,8 @@ export const DEFAULT_PREFERENCES: ViewPreferences = {
   windowCenter: null,
   windowWidth: null,
   slabThicknessMm: null,
+  historyCollapsed: false,
+  lastOpenedStudyUid: null,
 };
 
 /**
@@ -105,6 +114,14 @@ export function parsePreferences(raw: string | null): ViewPreferences {
     windowCenter: finiteOrNull(obj['windowCenter']),
     windowWidth: positiveIntOrNull(obj['windowWidth']),
     slabThicknessMm: positiveIntOrNull(obj['slabThicknessMm']),
+    historyCollapsed:
+      typeof obj['historyCollapsed'] === 'boolean'
+        ? obj['historyCollapsed']
+        : DEFAULT_PREFERENCES.historyCollapsed,
+    lastOpenedStudyUid:
+      typeof obj['lastOpenedStudyUid'] === 'string'
+        ? obj['lastOpenedStudyUid']
+        : DEFAULT_PREFERENCES.lastOpenedStudyUid,
   };
 }
 
@@ -116,7 +133,9 @@ function samePreferences(a: ViewPreferences, b: ViewPreferences): boolean {
     a.sagittalFlipped === b.sagittalFlipped &&
     a.windowCenter === b.windowCenter &&
     a.windowWidth === b.windowWidth &&
-    a.slabThicknessMm === b.slabThicknessMm
+    a.slabThicknessMm === b.slabThicknessMm &&
+    a.historyCollapsed === b.historyCollapsed &&
+    a.lastOpenedStudyUid === b.lastOpenedStudyUid
   );
 }
 

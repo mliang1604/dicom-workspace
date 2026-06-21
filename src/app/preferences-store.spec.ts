@@ -15,6 +15,8 @@ const SAMPLE: ViewPreferences = {
   windowCenter: 40,
   windowWidth: 400,
   slabThicknessMm: 50,
+  historyCollapsed: true,
+  lastOpenedStudyUid: '1.2.840.113619.2.55.3.123',
 };
 
 describe('serializePreferences / parsePreferences', () => {
@@ -28,7 +30,13 @@ describe('serializePreferences / parsePreferences', () => {
   });
 
   it('writes the schema version into the blob', () => {
-    expect(JSON.parse(serializePreferences(SAMPLE))).toMatchObject({ version: 1 });
+    expect(JSON.parse(serializePreferences(SAMPLE))).toMatchObject({ version: 2 });
+  });
+
+  it('preserves the open-study UID and collapsed flag', () => {
+    const restored = parsePreferences(serializePreferences(SAMPLE));
+    expect(restored.historyCollapsed).toBe(true);
+    expect(restored.lastOpenedStudyUid).toBe('1.2.840.113619.2.55.3.123');
   });
 });
 
@@ -58,7 +66,7 @@ describe('parsePreferences fallbacks', () => {
 
   it('falls back per-field for mistyped or out-of-range values', () => {
     const raw = JSON.stringify({
-      version: 1,
+      version: 2,
       layoutMode: 99, // not a real LayoutMode
       projectionMode: 'dvr', // wrong type
       sagittalFlipped: 'yes', // wrong type
@@ -71,7 +79,7 @@ describe('parsePreferences fallbacks', () => {
 
   it('keeps valid fields while defaulting the invalid ones', () => {
     const raw = JSON.stringify({
-      version: 1,
+      version: 2,
       layoutMode: LayoutMode.Volume3d,
       projectionMode: 'bad',
       sagittalFlipped: true,
@@ -84,7 +92,7 @@ describe('parsePreferences fallbacks', () => {
   });
 
   it('rounds a fractional slab thickness and rejects sub-1 widths', () => {
-    const raw = JSON.stringify({ version: 1, slabThicknessMm: 12.7, windowWidth: 0.4 });
+    const raw = JSON.stringify({ version: 2, slabThicknessMm: 12.7, windowWidth: 0.4 });
     const prefs = parsePreferences(raw);
     expect(prefs.slabThicknessMm).toBe(13);
     expect(prefs.windowWidth).toBeNull();

@@ -1,0 +1,17 @@
+<div class="chip-thumb">
+  @if (isImage()) {
+    <canvas #thumb aria-hidden="true"></canvas>
+  } @else {
+    <span class="chip-icon" aria-hidden="true">{{ icon() }}</span>
+  }
+</div>
+
+<div class="chip-meta">
+  <span class="chip-label" [title]="label()">{{ label() }}</span>
+  <span class="chip-sub">
+    @if (modality(); as m) {
+      <span class="chip-modality">{{ m }}</span>
+    }
+    <span class="chip-count">{{ imageCount() }}</span>
+  </span>
+</div>

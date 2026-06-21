@@ -1,0 +1,78 @@
+/* One series chip: a fixed-width tile with a square preview and a two-line meta
+   block beneath it. Reused by the timeline and (later) the tree/B/C layouts. */
+:host {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 84px;
+  padding: 6px;
+  background: var(--glass-bg-strong, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+}
+
+/* The currently-loaded series: accent border + ring, mirroring the active pane. */
+:host(.loaded) {
+  border-color: var(--accent);
+  box-shadow: var(--accent-ring);
+}
+
+.chip-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  background: #000;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.chip-thumb canvas {
+  max-width: 100%;
+  max-height: 100%;
+  /* Crisp scaling for the small CPU preview rather than a blurry upscale. */
+  image-rendering: pixelated;
+}
+
+.chip-icon {
+  font-size: 22px;
+  color: var(--muted);
+}
+
+.chip-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chip-label {
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-modality {
+  padding: 0 4px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.chip-count {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

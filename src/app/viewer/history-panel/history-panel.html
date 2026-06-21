@@ -1,0 +1,59 @@
+<div class="history-bar">
+  <button
+    type="button"
+    class="history-toggle"
+    (click)="toggleCollapsed()"
+    [attr.aria-expanded]="!collapsed()"
+    aria-controls="history-timeline"
+    title="Show or hide the study history timeline"
+  >
+    <span class="history-chevron" aria-hidden="true">{{ collapsed() ? '▸' : '▾' }}</span>
+    History
+    <span class="history-count">{{ studies().length }}</span>
+  </button>
+  @if (patientLabel(); as label) {
+    <span class="history-patient" [title]="label">{{ label }}</span>
+  }
+</div>
+
+@if (!collapsed()) {
+  <ol class="timeline" id="history-timeline" aria-label="Study timeline, oldest to newest">
+    @for (study of studies(); track study.studyUid) {
+      <li class="study" [class.open]="isOpen(study)">
+        <button
+          type="button"
+          class="study-tile"
+          (click)="toggleStudy(study.studyUid)"
+          [attr.aria-expanded]="isOpen(study)"
+        >
+          <span class="study-date">{{ dateLabel(study) }}</span>
+          <span class="study-desc" [title]="study.description">{{
+            study.description || 'Untitled study'
+          }}</span>
+          <span class="study-foot">
+            <span class="study-modalities">
+              @for (modality of study.modalities; track modality) {
+                <span class="modality-badge">{{ modality }}</span>
+              }
+            </span>
+            <span class="study-count">{{ countLabel(study) }}</span>
+          </span>
+        </button>
+
+        @if (isOpen(study)) {
+          <ul class="series-strip" aria-label="Series in this study">
+            @for (series of study.series; track series.uid) {
+              <li>
+                <app-series-chip
+                  [series]="series"
+                  [thumbnail]="thumbnailFor(series)"
+                  [loaded]="series.uid === loadedSeriesUid()"
+                />
+              </li>
+            }
+          </ul>
+        }
+      </li>
+    }
+  </ol>
+}
