@@ -647,6 +647,8 @@ export class Viewer {
   private readonly initialPrefs = this.preferencesStore.preferences();
 
   private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
+  /** The history panel, so the `H` hotkey can toggle its collapsed state. */
+  private readonly historyPanel = viewChild(HistoryPanel);
 
   private readonly renderer = signal<SliceRenderer | null>(null);
   private readonly load = signal<LoadState>({ status: 'idle' });
@@ -832,6 +834,7 @@ export class Viewer {
     { keys: '1', label: 'Native voxel scale (1:1)' },
     { keys: 'R', label: 'Reset zoom, pan & window/level' },
     { keys: 'V', label: 'Invert the grayscale' },
+    { keys: 'H', label: 'Collapse / expand the study history panel' },
     { keys: '?', label: 'Toggle this shortcuts help' },
     { keys: 'Esc', label: 'Cancel a measurement / close overlays' },
     { keys: 'Drag', label: 'Pan an MPR pane · orbit the 3D pane' },
@@ -2732,7 +2735,8 @@ export class Viewer {
   /**
    * The single code path for every keyboard shortcut bar Escape: the single-letter
    * actions (swap x, flip f, crosshair c, cine p, layout l, info i, reset r, invert
-   * v), the viewport controls (fit 0, native 1:1 1), and the help overlay (?).
+   * v, history h), the viewport controls (fit 0, native 1:1 1), and the help
+   * overlay (?).
    *
    * Reads {@link KeyboardEvent.key} and case-folds it so Shift / Caps Lock (which
    * report 'X', 'R', …) still match, and applies one {@link isEditableTarget} focus
@@ -2775,6 +2779,10 @@ export class Viewer {
       case 'v':
         event.preventDefault();
         this.toggleInvert();
+        break;
+      case 'h':
+        event.preventDefault();
+        this.historyPanel()?.toggleCollapsedFromHotkey();
         break;
       case '?':
         event.preventDefault();

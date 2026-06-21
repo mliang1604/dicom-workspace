@@ -52,6 +52,17 @@
   color: var(--muted);
 }
 
+/* Shortcut hint chip, matching the viewer toolbar's <kbd> styling. */
+.history-toggle kbd {
+  font:
+    11px/1 ui-monospace,
+    monospace;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
 .history-count {
   padding: 0 6px;
   font-size: 11px;
