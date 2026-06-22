@@ -355,6 +355,15 @@ export interface Layer {
   readonly opacity: number;
   /** Whether the layer is currently drawn. */
   readonly visible: boolean;
+  /**
+   * For an overlay in a *different* frame of reference from the base, the
+   * base→overlay patient transform a Spatial Registration provides (see
+   * {@link import('./align').resolveAlignment}): the renderer applies it so the
+   * overlay samples in the base's displayed plane. Absent when the overlay shares
+   * the base's frame (the same-frame fusion path needs no transform) or for a
+   * base layer.
+   */
+  readonly alignToBase?: Mat4;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core';
+import { resolveAlignment } from '../dicom/align';
 import { buildVolume } from '../dicom/volume';
 import { initialImportSeries } from '../dicom/catalog';
 import { groupSeries, type Series } from '../dicom/series';
@@ -7,6 +8,7 @@ import {
   baseImageLayer,
   baseLayer,
   framesMatch,
+  IDENTITY_MAT4,
   overlayImageLayer,
   type Layer,
   type Registration,
@@ -200,17 +202,25 @@ export interface MergedLoad {
  * Decide how a freshly loaded `incoming` batch joins the `current` view and
  * produce the merged result.
  *
- * When the incoming selected series shares the current base layer's frame of
- * reference, it images the same patient in the same placement, so it's *added*
- * as a translucent overlay layer above the base (which stays). Otherwise it's a
- * different study and *replaces* the current load. A series with no frame of
- * reference never matches, so it always replaces — there's nothing to align it
- * against.
+ * When the incoming selected series can be aligned to the current base layer —
+ * either it shares the base's frame of reference (same patient/placement) or a
+ * Spatial Registration links the two frames — it's *added* as a translucent
+ * overlay layer above the base (which stays), carrying any cross-frame transform
+ * on the layer. Otherwise it's a different study and *replaces* the current load.
+ * A series with no frame of reference and no registration never aligns, so it
+ * replaces — there's nothing to align it against.
  *
  * Pure for unit testing the add-vs-replace rule and the resulting registry.
  */
 export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad {
-  if (!sameFrameOfReference(current, incoming)) return { result: incoming, added: false };
+  // A registration may arrive with either load (the REG dropped with the moving
+  // series, or already loaded), so pool both before deciding alignability.
+  const registrations = [...current.registrations, ...incoming.registrations];
+  const baseFrame = selectedSeries(current)?.frameOfReferenceUid ?? null;
+  const overlayFrame = selectedSeries(incoming)?.frameOfReferenceUid ?? null;
+  const alignment = resolveAlignment(baseFrame, overlayFrame, registrations);
+  // Frames neither match nor are linked by a registration: a different study; replace.
+  if (alignment === null) return { result: incoming, added: false };
 
   // Co-sampling an overlay in the base's patient frame maps each pane pixel
   // through both grids' index→patient affines, so both volumes need geometry;
@@ -231,30 +241,18 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
     return { result: incoming, added: false };
   }
 
-  const overlay = overlayImageLayer(
+  const baseOverlay = overlayImageLayer(
     uniqueLayerId(current.layers, incoming.selectedUid),
     overlayVolume,
   );
-  // Keep any registration that arrived with the incoming series alongside the
-  // current load's, so a REG dropped with the moving image is available to align
-  // the overlay (consumed in Phase 1+).
-  const registrations = [...current.registrations, ...incoming.registrations];
+  // A cross-frame overlay carries its base→overlay transform; the same-frame case
+  // needs none (resolveAlignment returns the shared identity constant by reference).
+  const overlay: Layer =
+    alignment === IDENTITY_MAT4 ? baseOverlay : { ...baseOverlay, alignToBase: alignment };
   return {
     result: { ...current, layers: [...current.layers, overlay], registrations },
     added: true,
   };
-}
-
-/**
- * Whether the two loads' selected series share a (non-null) frame of reference —
- * the rule for adding an overlay rather than replacing. A null frame of reference
- * never matches, even another null, since it gives nothing to align against.
- */
-function sameFrameOfReference(a: LoadResult, b: LoadResult): boolean {
-  return framesMatch(
-    selectedSeries(a)?.frameOfReferenceUid ?? null,
-    selectedSeries(b)?.frameOfReferenceUid ?? null,
-  );
 }
 
 /** The series a load currently shows (its base layer's source), or undefined. */

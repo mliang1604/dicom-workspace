@@ -1,5 +1,12 @@
 import { clamp01, clampIndex } from '../dicom/math';
-import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
+import { transformPoint, transformVector } from '../dicom/mat4';
+import {
+  Orientation,
+  type Mat4,
+  type Vec3,
+  type Volume,
+  type VolumeGeometry,
+} from '../dicom/types';
 import { add, cross, dot, length, normalize, scale, sub } from '../dicom/vec3';
 
 /**
@@ -179,21 +186,45 @@ export function planeToTexMatrix(
  * OVERLAY volume's texture coordinates — for fusion compositing. The pane plane
  * (which patient FOV the pane shows) is defined by the base's bounds, but the
  * overlay has its own grid, so we take the base's pane basis (pane→patient) and
- * map it through the overlay's geometry. Both volumes must share the patient
- * frame of reference (validated at load); they need not share bounds or spacing.
+ * map it through the overlay's geometry.
+ *
+ * When the two volumes share a patient frame of reference, sampling is direct.
+ * When they live in *different* frames linked by a Spatial Registration, pass the
+ * base→overlay patient transform (`alignToBase`, from
+ * {@link import('../dicom/align').resolveAlignment}): the base pane basis is moved
+ * into the overlay's patient frame before it is mapped through the overlay's grid.
+ * Omitting it (or passing the identity) is the same-frame case. The volumes need
+ * not share bounds or spacing.
  */
 export function overlayPlaneToTexMatrix(
   baseVolume: Volume,
   overlayVolume: Volume,
   orientation: Orientation,
   rotation?: ObliqueRotation,
+  alignToBase?: Mat4,
 ): Float32Array {
   const baseGeom = resolveGeometry(baseVolume);
   const basis = obliqueBasis(
     planeBasis(orientation, patientBounds(baseGeom, baseVolume.dims)),
     rotation,
   );
-  return texAffineMatrix(basisToTex(basis, resolveGeometry(overlayVolume), overlayVolume.dims));
+  const aligned = alignToBase ? transformBasis(basis, alignToBase) : basis;
+  return texAffineMatrix(basisToTex(aligned, resolveGeometry(overlayVolume), overlayVolume.dims));
+}
+
+/**
+ * Re-express a pane basis (origin + axes, in one volume's patient frame) in
+ * another frame via a patient→patient affine: the origin moves as a point, the
+ * axes as directions. Used to carry a base pane plane into a registered overlay's
+ * frame before sampling its grid.
+ */
+function transformBasis(basis: PlaneBasis, transform: Mat4): PlaneBasis {
+  return {
+    origin: transformPoint(transform, basis.origin),
+    axisU: transformVector(transform, basis.axisU),
+    axisV: transformVector(transform, basis.axisV),
+    axisS: transformVector(transform, basis.axisS),
+  };
 }
 
 /** A pane's displayed plane: its orientation, slice, and optional oblique tilt. */

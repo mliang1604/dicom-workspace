@@ -232,6 +232,13 @@
                 }
                 <span class="layer-name" [title]="layer.label">{{ layer.label }}</span>
                 <span class="layer-role">{{ layer.roleBadge }}</span>
+                @if (layer.registered) {
+                  <span
+                    class="layer-registered"
+                    title="Co-registered from another frame of reference"
+                    >REG</span
+                  >
+                }
                 @if (!layer.isBase) {
                   <!-- Drive the selection from each option's [selected] (evaluated as
                        the options render) rather than the select's [value], which is

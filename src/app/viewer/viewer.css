@@ -499,6 +499,18 @@ button.active {
   opacity: 0.85;
 }
 
+/* "REG" badge: a co-registered cross-frame overlay. Tinted to stand out from the
+   neutral role badge. */
+.layer-registered {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.7em;
+  letter-spacing: 0.02em;
+  background: rgba(120, 170, 255, 0.28);
+  opacity: 0.9;
+}
+
 .roi-opacity,
 .layer-opacity {
   /* Fill the free space so the slider reaches the right edge (it was a 64px stub

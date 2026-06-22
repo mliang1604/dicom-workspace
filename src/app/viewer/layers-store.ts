@@ -18,6 +18,12 @@ export interface LayerLegendEntry {
   readonly roleBadge: string;
   /** Whether this is the base underlay (shown without overlay-only controls). */
   readonly isBase: boolean;
+  /**
+   * Whether the overlay is co-registered onto the base from a *different* frame of
+   * reference (it carries a Spatial Registration transform). Drives a "REG" badge
+   * so a fused cross-frame overlay is distinguishable from a same-frame one.
+   */
+  readonly registered: boolean;
   /** Whether the layer is currently composited. */
   readonly visible: boolean;
   /** Composite opacity as a whole percent `[0, 100]`, for the opacity slider. */
@@ -33,6 +39,7 @@ export function layerLegend(layers: readonly Layer[]): LayerLegendEntry[] {
     label: layer.modality ?? 'Image',
     roleBadge: layer.role === 'base' ? 'BASE' : 'OVERLAY',
     isBase: layer.role === 'base',
+    registered: layer.alignToBase !== undefined,
     visible: layer.visible,
     opacityPercent: Math.round(layer.opacity * 100),
     displayValue: layer.display.kind === 'grayscale' ? 'grayscale' : layer.display.name,
