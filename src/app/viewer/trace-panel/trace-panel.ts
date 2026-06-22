@@ -1,4 +1,11 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { TraceStore } from '../../trace-store';
 
 /**
@@ -7,6 +14,13 @@ import { TraceStore } from '../../trace-store';
  * be driven from the UI — not only via the console, a `?trace=` URL or a
  * localStorage key — which is what you need when reproducing on another machine
  * where those aren't at hand.
+ *
+ * The popover is shown in the browser **top layer** (the native `popover`
+ * attribute + `showPopover()`), so it clears the toolbar's `backdrop-filter`
+ * stacking context and paints above the WebGPU canvas — an absolutely-positioned
+ * child would be painted over by the panes below the toolbar. It's positioned
+ * manually under the button on open (the viewer uses no `z-index`, so there's no
+ * stacking layer to lean on).
  *
  * Self-contained: it owns its open state and routes every category toggle and the
  * log capture through {@link TraceStore} (which drives the shared tracer and
@@ -20,9 +34,17 @@ import { TraceStore } from '../../trace-store';
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './trace-panel.html',
   styleUrl: './trace-panel.css',
+  host: {
+    '(document:pointerdown)': 'onOutsidePointerDown($event)',
+    '(document:keydown.escape)': 'close()',
+  },
 })
 export class TracePanel {
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   protected readonly store = inject(TraceStore);
+
+  private readonly popover = viewChild.required<ElementRef<HTMLElement>>('pop');
+  private readonly toggleButton = viewChild.required<ElementRef<HTMLButtonElement>>('toggleBtn');
 
   /** Whether the popover is open. */
   protected readonly open = signal(false);
@@ -33,16 +55,33 @@ export class TracePanel {
   /** The captured log JSON shown for manual copy, or null when hidden. */
   protected readonly logText = signal<string | null>(null);
 
-  /** Open or close the popover; closing clears any transient capture state. */
+  /** Open the popover (anchored under the button) or close it if already open. */
   protected toggleOpen(): void {
-    this.open.update((isOpen) => !isOpen);
-    if (!this.open()) this.reset();
+    if (this.open()) {
+      this.close();
+      return;
+    }
+    const el = this.popover().nativeElement;
+    const btn = this.toggleButton().nativeElement.getBoundingClientRect();
+    // Anchor the top-layer popover under the button's right edge.
+    el.style.top = `${Math.round(btn.bottom + 8)}px`;
+    el.style.right = `${Math.round(Math.max(8, window.innerWidth - btn.right))}px`;
+    el.showPopover();
+    this.open.set(true);
   }
 
-  /** Close the popover. */
+  /** Close the popover and clear any transient capture state. */
   protected close(): void {
+    if (!this.open()) return;
+    const el = this.popover().nativeElement;
+    if (el.matches(':popover-open')) el.hidePopover();
     this.open.set(false);
     this.reset();
+  }
+
+  /** Dismiss on a click anywhere outside the control (the popover stays a DOM child). */
+  protected onOutsidePointerDown(event: PointerEvent): void {
+    if (this.open() && !this.host.nativeElement.contains(event.target as Node)) this.close();
   }
 
   /** Copy the captured events to the clipboard, revealing them inline if it's blocked. */
