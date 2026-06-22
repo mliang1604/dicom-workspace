@@ -227,6 +227,34 @@ function transformBasis(basis: PlaneBasis, transform: Mat4): PlaneBasis {
   };
 }
 
+/**
+ * Row-major affine mapping a pane's `(u, v, slicePos, 1)` to a point in the
+ * volume's patient frame (LPS, mm) — `origin + u·axisU + v·axisV + slicePos·axisS`
+ * of the pane basis. Unlike {@link planeToTexMatrix} this stops at patient space
+ * (no grid), so a deformable overlay can transform the base pane point through a
+ * registration (pre-matrix / displacement field) before sampling the overlay.
+ * Row-major so it composes with the row-major registration matrices in `mat4.ts`.
+ */
+export function paneToPatientMatrix(
+  volume: Volume,
+  orientation: Orientation,
+  rotation?: ObliqueRotation,
+): Mat4 {
+  const geom = resolveGeometry(volume);
+  const { origin, axisU, axisV, axisS } = obliqueBasis(
+    planeBasis(orientation, patientBounds(geom, volume.dims)),
+    rotation,
+  );
+  // Columns are the three pane axes and the origin (the 4th maps the homogeneous 1).
+  // prettier-ignore
+  return [
+    axisU[0], axisV[0], axisS[0], origin[0],
+    axisU[1], axisV[1], axisS[1], origin[1],
+    axisU[2], axisV[2], axisS[2], origin[2],
+    0, 0, 0, 1,
+  ];
+}
+
 /** A pane's displayed plane: its orientation, slice, and optional oblique tilt. */
 export interface ObliquePlane {
   readonly orientation: Orientation;

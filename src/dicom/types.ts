@@ -188,35 +188,43 @@ export interface DeformationGrid {
  * frame never matches (see {@link framesMatch}), so such a registration links
  * nothing and is ignored by alignment.
  */
-export type Registration =
-  | {
-      readonly kind: 'rigid';
-      /** Source file name, for diagnostics. */
-      readonly name: string;
-      /** Moving frame of reference (0020,0052) the matrix maps from. */
-      readonly sourceFrame: string | null;
-      /** Fixed frame of reference (0020,0052) the matrix maps onto. */
-      readonly targetFrame: string | null;
-      /** Source→target affine (3006,00C6), row-major. */
-      readonly matrix: Mat4;
-      /** Frame of Reference Transformation Matrix Type (0070,030C): `RIGID`, `AFFINE`, … */
-      readonly matrixType: string;
-    }
-  | {
-      readonly kind: 'deformable';
-      /** Source file name, for diagnostics. */
-      readonly name: string;
-      /** Moving frame of reference, Source Frame of Reference UID (0064,0003). */
-      readonly sourceFrame: string | null;
-      /** Fixed frame of reference (0020,0052) the deformation maps onto. */
-      readonly targetFrame: string | null;
-      /** Rigid stage applied before the displacement (0064,000F); identity when absent. */
-      readonly preMatrix: Mat4;
-      /** Rigid stage applied after the displacement (0064,000A); identity when absent. */
-      readonly postMatrix: Mat4;
-      /** The displacement field warping source onto target. */
-      readonly grid: DeformationGrid;
-    };
+export type Registration = RigidRegistration | DeformableRegistration;
+
+/** A rigid/affine Spatial Registration: a single source→target affine matrix. */
+export interface RigidRegistration {
+  readonly kind: 'rigid';
+  /** Source file name, for diagnostics. */
+  readonly name: string;
+  /** Moving frame of reference (0020,0052) the matrix maps from. */
+  readonly sourceFrame: string | null;
+  /** Fixed frame of reference (0020,0052) the matrix maps onto. */
+  readonly targetFrame: string | null;
+  /** Source→target affine (3006,00C6), row-major. */
+  readonly matrix: Mat4;
+  /** Frame of Reference Transformation Matrix Type (0070,030C): `RIGID`, `AFFINE`, … */
+  readonly matrixType: string;
+}
+
+/**
+ * A Deformable Spatial Registration: a displacement {@link DeformationGrid}
+ * between optional pre/post rigid stages, mapping the moving frame onto the fixed
+ * one.
+ */
+export interface DeformableRegistration {
+  readonly kind: 'deformable';
+  /** Source file name, for diagnostics. */
+  readonly name: string;
+  /** Moving frame of reference, Source Frame of Reference UID (0064,0003). */
+  readonly sourceFrame: string | null;
+  /** Fixed frame of reference (0020,0052) the deformation maps onto. */
+  readonly targetFrame: string | null;
+  /** Rigid stage applied before the displacement (0064,000F); identity when absent. */
+  readonly preMatrix: Mat4;
+  /** Rigid stage applied after the displacement (0064,000A); identity when absent. */
+  readonly postMatrix: Mat4;
+  /** The displacement field warping source onto target. */
+  readonly grid: DeformationGrid;
+}
 
 /**
  * Which way we are slicing the volume. Modelled as an `as const` object rather
@@ -364,6 +372,13 @@ export interface Layer {
    * base layer.
    */
   readonly alignToBase?: Mat4;
+  /**
+   * For an overlay linked to the base by a *deformable* Spatial Registration, the
+   * registration whose displacement field warps it onto the base's frame. The
+   * renderer samples the field per fragment (see `render/deformation.ts`).
+   * Mutually exclusive with {@link alignToBase} (rigid); absent otherwise.
+   */
+  readonly deformation?: DeformableRegistration;
 }
 
 /**

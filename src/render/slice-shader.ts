@@ -35,6 +35,18 @@ struct Params {
   overlayWindowWidth : f32,
   overlayOpacity : f32,
   overlayColormap : u32,    // non-zero: map the windowed overlay through overlayLut
+  // Deformable fusion: when overlayDeformable is set, the overlay is sampled via a
+  // displacement field instead of overlayToTex. The base pane point is mapped to
+  // fixed-patient mm (paneToPatient, pre-matrix folded), looked up in the field
+  // (patientToField) for a displacement, added, then mapped into the overlay grid
+  // (patientToOverlayTex, post-matrix folded). Three u32 pad the mat4x4 alignment.
+  overlayDeformable : u32,
+  deformPad0 : u32,
+  deformPad1 : u32,
+  deformPad2 : u32,
+  paneToPatient : mat4x4<f32>,
+  patientToField : mat4x4<f32>,
+  patientToOverlayTex : mat4x4<f32>,
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -42,6 +54,7 @@ struct Params {
 @group(0) @binding(2) var<uniform> P : Params;
 @group(0) @binding(3) var overlayTex : texture_3d<f32>;
 @group(0) @binding(4) var overlayLut : texture_1d<f32>; // RGBA colormap ramp
+@group(0) @binding(5) var deformTex : texture_3d<f32>;  // rgba16float displacement field (mm)
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -105,7 +118,21 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // uses the value directly. Outside the overlay's grid (or opacity 0) the base
   // shows through unchanged.
   if (P.overlayOpacity > 0.0) {
-    let ocoord = (P.overlayToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+    var ocoord : vec3<f32>;
+    if (P.overlayDeformable != 0u) {
+      // Deformable: base pane point -> fixed patient -> displacement -> overlay grid.
+      let p1 = (P.paneToPatient * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+      let fuv = (P.patientToField * vec4<f32>(p1, 1.0)).xyz;
+      var disp = vec3<f32>(0.0);
+      // Outside the field grid there is no displacement: fall back to the rigid
+      // pre/post alignment (disp = 0) rather than sampling clamped edge vectors.
+      if (all(fuv >= vec3<f32>(0.0)) && all(fuv <= vec3<f32>(1.0))) {
+        disp = textureSampleLevel(deformTex, volSamp, fuv, 0.0).xyz;
+      }
+      ocoord = (P.patientToOverlayTex * vec4<f32>(p1 + disp, 1.0)).xyz;
+    } else {
+      ocoord = (P.overlayToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+    }
     if (all(ocoord >= vec3<f32>(0.0)) && all(ocoord <= vec3<f32>(1.0))) {
       let oraw = textureSampleLevel(overlayTex, volSamp, ocoord, 0.0).r;
       let olo = P.overlayWindowCenter - 0.5 - (P.overlayWindowWidth - 1.0) * 0.5;

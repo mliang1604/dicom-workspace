@@ -1,6 +1,14 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
-import { Orientation, type LayerDisplay, type Mat4, type Vec3, type Volume } from '../dicom/types';
+import {
+  Orientation,
+  type DeformableRegistration,
+  type LayerDisplay,
+  type Mat4,
+  type Vec3,
+  type Volume,
+} from '../dicom/types';
+import { deformationFieldHalf, deformationUniforms } from './deformation';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import {
   colormap,
@@ -14,6 +22,7 @@ import {
   clipPlaneTex,
   clipTRange,
   overlayPlaneToTexMatrix,
+  paneToPatientMatrix,
   patientToTexMatrix,
   planeExtentMm,
   planePixelDims,
@@ -258,10 +267,17 @@ export type PaneView = MprPaneView | MipPaneView;
 // slicePos,flipX (32) + invert + 12 bytes pad — overlayCheckerboard, checkerSize,
 // colormapBase (16) = 112; then the fusion-overlay block at byte 112 (16-aligned
 // for its mat4x4): overlayToTex mat4x4 (64) + overlayWindowCenter,
-// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80. Total 192.
-const PARAMS_SIZE = 192;
+// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80, ending at byte 192.
+// Then the deformable block at byte 192: overlayDeformable flag + 3 u32 pad (16)
+// + paneToPatient, patientToField, patientToOverlayTex mat4x4 (192) = 208. Total 400.
+const PARAMS_SIZE = 400;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
+/** Float offset of the deformable flag; its three mat4x4 follow at the next 16-byte slot. */
+const DEFORM_FLAG_FLOAT = 48;
+const DEFORM_PANE_FLOATS = 52;
+const DEFORM_FIELD_FLOATS = 68;
+const DEFORM_OVERLAY_FLOATS = 84;
 /**
  * Default fusion checkerboard density, as the number of cells spanning the image
  * (at zoom 1). The cell's pixel size is derived per-pane from the pane width, so
@@ -454,12 +470,26 @@ export class SliceRenderer {
    * base's displayed plane.
    */
   private overlayAlign: Mat4 | null = null;
+  /**
+   * The deformable registration warping the current overlay onto the base frame,
+   * or null for a rigid/same-frame overlay. When set, the overlay is sampled
+   * through {@link deformTexture} (the displacement field) instead of a matrix.
+   */
+  private overlayDeformation: DeformableRegistration | null = null;
+  /** The displacement field as an `rgba16float` 3D texture, or null when none. */
+  private deformTexture: GPUTexture | null = null;
   /** Overlay matrices on its OWN bounds, for drawing it standalone (Compare). */
   private overlayOwnMatrices: readonly Float32Array[] | null = null;
   /** Composite opacity of the overlay over the base, 0 when no overlay. */
   private overlayOpacity = 0;
   /** 1-D RGBA colormap LUT for a colormap overlay (e.g. a dose wash). */
   private readonly overlayLut: GPUTexture;
+  /**
+   * A 1×1×1 `rgba16float` placeholder bound at the deformation-field slot when no
+   * deformable overlay is active, so the bind group's binding 5 is always valid
+   * (`layout:'auto'` requires it); the shader ignores it when overlayDeformable is 0.
+   */
+  private readonly deformDummy: GPUTexture;
   /** Whether the active overlay is colour-mapped through {@link overlayLut}. */
   private overlayColormap = false;
   /** Whether the overlay is composited as a checkerboard (vs. a uniform blend). */
@@ -575,6 +605,39 @@ export class SliceRenderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     this.uploadOverlayLut(colormap(DEFAULT_COLORMAP)); // valid seed; the flag gates use
+
+    // A minimal always-bindable displacement field; replaced when a deformable
+    // overlay is set, and ignored by the shader unless overlayDeformable is on.
+    this.deformDummy = this.device.createTexture({
+      dimension: '3d',
+      size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture: this.deformDummy },
+      new Uint16Array(4),
+      { bytesPerRow: 4 * BYTES_PER_HALF, rowsPerImage: 1 },
+      { width: 1, height: 1, depthOrArrayLayers: 1 },
+    );
+  }
+
+  /** Upload a displacement grid to a fresh `rgba16float` 3D texture (mm vectors). */
+  private createDeformTexture(grid: DeformableRegistration['grid']): GPUTexture {
+    const [width, height, depth] = grid.dims;
+    const texture = this.device.createTexture({
+      dimension: '3d',
+      size: { width, height, depthOrArrayLayers: depth },
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture },
+      deformationFieldHalf(grid),
+      { bytesPerRow: width * 4 * BYTES_PER_HALF, rowsPerImage: height },
+      { width, height, depthOrArrayLayers: depth },
+    );
+    return texture;
   }
 
   /** Bake a colormap into the overlay's 1-D LUT texture. */
@@ -640,6 +703,7 @@ export class SliceRenderer {
     const baseView = this.texture.createView();
     const overlayView = this.overlayTexture?.createView() ?? baseView;
     const lutView = this.overlayLut.createView({ dimension: '1d' });
+    const deformView = (this.deformTexture ?? this.deformDummy).createView();
     for (const slot of this.slots) {
       slot.bindGroup = this.device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
@@ -649,6 +713,7 @@ export class SliceRenderer {
           { binding: 2, resource: { buffer: slot.buffer } },
           { binding: 3, resource: overlayView },
           { binding: 4, resource: lutView },
+          { binding: 5, resource: deformView },
         ],
       });
     }
@@ -680,6 +745,7 @@ export class SliceRenderer {
     for (const slot of this.slots) slot.buffer.destroy();
     this.tfTexture.destroy();
     this.overlayLut.destroy();
+    this.deformDummy.destroy();
   }
 
   /** Drop any fusion overlay (texture + matrices + opacity + colormap). */
@@ -690,6 +756,9 @@ export class SliceRenderer {
     this.overlayMatrices = null;
     this.overlayOwnMatrices = null;
     this.overlayAlign = null;
+    this.overlayDeformation = null;
+    this.deformTexture?.destroy();
+    this.deformTexture = null;
     this.overlayOpacity = 0;
     this.overlayColormap = false;
   }
@@ -737,14 +806,17 @@ export class SliceRenderer {
    * per-orientation plane→texture matrices.
    *
    * `alignToBase` is the base→overlay patient transform when the overlay lives in
-   * a different frame of reference linked by a Spatial Registration; omit it (or
-   * pass null) when the overlay shares the base's frame.
+   * a different frame of reference linked by a rigid Spatial Registration; omit it
+   * (or pass null) when the overlay shares the base's frame. `deformation` is the
+   * deformable counterpart — the overlay is then warped through its displacement
+   * field instead of a matrix (the two are mutually exclusive).
    */
   setOverlay(
     volume: Volume | null,
     opacity: number,
     display?: LayerDisplay,
     alignToBase?: Mat4,
+    deformation?: DeformableRegistration,
   ): void {
     if (!volume) {
       if (!this.overlayVolume) return;
@@ -765,6 +837,11 @@ export class SliceRenderer {
     this.overlayTexture = this.createVolumeTexture(volume, 'Overlay');
     this.overlayVolume = volume;
     this.overlayOpacity = opacity;
+    // A deformable overlay carries a displacement field (uploaded as its own 3D
+    // texture); a rigid/same-frame one does not. Replace any previous field.
+    this.overlayDeformation = deformation ?? null;
+    this.deformTexture?.destroy();
+    this.deformTexture = deformation ? this.createDeformTexture(deformation.grid) : null;
     // Colormap display bakes the named ramp into the overlay LUT; grayscale leaves
     // the flag off and the shader uses the windowed value directly.
     this.overlayColormap = display?.kind === 'colormap';
@@ -1038,6 +1115,7 @@ export class SliceRenderer {
         { binding: 2, resource: { buffer: slot.buffer } },
         { binding: 3, resource: view }, // overlay binding unused (composite off)
         { binding: 4, resource: this.overlayLut.createView({ dimension: '1d' }) },
+        { binding: 5, resource: this.deformDummy.createView() }, // deform unused here
       ],
     });
   }
@@ -1093,6 +1171,20 @@ export class SliceRenderer {
           }
         : null;
 
+    // A deformable overlay samples through its displacement field rather than the
+    // overlay matrix: build the per-pane field uniforms (the base pane→patient map
+    // is orientation/tilt specific; the field/overlay maps fold in pre/post).
+    const deformation =
+      overlay && this.overlayVolume && this.overlayDeformation
+        ? deformationUniforms(
+            paneToPatientMatrix(volume, view.orientation, view.rotation),
+            this.overlayVolume,
+            this.overlayDeformation.preMatrix,
+            this.overlayDeformation.postMatrix,
+            this.overlayDeformation.grid,
+          )
+        : null;
+
     const params = packSliceParams({
       matrix,
       scaleX: scaleX / zoom,
@@ -1105,6 +1197,7 @@ export class SliceRenderer {
       invert: !!view.invert,
       colormapBase,
       overlay,
+      deformation,
     });
     this.device.queue.writeBuffer(buffer, 0, params);
   }
@@ -1141,6 +1234,17 @@ export interface SliceParams {
     /** Checkerboard cell size in framebuffer pixels. */
     readonly checkerSize: number;
   } | null;
+  /**
+   * Deformable fusion uniforms: when present (and an overlay is composited), the
+   * overlay is sampled through the displacement field instead of `overlay.matrix`.
+   * Three column-major mat4x4 — base pane→patient (pre-folded), patient→field tex,
+   * and patient→overlay tex (post-folded). Null/omitted for rigid/same-frame.
+   */
+  readonly deformation?: {
+    readonly paneToPatientPre: Float32Array | readonly number[];
+    readonly patientToField: Float32Array | readonly number[];
+    readonly patientToOverlayTex: Float32Array | readonly number[];
+  } | null;
 }
 
 /**
@@ -1149,8 +1253,10 @@ export interface SliceParams {
  * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
  * matrix (28..43), overlay window centre/width and opacity (44..46), and the
  * colormap flag (47, u32). The colormap-the-base flag (27, u32) sits in the
- * pre-overlay pad. With no overlay the opacity stays 0, so the shader
- * leaves the base untouched. Pure and exported so the layout can be unit-tested
+ * pre-overlay pad. After it, the deformable block: the flag (48, u32) then three
+ * mat4x4 (52..67, 68..83, 84..99) for displacement-field sampling. With no overlay
+ * the opacity stays 0 and with no deformation the flag stays 0, so the shader
+ * leaves each untouched. Pure and exported so the layout can be unit-tested
  * without a GPU — the shader and this packing must stay in lockstep.
  */
 export function packSliceParams(p: SliceParams): ArrayBuffer {
@@ -1179,6 +1285,15 @@ export function packSliceParams(p: SliceParams): ArrayBuffer {
     floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45
     floats[OVERLAY_FLOATS + 18] = p.overlay.opacity; // float 46
     uints[OVERLAY_FLOATS + 19] = p.overlay.colormap ? 1 : 0; // float 47 (u32)
+  }
+  // Deformable block: the flag (float 48) then three mat4x4 at the next 16-byte
+  // slots. The shader samples the displacement field instead of overlayToTex when
+  // the flag is set; it stays 0 (and the matrices unwritten) for rigid/same-frame.
+  if (p.deformation) {
+    uints[DEFORM_FLAG_FLOAT] = 1;
+    floats.set(p.deformation.paneToPatientPre as ArrayLike<number>, DEFORM_PANE_FLOATS);
+    floats.set(p.deformation.patientToField as ArrayLike<number>, DEFORM_FIELD_FLOATS);
+    floats.set(p.deformation.patientToOverlayTex as ArrayLike<number>, DEFORM_OVERLAY_FLOATS);
   }
   return params;
 }

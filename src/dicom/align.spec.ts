@@ -1,4 +1,4 @@
-import { resolveAlignment } from './align';
+import { resolveAlignment, resolveDeformable } from './align';
 import { invert } from './mat4';
 import { IDENTITY_MAT4, type DeformationGrid, type Mat4, type Registration } from './types';
 
@@ -67,5 +67,25 @@ describe('resolveAlignment', () => {
       rigid('C', 'D', IDENTITY_MAT4),
     ];
     expect(resolveAlignment('BASE', 'OVERLAY', regs)).toEqual(invert(TRANSLATE));
+  });
+
+  it('ignores a rigid registration when resolving the deformable one (Phase 2 split)', () => {
+    expect(resolveDeformable('BASE', 'OVERLAY', [rigid('OVERLAY', 'BASE', TRANSLATE)])).toBeNull();
+  });
+});
+
+describe('resolveDeformable', () => {
+  it('returns the registration when the base is its target and overlay its source', () => {
+    const reg = deformable('OVERLAY', 'BASE'); // source=moving, target=fixed
+    expect(resolveDeformable('BASE', 'OVERLAY', [reg])).toBe(reg);
+  });
+
+  it('returns null in the reverse direction (the field has no closed-form inverse)', () => {
+    expect(resolveDeformable('BASE', 'OVERLAY', [deformable('BASE', 'OVERLAY')])).toBeNull();
+  });
+
+  it('returns null when no deformable registration links the frames', () => {
+    expect(resolveDeformable('BASE', 'OVERLAY', [])).toBeNull();
+    expect(resolveDeformable('BASE', 'OVERLAY', [deformable('X', 'Y')])).toBeNull();
   });
 });
