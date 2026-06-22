@@ -174,17 +174,40 @@ function deformableRegistration(options: { preMatrix?: readonly number[] } = {})
   const dims = [2, 2, 2];
   const vectors = Array.from({ length: 3 * dims[0] * dims[1] * dims[2] }, (_, i) => i + 1);
   const pre = options.preMatrix ? [matrixRegistrationSeq(0x0064, 0x000f, options.preMatrix)] : [];
-  const defItem = concat([
+  const movingItem = concat([
     element(0x0064, 0x0003, 'UI', uid('MOVING')), // Source Frame of Reference UID
     deformationGrid([10, 20, 30], dims, [3, 3, 3], vectors),
     ...pre,
   ]);
+  return deformableFromItems([movingItem]);
+}
+
+/** A grid-less Deformable Registration Sequence item for the fixed frame (self-registration). */
+function fixedSelfItem(): Uint8Array {
+  return concat([
+    element(0x0064, 0x0003, 'UI', uid('FIXED')), // Source Frame of Reference UID (the fixed frame)
+    matrixRegistrationSeq(0x0064, 0x000a, IDENTITY), // Post Deformation Matrix (identity)
+  ]);
+}
+
+/** Assemble a deformable Spatial Registration from explicit sequence items. */
+function deformableFromItems(defItems: Uint8Array[]): ArrayBuffer {
   const body = concat([
     element(0x0008, 0x0016, 'UI', uid(DEFORMABLE_REGISTRATION)), // SOPClassUID
     element(0x0020, 0x0052, 'UI', uid('FIXED')), // Frame of Reference UID (target)
-    sequence(0x0064, 0x0002, [defItem]), // Deformable Registration Sequence
+    sequence(0x0064, 0x0002, defItems), // Deformable Registration Sequence
   ]);
   return dicomFile(body, DEFORMABLE_REGISTRATION);
+}
+
+/** A moving Deformable Registration Sequence item carrying the displacement grid. */
+function movingGridItem(): Uint8Array {
+  const dims = [2, 2, 2];
+  const vectors = Array.from({ length: 3 * dims[0] * dims[1] * dims[2] }, (_, i) => i + 1);
+  return concat([
+    element(0x0064, 0x0003, 'UI', uid('MOVING')), // Source Frame of Reference UID
+    deformationGrid([10, 20, 30], dims, [3, 3, 3], vectors),
+  ]);
 }
 
 /** A Pre/Post Deformation Matrix Registration Sequence carrying one matrix. */
@@ -258,5 +281,21 @@ describe('parseRegistration', () => {
     const reg = parseRegistration('deform.dcm', deformableRegistration({ preMatrix }));
     if (reg?.kind !== 'deformable') throw new Error('expected deformable');
     expect(reg.preMatrix).toEqual(preMatrix);
+  });
+
+  it('picks the grid-bearing moving item when a fixed self-registration comes first', () => {
+    // Real objects pair a grid-less fixed self-registration with the moving item
+    // holding the displacement grid; the fixed item often comes first.
+    const reg = parseRegistration(
+      'deform.dcm',
+      deformableFromItems([fixedSelfItem(), movingGridItem()]),
+    );
+
+    expect(reg).not.toBeNull();
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.sourceFrame).toBe('MOVING');
+    expect(reg.targetFrame).toBe('FIXED');
+    expect(reg.grid.dims).toEqual([2, 2, 2]);
+    expect(Array.from(reg.grid.vectors.slice(0, 3))).toEqual([1, 2, 3]);
   });
 });
