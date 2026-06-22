@@ -37,17 +37,8 @@ import {
   type SurfaceFrame,
   type SurfaceSortScratch,
 } from '../../render/slice-renderer';
-import {
-  addControlPoint,
-  moveControlPoint,
-  removeControlPoint,
-  setControlPointColor,
-  transferFunction,
-  TRANSFER_FUNCTION_PRESETS,
-  TransferFunctionPreset,
-  type TransferFunction,
-} from '../../render/transfer-function';
-import { DEFAULT_DVR_LIGHTING, type DvrLighting } from '../../render/dvr';
+import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
+import { type DvrLighting } from '../../render/dvr';
 import {
   linkedSliceIndex,
   NO_OBLIQUE,
@@ -92,7 +83,6 @@ import {
   rezoomCameraPan,
   viewBasis,
   type ClipPlaneGizmoGeometry,
-  type OrbitCamera,
 } from '../../render/camera';
 import { axisIndicatorGeometry, type AxisIndicatorOverlay } from '../../render/axis-indicator';
 import {
@@ -143,6 +133,7 @@ import { PreferencesStore } from '../preferences-store';
 import { modifierLabel } from '../platform';
 import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
 import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
+import { Camera3dStore } from './camera3d-store';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
@@ -459,8 +450,6 @@ const ROTATION_FPS = 30;
 const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
 const MAX_ELEVATION = 1.45;
-/** Default 3D view: a slight three-quarter orbit, patient superior up. */
-const DEFAULT_CAMERA: OrbitCamera = { azimuth: 0.4, elevation: 0.25, zoom: 1, panX: 0, panY: 0 };
 
 /**
  * Only warn about interpolation when the widest gap spans more than this
@@ -498,7 +487,7 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
-  providers: [MeasurementStore, LayersStore],
+  providers: [MeasurementStore, LayersStore, Camera3dStore],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -521,6 +510,8 @@ export class Viewer {
   private readonly preferencesStore = inject(PreferencesStore);
   /** Fusion / layers override state and logic; provided per-component (see providers). */
   private readonly layerStore = inject(LayersStore);
+  /** 3D pane view state (camera / DVR / TF / clip); provided per-component (see providers). */
+  private readonly cam = inject(Camera3dStore);
   private readonly destroyRef = inject(DestroyRef);
   /** Preferences restored at startup; seed the view signals and per-load defaults. */
   private readonly initialPrefs = this.preferencesStore.preferences();
@@ -564,34 +555,30 @@ export class Viewer {
   protected readonly hasOblique = computed(() =>
     this.obliques().some((r) => r.tiltU !== 0 || r.tiltV !== 0),
   );
+  // The 3D pane's view state lives in Camera3dStore; these alias its signals so the
+  // existing computeds, render effects, and gesture handlers read/write unchanged.
   /** Orbit/zoom state of the 3D MIP pane. */
-  private readonly camera3d = signal<OrbitCamera>(DEFAULT_CAMERA);
+  private readonly camera3d = this.cam.camera3d;
   /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
-  protected readonly projectionMode = signal<ProjectionMode>(this.initialPrefs.projectionMode);
-  /**
-   * The live DVR transfer function: seeded from a preset and then editable in the
-   * TF editor. Held as the full {@link TransferFunction} (not just a preset code)
-   * so dragged control points re-bake the LUT immediately.
-   */
-  protected readonly transferFunction = signal<TransferFunction>(
-    transferFunction(TransferFunctionPreset.CtBone),
-  );
+  protected readonly projectionMode = this.cam.projectionMode;
+  /** The live DVR transfer function, seeded from a preset and then editable. */
+  protected readonly transferFunction = this.cam.transferFunction;
   /** The preset the editor is currently seeded from, driving the TF selector. */
   protected readonly transferFunctionPreset = computed(() => this.transferFunction().preset);
   /** DVR lighting/shading (Blinn–Phong material + posed headlight). */
-  protected readonly dvrLighting = signal<DvrLighting>(DEFAULT_DVR_LIGHTING);
+  protected readonly dvrLighting = this.cam.dvrLighting;
   /** The TF-editor control point being dragged (index), or null. */
-  private readonly tfDrag = signal<number | null>(null);
+  private readonly tfDrag = this.cam.tfDrag;
   /** The selected TF control point (for recolour / removal), or null. */
-  protected readonly tfSelected = signal<number | null>(null);
+  protected readonly tfSelected = this.cam.tfSelected;
   /** When true, clip the 3D pane to the MPR slice planes for a cut-away view. */
-  protected readonly clipToPlanes = signal(false);
+  protected readonly clipToPlanes = this.cam.clipToPlanes;
   /** When true, an arbitrary handle-driven cut-plane clips the 3D pane (independent of {@link clipToPlanes}). */
-  protected readonly clipPlaneEnabled = signal(false);
+  protected readonly clipPlaneEnabled = this.cam.clipPlaneEnabled;
   /** Cut-plane normal in patient space (unit); the kept half is the side it points into. */
-  private readonly clipPlaneNormal = signal<Vec3>([0, -1, 0]);
+  private readonly clipPlaneNormal = this.cam.clipPlaneNormal;
   /** Signed offset (mm) of the cut-plane from the volume centre along its normal. */
-  private readonly clipPlaneOffsetMm = signal(0);
+  private readonly clipPlaneOffsetMm = this.cam.clipPlaneOffsetMm;
   /**
    * The live cut-plane in patient space, or null when the handle is off. Placed
    * at the volume centre shifted along the normal by the dragged offset; shared by
@@ -1783,6 +1770,10 @@ export class Viewer {
   private dragDepth = 0;
 
   constructor() {
+    // Seed the 3D pane's projection mode from the persisted preference before any
+    // effect or the template reads it (the store defaults to MIP otherwise).
+    this.cam.projectionMode.set(this.initialPrefs.projectionMode);
+
     afterNextRender(() => void this.initGpu());
 
     // The effect tracks every signal the frame depends on and computes the
@@ -3385,10 +3376,7 @@ export class Viewer {
   /** Re-seed the editable TF from a preset (CT Bone / Soft-tissue / Angio / Lung). */
   protected onTransferFunctionChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
-    this.transferFunction.set(
-      transferFunction(Number(event.target.value) as TransferFunctionPreset),
-    );
-    this.tfSelected.set(null);
+    this.cam.setPreset(Number(event.target.value) as TransferFunctionPreset);
     this.markMipSettling();
   }
 
@@ -3410,8 +3398,7 @@ export class Viewer {
   protected onTfPointerDown(event: PointerEvent, index: number): void {
     event.preventDefault();
     event.stopPropagation();
-    this.tfDrag.set(index);
-    this.tfSelected.set(index);
+    this.cam.beginPointDrag(index);
     const svg = (event.target as SVGElement).ownerSVGElement;
     svg?.setPointerCapture(event.pointerId);
   }
@@ -3421,22 +3408,21 @@ export class Viewer {
     const index = this.tfDrag();
     if (index === null) return;
     const [intensity, opacity] = this.tfEventValue(event);
-    this.transferFunction.update((tf) => moveControlPoint(tf, index, intensity, opacity));
+    this.cam.movePoint(index, intensity, opacity);
     this.markMipSettling();
   }
 
   /** Finish a TF control-point drag. */
   protected onTfPointerUp(event: PointerEvent): void {
     if (this.tfDrag() === null) return;
-    this.tfDrag.set(null);
+    this.cam.endPointDrag();
     (event.target as SVGElement).ownerSVGElement?.releasePointerCapture(event.pointerId);
   }
 
   /** Double-click the TF editor background to insert a control point there. */
   protected onTfAddPoint(event: MouseEvent): void {
     const [intensity, opacity] = this.tfEventValue(event);
-    this.transferFunction.update((tf) => addControlPoint(tf, intensity, opacity));
-    this.tfSelected.set(null);
+    this.cam.addPoint(intensity, opacity);
     this.markMipSettling();
   }
 
@@ -3444,8 +3430,7 @@ export class Viewer {
   protected onTfColorChange(event: Event): void {
     const index = this.tfSelected();
     if (index === null || !(event.target instanceof HTMLInputElement)) return;
-    const color = hexToRgb(event.target.value);
-    this.transferFunction.update((tf) => setControlPointColor(tf, index, color));
+    this.cam.recolorPoint(index, hexToRgb(event.target.value));
     this.markMipSettling();
   }
 
@@ -3453,14 +3438,13 @@ export class Viewer {
   protected onTfRemovePoint(): void {
     const index = this.tfSelected();
     if (index === null) return;
-    this.transferFunction.update((tf) => removeControlPoint(tf, index));
-    this.tfSelected.set(null);
+    this.cam.removePoint(index);
     this.markMipSettling();
   }
 
   /** Toggle DVR shading on/off (off renders samples at their flat TF colour). */
   protected toggleShading(): void {
-    this.dvrLighting.update((l) => ({ ...l, enabled: !l.enabled }));
+    this.cam.toggleLighting();
     this.markMipSettling();
   }
 
@@ -3469,31 +3453,25 @@ export class Viewer {
     if (!(event.target instanceof HTMLInputElement)) return;
     const value = Number(event.target.value);
     if (!Number.isFinite(value)) return;
-    this.dvrLighting.update((l) => ({ ...l, [key]: value }));
+    this.cam.setLightingValue(key, value);
     this.markMipSettling();
   }
 
   /** Toggle the cut-away that clips the 3D pane to the current MPR slice planes. */
   protected toggleClipToPlanes(): void {
-    this.clipToPlanes.update((on) => !on);
+    this.cam.toggleClipToPlanes();
     this.markMipSettling();
   }
 
   /** Toggle the arbitrary handle-driven cut-plane, aligning it to the view when enabling. */
   protected toggleClipPlane(): void {
-    const enabling = !this.clipPlaneEnabled();
-    this.clipPlaneEnabled.set(enabling);
-    if (enabling) this.resetClipPlane();
-    else this.markMipSettling();
+    this.cam.toggleClipPlane();
+    this.markMipSettling();
   }
 
   /** Re-aim the cut-plane to face the current view and recentre it on the volume. */
   protected resetClipPlane(): void {
-    const { forward } = viewBasis(this.camera3d().azimuth, this.camera3d().elevation);
-    // The kept half is the side the normal points into; forward (eye→volume) keeps
-    // the far side, so the plane removes the near half facing the camera.
-    this.clipPlaneNormal.set(forward);
-    this.clipPlaneOffsetMm.set(0);
+    this.cam.faceClipToView();
     this.markMipSettling();
   }
 
@@ -3757,13 +3735,7 @@ export class Viewer {
     this.compareLinked.set(true);
     this.groupNav.set(defaultGroupNav());
     this.obliques.set(NO_OBLIQUES);
-    this.camera3d.set(DEFAULT_CAMERA);
-    this.transferFunction.set(transferFunction(TransferFunctionPreset.CtBone));
-    this.tfSelected.set(null);
-    this.dvrLighting.set(DEFAULT_DVR_LIGHTING);
-    this.clipToPlanes.set(false);
-    this.clipPlaneEnabled.set(false);
-    this.clipPlaneOffsetMm.set(0);
+    this.cam.reset(); // camera / TF / DVR lighting / clips back to defaults
     this.sliceIndices.set([
       middleSlice(renderer, Orientation.Axial),
       middleSlice(renderer, Orientation.Coronal),
