@@ -233,9 +233,7 @@
                 <span class="layer-name" [title]="layer.label">{{ layer.label }}</span>
                 <span class="layer-role">{{ layer.roleBadge }}</span>
                 @if (layer.registered) {
-                  <span
-                    class="layer-registered"
-                    title="Co-registered from another frame of reference"
+                  <span class="layer-role" title="Co-registered from another frame of reference"
                     >REG</span
                   >
                 }
