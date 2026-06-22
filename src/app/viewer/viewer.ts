@@ -134,6 +134,7 @@ import { modifierLabel } from '../platform';
 import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
 import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
 import { Camera3dStore } from './camera3d-store';
+import { CompareStore, COMPARE_GROUPS, type GroupNav } from './compare-store';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
@@ -327,18 +328,6 @@ type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
 /** An oblique tilt per orientation, indexed by the orientation's numeric value. */
 type PerOrientationOblique = readonly [ObliqueRotation, ObliqueRotation, ObliqueRotation];
 
-/**
- * Independent navigation state for one Compare group, used only when the groups
- * are unlinked. Each group then scrolls, pans, and zooms on its own; while linked
- * (the default) groups follow the shared master signals and this is ignored. Group
- * 0 always reads the master signals, so its entry here is unused.
- */
-interface GroupNav {
-  readonly sliceIndices: PerOrientation;
-  readonly zooms: PerOrientation;
-  readonly pans: PerOrientationPan;
-}
-
 /** The oblique rotation gizmo drawn over one MPR pane: a ring and a draggable knob. */
 interface ObliqueGizmo {
   /** Key of the pane it controls (see {@link Viewer.paneKey}). */
@@ -487,7 +476,7 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
-  providers: [MeasurementStore, LayersStore, Camera3dStore],
+  providers: [MeasurementStore, LayersStore, Camera3dStore, CompareStore],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -512,6 +501,8 @@ export class Viewer {
   private readonly layerStore = inject(LayersStore);
   /** 3D pane view state (camera / DVR / TF / clip); provided per-component (see providers). */
   private readonly cam = inject(Camera3dStore);
+  /** Compare-layout linking state and resolution; provided per-component (see providers). */
+  private readonly compareStore = inject(CompareStore);
   private readonly destroyRef = inject(DestroyRef);
   /** Preferences restored at startup; seed the view signals and per-load defaults. */
   private readonly initialPrefs = this.preferencesStore.preferences();
@@ -536,14 +527,14 @@ export class Viewer {
    * plane in every group (despite different grids); unlinked, each group keeps its
    * own {@link groupNav}. Only meaningful in {@link LayoutMode.Compare}.
    */
-  protected readonly compareLinked = signal(true);
+  protected readonly compareLinked = this.compareStore.linked;
   /**
    * Per-group independent navigation, indexed by compare group, used only while
    * {@link compareLinked} is false. Seeded from the current (linked) view when the
    * groups are unlinked so the panes don't jump; group 0 always reads the master
-   * signals, so its slot is unused.
+   * signals, so its slot is unused. Owned by {@link CompareStore}; aliased here.
    */
-  private readonly groupNav = signal<readonly GroupNav[]>(defaultGroupNav());
+  private readonly groupNav = this.compareStore.groupNav;
   /**
    * Per-orientation oblique tilt; {@link NO_OBLIQUE} (the default) reslices the
    * orthogonal anatomical plane, a non-zero tilt an arbitrary oblique plane. Set
@@ -1562,35 +1553,44 @@ export class Viewer {
 
   /** Whether a Compare group navigates on its own (unlinked, and not the base group). */
   private groupIsIndependent(group: number): boolean {
-    return this.isCompare() && !this.compareLinked() && group > 0;
+    return this.compareStore.isIndependent(group, this.isCompare());
   }
 
   /**
    * The slice index a pane shows, resolving linked/unlinked Compare navigation: the
    * master index outside Compare and for group 0; while linked, the same patient
    * plane mapped onto the group's own grid (so a coarse dose lines up with a fine
-   * CT); while unlinked, the group's independent index.
+   * CT); while unlinked, the group's independent index. The cross-grid linked map
+   * (the only branch needing the volumes) is supplied as a callback.
    */
   private paneSliceIndex(group: number, orientation: Orientation): number {
     const master = this.sliceIndices()[orientation];
-    if (!this.isCompare() || group === 0) return master;
-    if (!this.compareLinked()) return this.groupNav()[group]?.sliceIndices[orientation] ?? master;
-    const base = this.volume();
-    const target = this.groupVolume(group);
-    if (!base || !target) return master;
-    return linkedSliceIndex(base, target, orientation, master, this.obliques()[orientation]);
+    return this.compareStore.resolveSlice(group, orientation, this.isCompare(), master, () => {
+      const base = this.volume();
+      const target = this.groupVolume(group);
+      if (!base || !target) return master;
+      return linkedSliceIndex(base, target, orientation, master, this.obliques()[orientation]);
+    });
   }
 
   /** The zoom a pane uses: shared while linked, the group's own when unlinked. */
   private paneZoom(group: number, orientation: Orientation): number {
-    if (!this.groupIsIndependent(group)) return this.zooms()[orientation];
-    return this.groupNav()[group]?.zooms[orientation] ?? this.zooms()[orientation];
+    return this.compareStore.resolveZoom(
+      group,
+      orientation,
+      this.isCompare(),
+      this.zooms()[orientation],
+    );
   }
 
   /** The pan a pane uses: shared while linked, the group's own when unlinked. */
   private panePan(group: number, orientation: Orientation): Vec2 {
-    if (!this.groupIsIndependent(group)) return this.pans()[orientation];
-    return this.groupNav()[group]?.pans[orientation] ?? this.pans()[orientation];
+    return this.compareStore.resolvePan(
+      group,
+      orientation,
+      this.isCompare(),
+      this.pans()[orientation],
+    );
   }
 
   /**
@@ -1599,34 +1599,19 @@ export class Viewer {
    * drops back to the shared master signals.
    */
   protected toggleCompareLinked(): void {
-    if (this.compareLinked()) {
-      this.groupNav.set(this.snapshotGroupNav());
-      this.compareLinked.set(false);
-    } else {
-      this.compareLinked.set(true);
-    }
+    this.compareStore.toggleLinked(() => this.snapshotGroupNav());
   }
 
   /** Snapshot the current per-group view (while still linked) for unlinked editing. */
   private snapshotGroupNav(): GroupNav[] {
-    const zooms = this.zooms();
-    const pans = this.pans();
-    return Array.from({ length: COMPARE_GROUPS }, (_, group) => ({
-      sliceIndices: [
-        this.paneSliceIndex(group, Orientation.Axial),
-        this.paneSliceIndex(group, Orientation.Coronal),
-        this.paneSliceIndex(group, Orientation.Sagittal),
-      ] as PerOrientation,
-      zooms,
-      pans,
-    }));
+    return this.compareStore.snapshot(this.zooms(), this.pans(), (group, orientation) =>
+      this.paneSliceIndex(group, orientation),
+    );
   }
 
   /** Replace one field of one group's independent nav (used by the unlinked handlers). */
   private updateGroupNav(group: number, patch: Partial<GroupNav>): void {
-    this.groupNav.update((navs) =>
-      navs.map((nav, i) => (i === group ? { ...nav, ...patch } : nav)),
-    );
+    this.compareStore.updateGroupNav(group, patch);
   }
 
   /**
@@ -3732,8 +3717,7 @@ export class Viewer {
     this.zooms.set([1, 1, 1]);
     this.pans.set(NO_PANS);
     // A fresh base load starts with the Compare groups linked and no per-group nav.
-    this.compareLinked.set(true);
-    this.groupNav.set(defaultGroupNav());
+    this.compareStore.reset();
     this.obliques.set(NO_OBLIQUES);
     this.cam.reset(); // camera / TF / DVR lighting / clips back to defaults
     this.sliceIndices.set([
@@ -3834,17 +3818,6 @@ function placePanes(
 }
 
 /** Number of side-by-side groups in the Compare layout (base + one overlay). */
-const COMPARE_GROUPS = 2;
-
-/** Fresh per-group nav (one slot per Compare group) at the view defaults. */
-function defaultGroupNav(): GroupNav[] {
-  return Array.from({ length: COMPARE_GROUPS }, () => ({
-    sliceIndices: [0, 0, 0],
-    zooms: [1, 1, 1],
-    pans: NO_PANS,
-  }));
-}
-
 /** The pane containing CSS-pixel point (x, y), or null. */
 function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {
   for (const pane of panes) {
