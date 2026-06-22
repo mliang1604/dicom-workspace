@@ -22,13 +22,25 @@ export function f32ToF16(value: number): number {
   const x = u32[0];
 
   const sign = (x >>> 16) & 0x8000;
-  // Unbiased exponent and mantissa of the float32 value.
-  let exp = ((x >>> 23) & 0xff) - 127 + 15;
+  const rawExp = (x >>> 23) & 0xff;
   const mantissa = x & 0x7fffff;
 
-  if (exp >= 0x1f) {
-    // Overflow / Inf / NaN -> half infinity, or a quiet NaN if the source was NaN.
+  if (rawExp === 0xff) {
+    // The source itself is Inf or NaN (the only float32s with a full exponent):
+    // map Inf -> half Inf, NaN -> a quiet half NaN.
     return sign | 0x7c00 | (mantissa !== 0 ? 0x200 : 0);
+  }
+
+  // Unbiased exponent rebased into half's range.
+  const exp = rawExp - 127 + 15;
+
+  if (exp >= 0x1f) {
+    // A *finite* value beyond half's range. Saturate to the largest finite half
+    // (±65504) rather than overflowing to Inf — and never to NaN, which a large
+    // finite mantissa would otherwise produce. Out-of-range data (e.g. the hottest
+    // PET activity voxels, whose rescaled values exceed 65504) then still draws at
+    // full window brightness instead of vanishing.
+    return sign | 0x7bff;
   }
   if (exp <= 0) {
     // Subnormal or underflow to zero.
@@ -37,6 +49,9 @@ export function f32ToF16(value: number): number {
     // Round to nearest even.
     return sign | ((m + 0x1000) >>> 13);
   }
-  // Normal number, round mantissa to nearest even.
-  return sign | (exp << 10) | ((mantissa + 0x1000) >>> 13);
+  // Normal number, round mantissa to nearest even. A round that carries into the
+  // exponent can tip it to half Inf (0x7c00); saturate that to the largest finite
+  // half too, for the same reason as the overflow branch above.
+  const rounded = (exp << 10) + ((mantissa + 0x1000) >>> 13);
+  return rounded >= 0x7c00 ? sign | 0x7bff : sign | rounded;
 }
