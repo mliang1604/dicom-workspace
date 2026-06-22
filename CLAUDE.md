@@ -48,6 +48,21 @@ through slices, window/level controls, and a live voxel probe.
   `src/dicom`.
 - Format with Prettier before committing.
 
+## Diagnostics
+
+- **Toggleable tracing** lives in `src/diag/trace.ts` — off by default and
+  near-zero-cost when off. Toggle it from the toolbar's **Trace** control (the
+  `app-trace-panel` component, backed by `TraceStore`), which enables categories,
+  persists the choice, and captures/copies the log — handy on a machine where the
+  console isn't. Equivalent headless toggles: a `?trace=load,merge` URL param,
+  `__trace__.enable('merge')` in the console, or
+  `localStorage['dicom-workspace.trace']`. Output always goes to the console;
+  `__trace__.dump()` (or the panel's "Copy log") returns recent events.
+- Add a trace point with `trace('merge')?.('what happened', { data })` — the
+  payload is built only when the category is enabled. Categories are listed in
+  `TRACE_CATEGORIES`; the load/fusion path (`volume-loader`, `load-coordinator`)
+  is already instrumented.
+
 ## Do not
 
 - Modify or commit `package-lock.json`.

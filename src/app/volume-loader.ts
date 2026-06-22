@@ -11,10 +11,12 @@ import {
   IDENTITY_MAT4,
   overlayImageLayer,
   type Layer,
+  type Mat4,
   type Registration,
   type StructureSet,
 } from '../dicom/types';
 import { parseFilesInWorkers, type LoadProgress } from './parse-pool';
+import { trace } from '../diag/trace';
 
 /**
  * Outcome of loading a batch of files: the series found across them and the one
@@ -80,6 +82,12 @@ export class VolumeLoader {
    */
   async loadFromFiles(files: readonly File[], onProgress?: LoadProgress): Promise<LoadResult> {
     const { slices, structureSets, registrations } = await parseFilesInWorkers(files, onProgress);
+    trace('load')?.('parsed file batch', {
+      files: files.length,
+      slices: slices.length,
+      structureSets: structureSets.length,
+      registrations: registrations.map(summarizeRegistration),
+    });
 
     const series = groupSeries(slices);
     // initialImportSeries returns undefined only for an empty batch; assemble it to
@@ -223,8 +231,25 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   // alignment to prefer (rigid is the simpler, exact transform).
   const deformation =
     alignment === null ? resolveDeformable(baseFrame, overlayFrame, registrations) : null;
+
+  // Trace the whole alignment decision: the frames being matched, every pooled
+  // registration's frames (the usual culprit when fusion silently refuses), and
+  // what resolved. `trace('merge')` is undefined unless the category is enabled,
+  // so the payload is only built when tracing is on.
+  const t = trace('merge');
+  t?.('alignment inputs', {
+    baseFrame,
+    overlayFrame,
+    registrations: registrations.map(summarizeRegistration),
+    alignment: describeAlignment(alignment),
+    deformation: deformation ? summarizeRegistration(deformation) : null,
+  });
+
   // Frames neither match nor are linked by any registration: a different study; replace.
-  if (alignment === null && deformation === null) return { result: incoming, added: false };
+  if (alignment === null && deformation === null) {
+    t?.('replace: frames neither match nor are linked by a registration');
+    return { result: incoming, added: false };
+  }
 
   // Co-sampling an overlay in the base's patient frame maps each pane pixel
   // through both grids' index→patient affines, so both volumes need geometry;
@@ -233,6 +258,10 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   const baseVolume = baseLayer(current.layers)?.volume;
   const overlayVolume = baseLayer(incoming.layers)?.volume;
   if (!baseVolume?.geometry || !overlayVolume?.geometry) {
+    t?.('replace: a volume lacks geometry, cannot co-sample', {
+      baseHasGeometry: !!baseVolume?.geometry,
+      overlayHasGeometry: !!overlayVolume?.geometry,
+    });
     return { result: incoming, added: false };
   }
 
@@ -242,6 +271,7 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   // with the freshly built registry instead, so the study — and any same-frame
   // dose it auto-promotes to an overlay — shows exactly once rather than twice.
   if (baseLayer(current.layers)?.id === incoming.selectedUid) {
+    t?.('replace: incoming series is already the base', { id: incoming.selectedUid });
     return { result: incoming, added: false };
   }
 
@@ -259,6 +289,10 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   } else if (deformation !== null) {
     overlay = { ...baseOverlay, deformation };
   }
+  t?.('added overlay layer', {
+    id: overlay.id,
+    via: alignment === IDENTITY_MAT4 ? 'same-frame' : alignment !== null ? 'rigid' : 'deformable',
+  });
   return {
     result: { ...current, layers: [...current.layers, overlay], registrations },
     added: true,
@@ -268,6 +302,24 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
 /** The series a load currently shows (its base layer's source), or undefined. */
 function selectedSeries(result: LoadResult): Series | undefined {
   return result.series.find((s) => s.uid === result.selectedUid);
+}
+
+/**
+ * A trace-safe digest of a registration: its identity and the frames it links —
+ * never the (potentially large) displacement grid. The frames are what matters
+ * when diagnosing why fusion did or didn't pick a registration up.
+ */
+function summarizeRegistration(reg: Registration): Record<string, unknown> {
+  const base = { kind: reg.kind, name: reg.name, source: reg.sourceFrame, target: reg.targetFrame };
+  return reg.kind === 'rigid'
+    ? { ...base, matrixType: reg.matrixType }
+    : { ...base, gridDims: reg.grid.dims };
+}
+
+/** A one-word description of a resolved rigid alignment, for traces. */
+function describeAlignment(alignment: Mat4 | null): 'none' | 'identity' | 'matrix' {
+  if (alignment === null) return 'none';
+  return alignment === IDENTITY_MAT4 ? 'identity' : 'matrix';
 }
 
 /**
