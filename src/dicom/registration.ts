@@ -78,27 +78,46 @@ function parseRigid(name: string, dataSet: dicomParser.DataSet): Registration | 
 
 /**
  * A deformable registration: the Deformable Registration Sequence (0064,0002)
- * holds the moving frame (Source Frame of Reference UID, 0064,0003), the
- * displacement grid (0064,0005), and optional pre/post rigid stages (0064,000F /
- * 0064,000A). The fixed frame is the object's top-level Frame of Reference.
+ * holds one item per frame of reference. Each item carries a Source Frame of
+ * Reference UID (0064,0003), an optional displacement grid (0064,0005), and
+ * optional pre/post rigid stages (0064,000F / 0064,000A). The fixed frame is the
+ * object's top-level Frame of Reference.
+ *
+ * Real objects pair a grid-less self-registration for the fixed frame (its
+ * source frame is the fixed frame) with the moving-frame item that actually
+ * carries the displacement grid, so — like {@link parseRigid} — this picks the
+ * grid-bearing moving item rather than assuming a fixed sequence position.
  */
 function parseDeformable(name: string, dataSet: dicomParser.DataSet): Registration | null {
-  const item = items(dataSet, 'x00640002')[0];
-  if (!item) return null;
+  const targetFrame = frameOfReference(dataSet, 'x00200052');
+  const candidates = items(dataSet, 'x00640002')
+    .map((item) => ({ item, frame: frameOfReference(item, 'x00640003'), grid: gridOf(item) }))
+    .filter(
+      (c): c is { item: dicomParser.DataSet; frame: string | null; grid: DeformationGrid } =>
+        c.grid !== null,
+    );
 
-  const gridDs = items(item, 'x00640005')[0];
-  const grid = gridDs ? readGrid(gridDs) : null;
-  if (!grid) return null;
+  // Prefer the moving item (a frame other than the fixed one that carries a
+  // grid); fall back to the first grid-bearing item (a self-registration whose
+  // single item shares the target frame).
+  const moving = candidates.find((c) => c.frame !== targetFrame) ?? candidates[0];
+  if (!moving) return null;
 
   return {
     kind: 'deformable',
     name,
-    sourceFrame: frameOfReference(item, 'x00640003'),
-    targetFrame: frameOfReference(dataSet, 'x00200052'),
-    preMatrix: findMatrix(seqItem(item, 'x0064000f'))?.matrix ?? IDENTITY_MAT4,
-    postMatrix: findMatrix(seqItem(item, 'x0064000a'))?.matrix ?? IDENTITY_MAT4,
-    grid,
+    sourceFrame: moving.frame,
+    targetFrame,
+    preMatrix: findMatrix(seqItem(moving.item, 'x0064000f'))?.matrix ?? IDENTITY_MAT4,
+    postMatrix: findMatrix(seqItem(moving.item, 'x0064000a'))?.matrix ?? IDENTITY_MAT4,
+    grid: moving.grid,
   };
+}
+
+/** The displacement grid of a Deformable Registration Sequence item, or null when absent. */
+function gridOf(item: dicomParser.DataSet): DeformationGrid | null {
+  const gridDs = items(item, 'x00640005')[0];
+  return gridDs ? readGrid(gridDs) : null;
 }
 
 /** Read a Deformable Registration Grid Sequence item into a {@link DeformationGrid}. */
