@@ -1,6 +1,5 @@
 import {
   buildRoiLegend,
-  cantFuseMessage,
   dropHeadlineText,
   dropIntentOf,
   filterRawTags,
@@ -182,14 +181,6 @@ describe('dropHeadlineText', () => {
     expect(dropHeadlineText('primary')).toBe('Drop to load as primary');
     expect(dropHeadlineText('overlay')).toBe('Drop to fuse as an overlay');
     expect(dropHeadlineText('compare')).toBe('Drop to add a compare column');
-  });
-});
-
-describe('cantFuseMessage', () => {
-  it('names the action that could not apply and the frame-of-reference reason', () => {
-    expect(cantFuseMessage('overlay')).toContain('fuse');
-    expect(cantFuseMessage('compare')).toContain('compare');
-    expect(cantFuseMessage('overlay')).toContain('frame of reference');
   });
 });
 

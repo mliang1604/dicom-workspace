@@ -125,9 +125,8 @@ import {
 } from '../../render/surface';
 import type { DicomMetadata, RawTag } from '../../dicom/metadata';
 import type { Series } from '../../dicom/series';
-import { VolumeLoader, type LoadResult, type MergedLoad } from '../volume-loader';
+import { VolumeLoader, type LoadResult } from '../volume-loader';
 import { PatientCatalog } from '../patient-catalog';
-import { importKeepsOnePatient } from '../../dicom/catalog';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
 import { modifierLabel } from '../platform';
@@ -135,18 +134,15 @@ import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-s
 import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
 import { Camera3dStore } from './camera3d-store';
 import { CompareStore, COMPARE_GROUPS, type GroupNav } from './compare-store';
+import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coordinator';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
 import { SERIES_DND_MIME } from './history-panel/series-chip';
 
-/**
- * What a viewport drop will do, selected by the modifier held while dropping: a
- * plain drop loads as the primary series (smart-auto), ⌥/Alt forces a fusion
- * overlay, and ⇧/Shift adds a side-by-side compare column. See {@link dropIntentOf}.
- */
-export type DropIntent = 'primary' | 'overlay' | 'compare';
+/** Re-exported for templates/specs; the drop-intent policy lives in the load coordinator. */
+export type { DropIntent } from './load-coordinator';
 
 /** What the viewer is currently showing, as one-shape-at-a-time state. */
 type LoadState =
@@ -476,7 +472,7 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
-  providers: [MeasurementStore, LayersStore, Camera3dStore, CompareStore],
+  providers: [MeasurementStore, LayersStore, Camera3dStore, CompareStore, LoadCoordinator],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -495,6 +491,8 @@ const NOTICE_MS = 3600;
 export class Viewer {
   private readonly loader = inject(VolumeLoader);
   private readonly catalog = inject(PatientCatalog);
+  /** Resolves load requests to a discriminated outcome; provided per-component. */
+  private readonly loadCoordinator = inject(LoadCoordinator);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
   /** Fusion / layers override state and logic; provided per-component (see providers). */
@@ -2900,47 +2898,50 @@ export class Viewer {
   protected loadSeriesFromPanel(series: Series, intent: DropIntent = 'primary'): void {
     if (!this.renderer()) return; // GPU not ready; nothing to draw into yet
     const previous = this.load();
-    if (previous.status === 'ready' && previous.result.layers.some((l) => l.id === series.uid)) {
-      if (intent === 'compare') this.layoutMode.set(LayoutMode.Compare);
-      return;
-    }
-    let incoming: LoadResult;
+    const previousResult = previous.status === 'ready' ? previous.result : null;
+    let outcome: LoadOutcome;
     try {
-      const known = previous.status === 'ready' ? previous.result.allStructureSets : [];
-      incoming = this.loader.loadSeries(series, known);
+      outcome = this.loadCoordinator.resolveSeries(previousResult, series, intent);
     } catch (error) {
       this.load.set({ status: 'error', message: messageOf(error) });
       return;
     }
-    const merged =
-      previous.status === 'ready'
-        ? this.loader.merge(previous.result, incoming)
-        : { result: incoming, added: false };
-    this.applyMerged(merged, intent);
+    this.applyOutcome(outcome, previous, null);
   }
 
   /**
-   * Apply a smart-auto {@link MergedLoad} honouring the drop {@link DropIntent}. A
-   * plain (primary) drop takes the merge as-is — fuse a same-frame series as an
-   * overlay, else replace the view. A held modifier instead forces the overlay
-   * path: ⌥ and ⇧ proceed only when the series actually fused ({@link
-   * MergedLoad.added}), with ⇧ also switching to the side-by-side Compare layout;
-   * a series that can't fuse degrades to a graceful no-op with a flashed notice.
-   * Returns whether an overlay layer was added (for the recent-list overlay flag).
+   * Apply a resolved {@link LoadOutcome} to the view: replace the volume or add an
+   * overlay (⇧ also opening the compare columns), or restore the prior view on a
+   * declined patient switch / a can't-fuse reject (flashing the notice). A file
+   * `entry`, when present, is recorded in the recent list — flagged as an overlay
+   * when one was added — so a layered load reads apart from a fresh one.
    */
-  private applyMerged(merged: MergedLoad, intent: DropIntent): boolean {
-    if (intent === 'primary') {
-      if (merged.added) this.addLayer(merged.result);
-      else this.applyVolume(merged.result);
-      return merged.added;
+  private applyOutcome(outcome: LoadOutcome, previous: LoadState, entry: RecentEntry | null): void {
+    switch (outcome.kind) {
+      case 'replace':
+        this.applyVolume(outcome.result);
+        if (entry) this.recentStore.record(entry);
+        return;
+      case 'overlay':
+        this.addLayer(outcome.result);
+        if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
+        if (entry) this.recentStore.record({ ...entry, overlay: true });
+        return;
+      case 'reject':
+        this.load.set(previous); // leave what was showing untouched
+        this.flashNotice(outcome.message);
+        return;
+      case 'cancel':
+        this.load.set(previous); // patient-switch declined
+        return;
+      case 'noop':
+        if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
+        return;
+      default: {
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
     }
-    if (!merged.added) {
-      this.flashNotice(cantFuseMessage(intent));
-      return false;
-    }
-    this.addLayer(merged.result);
-    if (intent === 'compare') this.layoutMode.set(LayoutMode.Compare);
-    return true;
   }
 
   /** Flash a transient notice over the viewport, replacing any still showing. */
@@ -3619,51 +3620,18 @@ export class Viewer {
         // Ignore stragglers from a superseded load (a new load already started).
         if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
       });
-      // A held modifier (⌥ fuse / ⇧ compare) forces the fusion overlay path, which
-      // only applies to a same-patient, same-frame series of what's already shown.
-      // A different patient or study can't fuse, so it's a graceful no-op with
-      // feedback — and never prompts the patient-switch confirm a plain load would.
-      if (intent !== 'primary') {
-        const samePatient = importKeepsOnePatient(this.catalog.currentPatientId(), result.series);
-        const merged =
-          previous.status === 'ready' && samePatient
-            ? this.loader.merge(previous.result, result)
-            : { result, added: false };
-        if (!merged.added) {
-          this.load.set(previous);
-          this.flashNotice(cantFuseMessage(intent));
-          return;
-        }
-        this.catalog.add(result.series);
-        this.applyMerged(merged, intent);
-        if (entry) this.recentStore.record({ ...entry, overlay: true });
-        return;
-      }
-      // One-patient guard: every parsed series is folded into the patient catalog,
-      // but only after making sure the import doesn't silently mix patients. A batch
-      // with a different (or several) PatientID prompts to switch — clearing the
-      // catalog and the current view — or cancel, leaving what's showing untouched.
-      let switched = false;
-      if (!importKeepsOnePatient(this.catalog.currentPatientId(), result.series)) {
-        if (!confirmPatientSwitch()) {
-          this.load.set(previous);
-          return;
-        }
-        this.catalog.clear();
-        switched = true;
-      }
-      this.catalog.add(result.series);
-      // A patient switch starts a fresh view; otherwise a same-frame series of the
-      // current patient stacks atop what's showing (the overlay merge).
-      const merged =
-        previous.status === 'ready' && !switched
-          ? this.loader.merge(previous.result, result)
-          : { result, added: false };
-      if (merged.added) this.addLayer(merged.result);
-      else this.applyVolume(merged.result);
-      // Remember it once it loaded cleanly, flagging an overlay so the recent
-      // list shows a layered load apart from a fresh one.
-      if (entry) this.recentStore.record(merged.added ? { ...entry, overlay: true } : entry);
+      // The coordinator runs the whole load policy — held-modifier fusion, the
+      // one-patient guard (prompting through the injected confirm) and catalog
+      // mutation — and hands back what to do; the patient-switch confirm is the
+      // only browser prompt, injected so the policy stays testable.
+      const previousResult = previous.status === 'ready' ? previous.result : null;
+      const outcome = this.loadCoordinator.resolveFiles(
+        previousResult,
+        result,
+        intent,
+        confirmPatientSwitch,
+      );
+      this.applyOutcome(outcome, previous, entry);
     } catch (error) {
       this.load.set({ status: 'error', message: messageOf(error) });
     }
@@ -3689,10 +3657,20 @@ export class Viewer {
     const volume = baseLayer(result.layers)!.volume;
     this.stopCine(); // a fresh volume resets the view; don't keep cining the old one
     renderer.setVolume(volume);
-    // Persisted view preferences (layout, projection mode, sagittal flip) are kept
-    // across loads, so they aren't reset here — the signals already hold them.
-    // Window/level and slab thickness depend on the volume, so honour a stored
-    // preference when present, else fall back to the volume's own default.
+    this.resetViewForVolume(renderer, volume);
+    this.load.set({ status: 'ready', result });
+  }
+
+  /**
+   * The one grouped reset of every per-load view default, so they live in a single
+   * place instead of being scattered (the forget-a-signal footgun). The feature
+   * stores each reset their own domain — measurements, layers (incl. the
+   * checkerboard), compare linking, and the 3D camera/TF/DVR/clip — and the
+   * remaining per-volume signals are reset here. Persisted view preferences
+   * (layout, projection mode, sagittal flip) are deliberately *not* reset; window/
+   * level and slab honour a stored preference when present, else the volume default.
+   */
+  private resetViewForVolume(renderer: SliceRenderer, volume: Volume): void {
     const prefs = this.preferencesStore.preferences();
     const fullDepthMm = Math.round(2 * volumeBounds(volume).radius);
     this.windowCenter.set(prefs.windowCenter ?? Math.round(volume.windowCenter));
@@ -3725,7 +3703,6 @@ export class Viewer {
       middleSlice(renderer, Orientation.Coronal),
       middleSlice(renderer, Orientation.Sagittal),
     ]);
-    this.load.set({ status: 'ready', result });
   }
 
   private observeResize(canvas: HTMLCanvasElement): void {
@@ -3911,16 +3888,6 @@ export function dropHeadlineText(intent: DropIntent): string {
       return exhaustive;
     }
   }
-}
-
-/**
- * Feedback when a held-modifier drop can't apply: ⌥ fuse and ⇧ compare both need a
- * series sharing the current scan's frame of reference, so a different study (or
- * nothing loaded to fuse against) degrades to this notice instead of replacing.
- */
-export function cantFuseMessage(intent: 'overlay' | 'compare'): string {
-  const action = intent === 'overlay' ? 'fuse' : 'compare';
-  return `Can’t ${action}: drop a series that shares the current scan’s frame of reference.`;
 }
 
 /**

@@ -141,14 +141,17 @@ export class LayersStore {
   }
 
   /**
-   * Reset the per-layer overrides on a fresh base load (an added overlay starts
-   * visible, fully opaque, at its default display and window). The checkerboard
-   * blend state is intentionally left as-is, matching the viewer's prior reset.
+   * Reset the fusion/layers state on a fresh base load: the per-layer overrides (an
+   * added overlay starts visible, fully opaque, at its default display and window)
+   * and the checkerboard blend back off — the latter the omission the consolidated
+   * load reset (#206) fixed, so a stale checkerboard no longer carries into a new
+   * series.
    */
   reset(): void {
     this._hidden.set(new Set());
     this._opacities.set(new Map());
     this._displays.set(new Map());
     this._windows.set(new Map());
+    this.checkerboardEnabled.set(false);
   }
 }

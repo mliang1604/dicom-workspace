@@ -128,7 +128,7 @@ describe('LayersStore checkerboard state', () => {
 });
 
 describe('LayersStore.reset', () => {
-  it('drops the per-layer overrides but leaves the checkerboard state', () => {
+  it('drops the per-layer overrides and turns the checkerboard back off', () => {
     const store = new LayersStore();
     store.toggleVisible('ov');
     store.setOpacity('ov', 20);
@@ -143,7 +143,7 @@ describe('LayersStore.reset', () => {
     expect(out[1].opacity).toBe(0.5); // back to the overlay default
     expect(out[1].display).toEqual({ kind: 'grayscale' });
     expect(store.windowFor(registry()[1])).toEqual({ center: 1000, width: 2000 });
-    // Checkerboard is intentionally preserved across a load (see reset()).
-    expect(store.checkerboardEnabled()).toBe(true);
+    // A stale checkerboard no longer carries into a fresh load (#206).
+    expect(store.checkerboardEnabled()).toBe(false);
   });
 });
