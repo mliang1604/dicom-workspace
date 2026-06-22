@@ -221,6 +221,25 @@ describe('extractMetadata', () => {
     expect([...ids]).toEqual([...ids].sort());
 
     const name = rawTags.find((tag) => tag.tag === '(0010,0010)');
-    expect(name).toEqual({ tag: '(0010,0010)', vr: 'PN', value: 'Doe, John Q' });
+    expect(name).toEqual({
+      tag: '(0010,0010)',
+      label: 'Patient Name',
+      vr: 'PN',
+      value: 'Doe, John Q',
+    });
+  });
+
+  it('labels each raw tag from the data dictionary, private for odd groups', () => {
+    const ds = dicomFile(
+      concat([
+        element(0x0008, 0x0060, 'CS', text('CT')), // Modality — known
+        element(0x0009, 0x0010, 'LO', text('ACME PRIVATE')), // odd group — private
+      ]),
+    );
+    const { rawTags } = extractMetadata(ds);
+    const label = (tag: string) => rawTags.find((t) => t.tag === tag)?.label;
+
+    expect(label('(0008,0060)')).toBe('Modality');
+    expect(label('(0009,0010)')).toBe('Private Tag');
   });
 });

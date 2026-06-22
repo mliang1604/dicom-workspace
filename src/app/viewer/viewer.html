@@ -930,7 +930,7 @@
             <input
               type="search"
               class="info-search"
-              placeholder="Filter by tag, VR, or value…"
+              placeholder="Filter by tag, name, VR, or value…"
               [value]="rawTagFilter()"
               (input)="onRawTagFilterInput($event)"
               aria-label="Filter raw tags"
@@ -939,6 +939,7 @@
               @for (tag of filteredRawTags(); track tag.tag) {
                 <li class="raw-tag">
                   <code class="raw-tag-id">{{ tag.tag }}</code>
+                  <span class="raw-tag-name raw-tag-value">{{ tag.label ?? '—' }}</span>
                   <span class="raw-tag-vr">{{ tag.vr ?? '—' }}</span>
                   <span class="raw-tag-value">{{ tag.value }}</span>
                 </li>
