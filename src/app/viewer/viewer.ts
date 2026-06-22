@@ -139,6 +139,7 @@ import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
+import { TracePanel } from './trace-panel/trace-panel';
 import { SERIES_DND_MIME } from './history-panel/series-chip';
 
 /** Re-exported for templates/specs; the drop-intent policy lives in the load coordinator. */
@@ -471,7 +472,7 @@ const NOTICE_MS = 3600;
 @Component({
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [RangeFill, HistoryPanel],
+  imports: [RangeFill, HistoryPanel, TracePanel],
   providers: [MeasurementStore, LayersStore, Camera3dStore, CompareStore, LoadCoordinator],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',

@@ -1,8 +1,9 @@
 import { Injectable, inject } from '@angular/core';
-import { importKeepsOnePatient } from '../../dicom/catalog';
+import { importKeepsOnePatient, importPatientIds } from '../../dicom/catalog';
 import type { Series } from '../../dicom/series';
 import { VolumeLoader, type LoadResult, type MergedLoad } from '../volume-loader';
 import { PatientCatalog } from '../patient-catalog';
+import { trace } from '../../diag/trace';
 
 /**
  * What a viewport drop will do, selected by the modifier held while dropping: a
@@ -82,10 +83,22 @@ export interface FileLoadDeps {
 export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
   const { previous, result, intent, confirm, currentPatientId, keepsOnePatient, merge, catalog } =
     deps;
+  const t = trace('load');
 
   if (intent !== 'primary') {
     const samePatient = keepsOnePatient(currentPatientId, result.series);
     const merged = previous && samePatient ? merge(previous, result) : { result, added: false };
+    // The patient gate runs before merge, so a cross-patient overlay rejects here —
+    // the registration is never consulted. This trace separates that case from a
+    // same-patient drop that mergeLoad then declines.
+    t?.('held-modifier drop', {
+      intent,
+      currentPatientId,
+      incomingPatients: importPatientIds(result.series),
+      hasPrevious: previous !== null,
+      samePatient,
+      added: merged.added,
+    });
     if (!merged.added) return { kind: 'reject', message: cantFuseMessage(intent) };
     catalog.add(result.series);
     return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
@@ -93,13 +106,26 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
 
   let switched = false;
   if (!keepsOnePatient(currentPatientId, result.series)) {
-    if (!confirm()) return { kind: 'cancel' };
+    if (!confirm()) {
+      t?.('primary drop: patient switch declined', {
+        currentPatientId,
+        incomingPatients: importPatientIds(result.series),
+      });
+      return { kind: 'cancel' };
+    }
     catalog.clear();
     switched = true;
   }
   catalog.add(result.series);
   // A patient switch starts a fresh view; otherwise a same-frame series stacks atop.
   const merged = previous && !switched ? merge(previous, result) : { result, added: false };
+  t?.('primary drop', {
+    currentPatientId,
+    incomingPatients: importPatientIds(result.series),
+    hasPrevious: previous !== null,
+    switched,
+    added: merged.added,
+  });
   return merged.added
     ? { kind: 'overlay', result: merged.result, compare: false }
     : { kind: 'replace', result: merged.result };

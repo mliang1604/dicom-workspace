@@ -1,0 +1,58 @@
+<button
+  type="button"
+  class="trace-toggle"
+  [class.active]="store.anyEnabled()"
+  [attr.aria-expanded]="open()"
+  aria-haspopup="dialog"
+  title="Diagnostic tracing of load/fusion decisions — enable, reproduce, then copy the log to share"
+  (click)="toggleOpen()"
+>
+  Trace ⌗ {{ store.anyEnabled() ? 'on' : 'off' }}
+</button>
+
+@if (open()) {
+  <div class="trace-popover" role="dialog" aria-label="Diagnostic tracing">
+    <header class="trace-header">
+      <strong>Tracing</strong>
+      <button type="button" class="link" (click)="close()" aria-label="Close">✕</button>
+    </header>
+
+    <p class="trace-hint">Enable categories, reproduce the issue, then copy the log.</p>
+
+    <ul class="trace-cats">
+      @for (cat of store.categories; track cat) {
+        <li>
+          <label>
+            <input type="checkbox" [checked]="store.isEnabled(cat)" (change)="store.toggle(cat)" />
+            {{ cat }}
+          </label>
+        </li>
+      }
+    </ul>
+
+    <div class="trace-actions">
+      <button type="button" (click)="store.enableAll()">All</button>
+      <button type="button" (click)="store.disableAll()">None</button>
+    </div>
+
+    <div class="trace-actions">
+      <button type="button" (click)="copyLog()">Copy log</button>
+      <button type="button" (click)="showLog()">Show</button>
+      <button type="button" (click)="clearLog()">Clear</button>
+    </div>
+
+    @if (status(); as message) {
+      <p class="trace-status" role="status">{{ message }}</p>
+    }
+
+    @if (logText(); as text) {
+      <textarea
+        class="trace-log"
+        readonly
+        rows="8"
+        [value]="text"
+        (focus)="selectAll($event)"
+      ></textarea>
+    }
+  </div>
+}
