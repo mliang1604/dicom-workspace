@@ -1,10 +1,12 @@
 import {
   baseImageLayer,
   overlayImageLayer,
+  type Registration,
   type Slice,
   type Volume,
   type VolumeGeometry,
 } from '../dicom/types';
+import { invert } from '../dicom/mat4';
 import type { Series } from '../dicom/series';
 import { doseOverlaySeries, mergeLoad, VolumeLoader, type LoadResult } from './volume-loader';
 
@@ -271,5 +273,42 @@ describe('mergeLoad', () => {
     const current = fakeLoad('ct', 'frame-1');
     mergeLoad(current, fakeLoad('mr', 'frame-1', 'MR'));
     expect(current.layers.map((l) => l.id)).toEqual(['ct']);
+  });
+
+  it('adds a different-frame series as a registered overlay when a registration links them', () => {
+    // CT in frame-1, MR in frame-2; a rigid REG (carried on the incoming load)
+    // maps the MR (moving) frame onto the CT (fixed) frame, so they fuse.
+    const reg: Registration = {
+      kind: 'rigid',
+      name: 'reg.dcm',
+      sourceFrame: 'frame-2',
+      targetFrame: 'frame-1',
+      matrix: [1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 30, 0, 0, 0, 1],
+      matrixType: 'RIGID',
+    };
+    const current = fakeLoad('ct', 'frame-1');
+    const incoming: LoadResult = { ...fakeLoad('mr', 'frame-2', 'MR'), registrations: [reg] };
+
+    const { result, added } = mergeLoad(current, incoming);
+
+    expect(added).toBe(true);
+    expect(result.layers.map((l) => l.id)).toEqual(['ct', 'mr']);
+    // The overlay carries the base→overlay transform (here the matrix's inverse,
+    // since the base is the registration's target frame).
+    const overlay = result.layers[1];
+    expect(overlay.alignToBase).toEqual(invert(reg.matrix));
+    // The registration is retained on the merged result for later re-resolution.
+    expect(result.registrations).toEqual([reg]);
+  });
+
+  it('leaves a same-frame overlay without an alignment transform', () => {
+    const { result } = mergeLoad(fakeLoad('ct', 'frame-1'), fakeLoad('mr', 'frame-1', 'MR'));
+    expect(result.layers[1].alignToBase).toBeUndefined();
+  });
+
+  it('still replaces a different-frame series when no registration links them', () => {
+    const current = fakeLoad('ct', 'frame-1');
+    const incoming = fakeLoad('mr', 'frame-2', 'MR');
+    expect(mergeLoad(current, incoming).added).toBe(false);
   });
 });

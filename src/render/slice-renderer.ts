@@ -1,6 +1,6 @@
 import type { GpuContext } from './device';
 import { floatsToHalf } from '../dicom/half';
-import { Orientation, type LayerDisplay, type Vec3, type Volume } from '../dicom/types';
+import { Orientation, type LayerDisplay, type Mat4, type Vec3, type Volume } from '../dicom/types';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import {
   colormap,
@@ -447,6 +447,13 @@ export class SliceRenderer {
   private overlayTexture: GPUTexture | null = null;
   /** Overlay co-registration matrices (base pane plane → overlay grid), or null. */
   private overlayMatrices: readonly Float32Array[] | null = null;
+  /**
+   * Base→overlay patient transform for an overlay in a different frame of
+   * reference (from a Spatial Registration), or null when the overlay shares the
+   * base's frame. Folded into the overlay matrices so the overlay samples in the
+   * base's displayed plane.
+   */
+  private overlayAlign: Mat4 | null = null;
   /** Overlay matrices on its OWN bounds, for drawing it standalone (Compare). */
   private overlayOwnMatrices: readonly Float32Array[] | null = null;
   /** Composite opacity of the overlay over the base, 0 when no overlay. */
@@ -682,6 +689,7 @@ export class SliceRenderer {
     this.overlayVolume = null;
     this.overlayMatrices = null;
     this.overlayOwnMatrices = null;
+    this.overlayAlign = null;
     this.overlayOpacity = 0;
     this.overlayColormap = false;
   }
@@ -727,8 +735,17 @@ export class SliceRenderer {
    * and the view state are untouched (unlike {@link setVolume}). The overlay
    * shares the patient frame but has its own grid, so it carries its own
    * per-orientation plane→texture matrices.
+   *
+   * `alignToBase` is the base→overlay patient transform when the overlay lives in
+   * a different frame of reference linked by a Spatial Registration; omit it (or
+   * pass null) when the overlay shares the base's frame.
    */
-  setOverlay(volume: Volume | null, opacity: number, display?: LayerDisplay): void {
+  setOverlay(
+    volume: Volume | null,
+    opacity: number,
+    display?: LayerDisplay,
+    alignToBase?: Mat4,
+  ): void {
     if (!volume) {
       if (!this.overlayVolume) return;
       this.clearOverlay();
@@ -757,9 +774,16 @@ export class SliceRenderer {
     // and refreshed per-frame for oblique ones in writeParams. Without a base
     // there's nothing to composite over (matrices stay null → shader skips it).
     const base = this.volume;
+    this.overlayAlign = alignToBase ?? null;
     this.overlayMatrices = base
       ? [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal].map((orientation) =>
-          overlayPlaneToTexMatrix(base, volume, orientation),
+          overlayPlaneToTexMatrix(
+            base,
+            volume,
+            orientation,
+            undefined,
+            this.overlayAlign ?? undefined,
+          ),
         )
       : null;
     // Standalone matrices on the overlay's own bounds — the Compare layout draws
@@ -1048,7 +1072,13 @@ export class SliceRenderer {
       composite && this.overlayVolume && this.overlayMatrices
         ? {
             matrix: isOblique(view.rotation)
-              ? overlayPlaneToTexMatrix(volume, this.overlayVolume, view.orientation, view.rotation)
+              ? overlayPlaneToTexMatrix(
+                  volume,
+                  this.overlayVolume,
+                  view.orientation,
+                  view.rotation,
+                  this.overlayAlign ?? undefined,
+                )
               : this.overlayMatrices[view.orientation],
             windowCenter: this.overlayVolume.windowCenter,
             windowWidth: this.overlayVolume.windowWidth,

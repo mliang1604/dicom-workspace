@@ -1829,7 +1829,15 @@ export class Viewer {
       // The layer's (overridable) opacity drives compositing; the blend bar and the
       // layers-panel slider both edit it, so either re-runs setOverlay and redraws.
       const opacity = overlay ? overlay.opacity : 0;
-      if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
+      // A cross-frame overlay (registered onto the base) carries its base→overlay
+      // transform on the layer; same-frame overlays leave it undefined.
+      if (renderer)
+        renderer.setOverlay(
+          overlay?.volume ?? null,
+          opacity,
+          overlay?.display,
+          overlay?.alignToBase,
+        );
       this.scheduleFrame();
     });
 

@@ -53,6 +53,18 @@ describe('layerLegend', () => {
     expect(rows[0].label).toBe('RTDOSE');
     expect(rows[0].displayValue).toBe('jet');
   });
+
+  it('flags a cross-frame overlay (one carrying an alignment transform) as registered', () => {
+    const plain = overlayImageLayer('mr', makeVolume('MR'));
+    const registered: Layer = {
+      ...plain,
+      id: 'mr-reg',
+      alignToBase: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    };
+    const rows = layerLegend([plain, registered]);
+    expect(rows[0].registered).toBe(false);
+    expect(rows[1].registered).toBe(true);
+  });
 });
 
 describe('LayersStore.apply', () => {

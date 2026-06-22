@@ -1,4 +1,11 @@
-import { Orientation, type Vec3, type Volume, type VolumeGeometry } from '../dicom/types';
+import {
+  IDENTITY_MAT4,
+  Orientation,
+  type Mat4,
+  type Vec3,
+  type Volume,
+  type VolumeGeometry,
+} from '../dicom/types';
 import { dot, sub } from '../dicom/vec3';
 import {
   clipLineToUnitSquare,
@@ -96,6 +103,19 @@ describe('overlayPlaneToTexMatrix', () => {
       0.5,
     );
     expect(correct[0]).not.toBeCloseTo(naive[0]);
+  });
+
+  it('applies a base→overlay registration transform before sampling the overlay grid', () => {
+    // A cross-frame overlay on the same grid as the base, linked by a +10mm/axis
+    // translation: the base pane centre (patient [5,5,5]) maps to overlay-frame
+    // [15,15,15], the far corner of the overlay grid → tex 1.0.
+    const translate: Mat4 = [1, 0, 0, 10, 0, 1, 0, 10, 0, 0, 1, 10, 0, 0, 0, 1];
+    const m = overlayPlaneToTexMatrix(base, base, Orientation.Axial, undefined, translate);
+    expectVec(applyMat4(m, 0.5, 0.5, 0.5), [1, 1, 1]);
+
+    // The identity transform reproduces the untransformed mapping (centre → 0.5).
+    const id = overlayPlaneToTexMatrix(base, base, Orientation.Axial, undefined, IDENTITY_MAT4);
+    expectVec(applyMat4(id, 0.5, 0.5, 0.5), [0.5, 0.5, 0.5]);
   });
 });
 
