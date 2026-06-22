@@ -72,12 +72,11 @@ import {
   type PlanePoint,
 } from '../../render/pane-coords';
 import {
+  formatValue,
   measureAngleDeg,
   measureDistanceMm,
   roiAreaMm2,
   roiBounds,
-  roiStats,
-  type HuStats,
   type RoiShape,
 } from '../../render/measure';
 import {
@@ -144,6 +143,7 @@ import { importKeepsOnePatient } from '../../dicom/catalog';
 import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
 import { modifierLabel } from '../platform';
+import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
@@ -311,45 +311,8 @@ interface PaneAnnotation {
   readonly scale: ScaleBarOverlay | null;
 }
 
-/** An interactive measurement tool, or `none` for the default pan/orbit gestures. */
-type MeasureTool = 'distance' | 'angle' | 'ellipse' | 'rectangle';
+/** The active measurement tool, or `none` for the default pan/orbit gestures. */
 type ToolMode = 'none' | MeasureTool;
-
-/** How many points define each tool: a segment, a vertex pair of rays, or a box. */
-const TOOL_POINTS: Readonly<Record<MeasureTool, number>> = {
-  distance: 2,
-  angle: 3,
-  ellipse: 2,
-  rectangle: 2,
-};
-
-/**
- * A completed measurement, pinned to the orientation and slice it was drawn on
- * (so it hides when scrolled off). Points are stored as in-plane
- * {@link PlanePoint}s, which track pan/zoom/flip for free — only the projection
- * to a pane pixel applies the live view transform.
- */
-interface Measurement {
-  readonly id: number;
-  readonly tool: MeasureTool;
-  readonly orientation: Orientation;
-  readonly sliceIndex: number;
-  readonly points: readonly PlanePoint[];
-}
-
-/** A measurement being placed: the same shape, fewer than its full set of points. */
-interface PendingMeasurement {
-  readonly tool: MeasureTool;
-  readonly orientation: Orientation;
-  readonly sliceIndex: number;
-  readonly points: readonly PlanePoint[];
-}
-
-/** An in-progress drag of one measurement point (an endpoint or an ROI corner). */
-interface MeasureDrag {
-  readonly id: number;
-  readonly pointIndex: number;
-}
 
 /** A measurement projected into its pane for the SVG overlay, in pane-local pixels. */
 interface MeasurementOverlay {
@@ -562,6 +525,7 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
+  providers: [MeasurementStore],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -795,14 +759,8 @@ export class Viewer {
   private readonly cineOrientation = signal<Orientation>(Orientation.Axial);
   /** The active measurement tool, or `none` for the default pan/orbit gestures. */
   protected readonly activeTool = signal<ToolMode>('none');
-  /** Completed measurements, each pinned to its orientation + slice. */
-  private readonly measurements = signal<readonly Measurement[]>([]);
-  /** The measurement currently being placed (awaiting its remaining points), or null. */
-  private readonly pending = signal<PendingMeasurement | null>(null);
-  /** The measurement point being dragged (an endpoint or ROI corner), or null. */
-  private readonly measureDrag = signal<MeasureDrag | null>(null);
-  /** Monotonic id source for new measurements. */
-  private nextMeasureId = 0;
+  /** Measurement / ROI-tool state and logic; provided per-component (see providers). */
+  private readonly measure = inject(MeasurementStore);
   /** The measurement tools offered in the palette, in display order. */
   protected readonly measureTools = [
     { value: 'distance', label: 'Distance', glyph: '╱' },
@@ -811,9 +769,7 @@ export class Viewer {
     { value: 'rectangle', label: 'Rectangle', glyph: '▭' },
   ] as const;
   /** Whether any measurement (placed or in-progress) exists, for the Clear button. */
-  protected readonly hasMeasurements = computed(
-    () => this.measurements().length > 0 || this.pending() !== null,
-  );
+  protected readonly hasMeasurements = this.measure.hasMeasurements;
   /**
    * Keys of ROIs whose contours are hidden (see {@link roiKeyOf}). Empty by default,
    * so a freshly loaded structure set shows every ROI; the structures legend
@@ -1226,27 +1182,9 @@ export class Viewer {
    * or zoom drag from re-sweeping every region each frame. Recomputed only when a
    * measurement is added, edited, or the volume changes.
    */
-  private readonly measurementStats = computed<ReadonlyMap<number, readonly string[]>>(() => {
-    const volume = this.volume();
-    const stats = new Map<number, readonly string[]>();
-    if (!volume) return stats;
-    const unit = modalityUnit(volume.modality);
-    const obliques = this.obliques();
-    for (const m of this.measurements()) {
-      if ((m.tool !== 'ellipse' && m.tool !== 'rectangle') || m.points.length < 2) continue;
-      const res = roiStats(
-        volume,
-        m.orientation,
-        m.sliceIndex,
-        m.tool,
-        m.points[0],
-        m.points[1],
-        obliques[m.orientation],
-      );
-      stats.set(m.id, roiLines(res.areaMm2, res.stats, unit));
-    }
-    return stats;
-  });
+  private readonly measurementStats = computed<ReadonlyMap<number, readonly string[]>>(() =>
+    this.measure.statsFor(this.volume(), this.obliques()),
+  );
 
   /**
    * Measurements (and the in-progress one) projected into their panes for the SVG
@@ -1267,7 +1205,7 @@ export class Viewer {
     const indices = this.sliceIndices();
 
     const result: MeasurementOverlay[] = [];
-    for (const m of this.measurements()) {
+    for (const m of this.measure.measurements()) {
       const overlay = this.buildOverlay(
         volume,
         panes,
@@ -1285,7 +1223,7 @@ export class Viewer {
     // The in-progress measurement, previewed with a provisional point under the
     // cursor so the segment/box is visible as it's drawn. Reading the cursor only
     // while placing keeps the overlay from recomputing on every idle pointer move.
-    const pending = this.pending();
+    const pending = this.measure.pending();
     if (pending) {
       const preview = this.previewPoint(volume, panes, zooms, pans, flipped, pending.orientation);
       const points = preview ? [...pending.points, preview] : pending.points;
@@ -2705,13 +2643,12 @@ export class Viewer {
   /** Activate a measurement tool, or toggle it off if it's already active. */
   protected setTool(tool: MeasureTool): void {
     this.activeTool.update((current) => (current === tool ? 'none' : tool));
-    this.pending.set(null); // abandon any half-placed measurement when the tool changes
+    this.measure.cancelPending(); // abandon any half-placed measurement when the tool changes
   }
 
   /** Remove every placed measurement and any in-progress one. */
   protected clearMeasurements(): void {
-    this.measurements.set([]);
-    this.pending.set(null);
+    this.measure.clear();
   }
 
   /**
@@ -2739,8 +2676,8 @@ export class Viewer {
       this.infoPanelOpen.set(false);
       return;
     }
-    if (this.pending()) {
-      this.pending.set(null);
+    if (this.measure.pending()) {
+      this.measure.cancelPending();
       return;
     }
     if (this.activeTool() !== 'none') this.activeTool.set('none');
@@ -2763,23 +2700,7 @@ export class Viewer {
     const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
     if (!point) return; // clicked the letterbox margin outside the image
 
-    const sliceIndex = this.sliceIndices()[orientation];
-    const pending = this.pending();
-    const continuing =
-      pending !== null &&
-      pending.tool === tool &&
-      pending.orientation === orientation &&
-      pending.sliceIndex === sliceIndex;
-    const points = continuing ? [...pending.points, point] : [point];
-    if (points.length >= TOOL_POINTS[tool]) {
-      this.measurements.update((list) => [
-        ...list,
-        { id: this.nextMeasureId++, tool, orientation, sliceIndex, points },
-      ]);
-      this.pending.set(null);
-    } else {
-      this.pending.set({ tool, orientation, sliceIndex, points });
-    }
+    this.measure.place(tool, orientation, this.sliceIndices()[orientation], point);
   }
 
   /** Begin dragging a placed measurement's endpoint or ROI corner. */
@@ -2789,38 +2710,33 @@ export class Viewer {
     event.stopPropagation();
     const target = event.target as Element;
     target.setPointerCapture?.(event.pointerId);
-    this.measureDrag.set({ id, pointIndex });
+    this.measure.beginDrag(id, pointIndex);
   }
 
   /** Move the dragged measurement point to follow the cursor. */
   protected onMeasureHandleMove(event: PointerEvent): void {
-    const drag = this.measureDrag();
-    if (!drag) return;
+    if (!this.measure.drag()) return;
     event.preventDefault();
     event.stopPropagation();
     const volume = this.volume();
     if (!volume) return;
-    const measurement = this.measurements().find((m) => m.id === drag.id);
+    const measurement = this.measure.draggedMeasurement();
     if (!measurement) return;
     const orientation = measurement.orientation;
     const placement = this.mprPlacement(orientation);
     if (!placement) return;
     const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
     if (!point) return;
-    this.measurements.update((list) =>
-      list.map((m) =>
-        m.id === drag.id ? { ...m, points: withIndex(m.points, drag.pointIndex, point) } : m,
-      ),
-    );
+    this.measure.applyDragPoint(point);
   }
 
   /** End a measurement-point drag. */
   protected onMeasureHandleUp(event: PointerEvent): void {
-    if (!this.measureDrag()) return;
+    if (!this.measure.drag()) return;
     event.stopPropagation();
     const target = event.target as Element;
     if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
-    this.measureDrag.set(null);
+    this.measure.endDrag();
   }
 
   /** Map a pointer event to the in-plane point it covers on a given MPR pane. */
@@ -3905,9 +3821,8 @@ export class Viewer {
     this.mainOrientation.set(Orientation.Axial);
     this.focusVoxel.set(null);
     this.activeTool.set('none');
-    this.measurements.set([]);
-    this.pending.set(null);
-    this.measureDrag.set(null);
+    this.measure.clear();
+    this.measure.endDrag();
     this.hiddenRois.set(new Set()); // a fresh structure set starts fully visible
     this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
     this.roiOpacities.set(new Map()); // …fully opaque
@@ -4198,10 +4113,6 @@ function formatProbe(
   return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}${overlays}`;
 }
 
-function formatValue(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
-}
-
 /** Join pane-local points into an SVG polyline `points` string. */
 function polylineOf(points: readonly PanePoint[]): string {
   return points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
@@ -4212,18 +4123,6 @@ function midpoint(points: readonly PanePoint[]): PanePoint {
   const a = points[0];
   const b = points[points.length - 1];
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
-
-/** Readout lines for an ROI: its area, then the HU statistics when available. */
-function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): string[] {
-  const u = unit ? ` ${unit}` : '';
-  const lines = [`${areaMm2.toFixed(0)} mm²`];
-  if (stats) {
-    lines.push(`mean ${formatValue(stats.mean)}${u}`);
-    lines.push(`SD ${formatValue(stats.sd)}`);
-    lines.push(`min ${formatValue(stats.min)} · max ${formatValue(stats.max)}`);
-  }
-  return lines;
 }
 
 /**
@@ -4305,13 +4204,6 @@ export function buildRoiLegend(
     }
   });
   return entries;
-}
-
-/** Immutably replace the element at `index` of a readonly array. */
-function withIndex<T>(values: readonly T[], index: number, value: T): readonly T[] {
-  const next = [...values];
-  next[index] = value;
-  return next;
 }
 
 function withValue<T>(
