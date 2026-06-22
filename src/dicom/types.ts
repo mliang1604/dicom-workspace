@@ -137,6 +137,88 @@ export interface StructureSet {
 }
 
 /**
+ * A 4×4 affine transform as 16 numbers in **row-major** order — the layout of a
+ * DICOM Frame of Reference Transformation Matrix (3006,00C6). For a point
+ * `p = [x, y, z, 1]`, the transformed point is `M · p` with `M`'s rows read in
+ * groups of four. Patient→patient registrations and their pre/post rigid stages
+ * are carried in this form; the renderer transposes to WGSL's column-major
+ * `mat4x4` when it uploads (see `texAffineMatrix` in `render/reslice.ts`).
+ */
+export type Mat4 = readonly number[];
+
+/** The 4×4 identity, used when a registration stage is absent (a no-op transform). */
+export const IDENTITY_MAT4: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/**
+ * The displacement field of a DICOM Deformable Spatial Registration: a regular
+ * grid of patient-space (LPS, mm) offset vectors that warp the moving frame onto
+ * the fixed frame. Read from the Deformable Registration Grid Sequence
+ * (0064,0005). Sampled (trilinearly) at a patient point to get the local
+ * displacement; Phase 2 uploads it as an `rgba16float` 3D texture so the GPU does
+ * the interpolation.
+ */
+export interface DeformationGrid {
+  /** Patient coordinates of grid node (0,0,0): ImagePositionPatient (0020,0032). */
+  readonly origin: Vec3;
+  /**
+   * Grid axis direction cosines (6 values, row then column), ImageOrientationPatient
+   * (0020,0037); the axis-aligned identity `[1,0,0,0,1,0]` when the grid omits it.
+   */
+  readonly orientation: readonly number[];
+  /** Node counts along x, y, z: GridDimensions (0064,0007). */
+  readonly dims: readonly [number, number, number];
+  /** Inter-node spacing in mm along x, y, z: GridResolution (0064,0008). */
+  readonly spacing: readonly [number, number, number];
+  /**
+   * Flat `[dx, dy, dz]` displacement per node in mm, row-major as `[z][y][x]`,
+   * length `3 · dims[0] · dims[1] · dims[2]`: Vector Grid Data (0064,0009).
+   */
+  readonly vectors: Float32Array;
+}
+
+/**
+ * A parsed DICOM Spatial Registration object: a transform from a **moving** frame
+ * of reference ({@link sourceFrame}) onto a **fixed** one ({@link targetFrame}),
+ * the two frames a fusion overlay and its base live in. Carries no pixels; like an
+ * RTSTRUCT it associates to image series by frame of reference. A `'rigid'`
+ * registration is a single affine {@link matrix}; a `'deformable'` one adds a
+ * displacement {@link DeformationGrid} between optional pre/post rigid stages.
+ *
+ * `sourceFrame`/`targetFrame` are null when the object omits a frame UID; a null
+ * frame never matches (see {@link framesMatch}), so such a registration links
+ * nothing and is ignored by alignment.
+ */
+export type Registration =
+  | {
+      readonly kind: 'rigid';
+      /** Source file name, for diagnostics. */
+      readonly name: string;
+      /** Moving frame of reference (0020,0052) the matrix maps from. */
+      readonly sourceFrame: string | null;
+      /** Fixed frame of reference (0020,0052) the matrix maps onto. */
+      readonly targetFrame: string | null;
+      /** Source→target affine (3006,00C6), row-major. */
+      readonly matrix: Mat4;
+      /** Frame of Reference Transformation Matrix Type (0070,030C): `RIGID`, `AFFINE`, … */
+      readonly matrixType: string;
+    }
+  | {
+      readonly kind: 'deformable';
+      /** Source file name, for diagnostics. */
+      readonly name: string;
+      /** Moving frame of reference, Source Frame of Reference UID (0064,0003). */
+      readonly sourceFrame: string | null;
+      /** Fixed frame of reference (0020,0052) the deformation maps onto. */
+      readonly targetFrame: string | null;
+      /** Rigid stage applied before the displacement (0064,000F); identity when absent. */
+      readonly preMatrix: Mat4;
+      /** Rigid stage applied after the displacement (0064,000A); identity when absent. */
+      readonly postMatrix: Mat4;
+      /** The displacement field warping source onto target. */
+      readonly grid: DeformationGrid;
+    };
+
+/**
  * Which way we are slicing the volume. Modelled as an `as const` object rather
  * than a `const enum` so it survives `isolatedModules` transpilation, and as a
  * union type so switches can be checked for exhaustiveness.

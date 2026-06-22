@@ -1,13 +1,14 @@
-import type { Slice, StructureSet } from '../dicom/types';
+import type { Registration, Slice, StructureSet } from '../dicom/types';
 import type { ParseRequest, ParseResponse } from './parse.worker';
 
 /** Reports parse progress: files finished out of the total selected. */
 export type LoadProgress = (loaded: number, total: number) => void;
 
-/** What a batch parse yields: image slices and any RTSTRUCTs, in file order. */
+/** What a batch parse yields: image slices, any RTSTRUCTs, and any registrations, in file order. */
 export interface ParsedFiles {
   readonly slices: Slice[];
   readonly structureSets: StructureSet[];
+  readonly registrations: Registration[];
 }
 
 /**
@@ -45,7 +46,7 @@ export async function parseFilesInWorkers(
 ): Promise<ParsedFiles> {
   const total = files.length;
   onProgress?.(0, total);
-  if (total === 0) return { slices: [], structureSets: [] };
+  if (total === 0) return { slices: [], structureSets: [], registrations: [] };
 
   // One result bucket per file, filled at the file's original index so the
   // flattened output preserves selection order despite out-of-order completion.
@@ -76,11 +77,12 @@ export async function parseFilesInWorkers(
   return {
     slices: perFile.flatMap((r) => r.slices),
     structureSets: perFile.flatMap((r) => r.structureSets),
+    registrations: perFile.flatMap((r) => r.registrations),
   };
 }
 
 /** One file's parse output, before flattening across the batch. */
-type ParseResult = Pick<ParsedFiles, 'slices' | 'structureSets'>;
+type ParseResult = Pick<ParsedFiles, 'slices' | 'structureSets' | 'registrations'>;
 
 /**
  * Post one file to a worker and await its parsed slices and structure sets. Each
@@ -102,8 +104,13 @@ function parseInWorker(
       const data = event.data;
       if (data.id !== id) return; // not this request's response
       cleanup();
-      if (data.ok) resolve({ slices: data.slices, structureSets: data.structureSets });
-      else reject(new Error(data.message));
+      if (data.ok) {
+        resolve({
+          slices: data.slices,
+          structureSets: data.structureSets,
+          registrations: data.registrations,
+        });
+      } else reject(new Error(data.message));
     };
     const onError = (event: ErrorEvent) => {
       cleanup();

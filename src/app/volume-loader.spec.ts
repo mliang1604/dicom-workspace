@@ -76,6 +76,7 @@ function fakeLoad(
     layers: [baseImageLayer(uid, fakeVolume(modality, geometry))],
     structureSets: [],
     allStructureSets: [],
+    registrations: [],
     fileCount: 1,
     sliceCount: 1,
   };
