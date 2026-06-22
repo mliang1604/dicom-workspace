@@ -25,7 +25,6 @@ import {
 } from '../../render/layout';
 import {
   clampPan,
-  DEFAULT_CHECKER_CELLS,
   defaultSlabThicknessMm,
   ensureSurfaceSortScratch,
   isDvr,
@@ -114,7 +113,6 @@ import {
   type CrossSectionRow,
 } from '../../render/contours';
 import {
-  applyLayerOverrides,
   baseLayer,
   DEFAULT_OVERLAY_OPACITY,
   modalityUnit,
@@ -127,7 +125,7 @@ import {
   type Volume,
 } from '../../dicom/types';
 import { COLORMAPS } from '../../render/colormap';
-import { clamp, clamp01 } from '../../dicom/math';
+import { clamp } from '../../dicom/math';
 import { add, length, scale } from '../../dicom/vec3';
 import {
   flattenSurfaceMeshes,
@@ -144,6 +142,7 @@ import { describeSelection, RecentStore, type RecentEntry } from '../recent-stor
 import { PreferencesStore } from '../preferences-store';
 import { modifierLabel } from '../platform';
 import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
+import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
 import { readDropped } from './drop-files';
 import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
 import { RangeFill } from './range-fill';
@@ -260,24 +259,6 @@ export interface RoiLegendEntry {
   readonly opacityPercent: number;
   /** Whether the ROI's contours are currently drawn. */
   readonly visible: boolean;
-}
-
-/** One layer listed in the layers panel, with its display controls. */
-interface LayerLegendEntry {
-  /** The layer's id (see {@link Layer.id}); the `@for` track and override key. */
-  readonly id: string;
-  /** Human label: the modality, or a fallback when the layer has none. */
-  readonly label: string;
-  /** Role badge text: 'BASE' or 'OVERLAY'. */
-  readonly roleBadge: string;
-  /** Whether this is the base underlay (shown without overlay-only controls). */
-  readonly isBase: boolean;
-  /** Whether the layer is currently composited. */
-  readonly visible: boolean;
-  /** Composite opacity as a whole percent `[0, 100]`, for the opacity slider. */
-  readonly opacityPercent: number;
-  /** Selected display: `'grayscale'` or a colormap name, for the `<select>`. */
-  readonly displayValue: string;
 }
 
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
@@ -462,14 +443,6 @@ const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 
-/**
- * Bounds for the fusion checkerboard slider, in cells across the image: from a
- * coarse 2 (halves the image) up to a fine 20. The pixel size is derived per-pane
- * from the pane width, so the count holds regardless of how large the image draws.
- */
-const CHECKER_CELLS_MIN = 2;
-const CHECKER_CELLS_MAX = 20;
-
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
 /** Default cine playback speed (fps), used until the user picks another. */
@@ -525,7 +498,7 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
-  providers: [MeasurementStore],
+  providers: [MeasurementStore, LayersStore],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -546,6 +519,8 @@ export class Viewer {
   private readonly catalog = inject(PatientCatalog);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
+  /** Fusion / layers override state and logic; provided per-component (see providers). */
+  private readonly layerStore = inject(LayersStore);
   private readonly destroyRef = inject(DestroyRef);
   /** Preferences restored at startup; seed the view signals and per-load defaults. */
   private readonly initialPrefs = this.preferencesStore.preferences();
@@ -788,32 +763,6 @@ export class Viewer {
    * here. Reset on each load.
    */
   private readonly roiOpacities = signal<ReadonlyMap<string, number>>(new Map());
-  /**
-   * Layer ids hidden from the layers panel. The base never appears here (it's the
-   * underlay); an overlay listed here is dropped from compositing. Reset on a fresh
-   * base load (an added overlay starts visible). See {@link applyLayerOverrides}.
-   */
-  private readonly hiddenLayers = signal<ReadonlySet<string>>(new Set());
-  /**
-   * Per-layer composite opacity in `[0, 1]` keyed by {@link Layer.id}. A layer
-   * absent keeps its registry default; the layers-panel slider and the in-pane
-   * blend bar both write here (they edit the same value). Reset on a fresh load.
-   */
-  private readonly layerOpacities = signal<ReadonlyMap<string, number>>(new Map());
-  /**
-   * Per-layer display-transform overrides keyed by {@link Layer.id}: the colormap
-   * (or grayscale) the layers panel picks for an overlay, overriding the load-time
-   * default (RTDOSE → jet). Reset on a fresh load.
-   */
-  private readonly layerDisplays = signal<ReadonlyMap<string, LayerDisplay>>(new Map());
-  /**
-   * Per-layer window/level overrides keyed by {@link Layer.id}, for the Compare
-   * layout's independent per-column windowing. The base layer is never keyed here
-   * — it always reads the shared {@link windowCenter}/{@link windowWidth} signals
-   * (so Fusion and single-layer windowing are untouched); an overlay column absent
-   * from the map falls back to its volume's default window. Reset on a fresh load.
-   */
-  private readonly layerWindows = signal<ReadonlyMap<string, WindowLevel>>(new Map());
   /**
    * The Compare column the toolbar window/level controls (preset selector, WL/WW
    * inputs) target: the index of the last MPR pane hovered. Sticky — it survives
@@ -1511,12 +1460,7 @@ export class Viewer {
   private readonly layers = computed<readonly Layer[]>(() => {
     const state = this.load();
     if (state.status !== 'ready') return [];
-    return applyLayerOverrides(
-      state.result.layers,
-      this.hiddenLayers(),
-      this.layerOpacities(),
-      this.layerDisplays(),
-    );
+    return this.layerStore.apply(state.result.layers);
   });
 
   /**
@@ -1559,12 +1503,7 @@ export class Viewer {
     if (!layer || layer.role === 'base') {
       return { center: this.windowCenter(), width: this.windowWidth() };
     }
-    return (
-      this.layerWindows().get(layer.id) ?? {
-        center: layer.volume.windowCenter,
-        width: layer.volume.windowWidth,
-      }
-    );
+    return this.layerStore.windowFor(layer);
   }
 
   /** Write a layer's window/level: the base updates the shared signals, an overlay its override. */
@@ -1573,7 +1512,7 @@ export class Viewer {
       this.windowCenter.set(next.center);
       this.windowWidth.set(next.width);
     } else {
-      this.layerWindows.update((map) => new Map(map).set(layer.id, next));
+      this.layerStore.setWindow(layer.id, next);
     }
   }
 
@@ -1590,40 +1529,19 @@ export class Viewer {
   protected readonly hasLayersPanel = computed(() => this.layers().length > 1);
 
   /** The layers for the panel, each with its display controls (base first). */
-  protected readonly layerLegend = computed<LayerLegendEntry[]>(() =>
-    this.layers().map((layer) => ({
-      id: layer.id,
-      label: layer.modality ?? 'Image',
-      roleBadge: layer.role === 'base' ? 'BASE' : 'OVERLAY',
-      isBase: layer.role === 'base',
-      visible: layer.visible,
-      opacityPercent: Math.round(layer.opacity * 100),
-      displayValue: layer.display.kind === 'grayscale' ? 'grayscale' : layer.display.name,
-    })),
-  );
+  protected readonly layerLegend = computed<LayerLegendEntry[]>(() => layerLegend(this.layers()));
 
   /** Overlay display choices for the layers panel: grayscale plus each colormap. */
   protected readonly displayOptions = ['grayscale', ...Object.keys(COLORMAPS)];
 
   /** Toggle an overlay layer's visibility (the base underlay is never hidden). */
   protected toggleLayerVisible(id: string): void {
-    this.hiddenLayers.update((hidden) => {
-      const next = new Set(hidden);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  /** Set a layer's composite opacity from a 0..100 slider value. */
-  private setLayerOpacity(id: string, percent: number): void {
-    const opacity = clamp01(percent / 100);
-    this.layerOpacities.update((map) => new Map(map).set(id, opacity));
+    this.layerStore.toggleVisible(id);
   }
 
   /** Layers-panel opacity slider for a layer. */
   protected onLayerOpacity(id: string, event: Event): void {
-    this.setLayerOpacity(id, Number((event.target as HTMLInputElement).value));
+    this.layerStore.setOpacity(id, Number((event.target as HTMLInputElement).value));
   }
 
   /** Layers-panel display selector: grayscale or a named colormap for the layer. */
@@ -1631,7 +1549,7 @@ export class Viewer {
     const value = (event.target as HTMLSelectElement).value;
     const display: LayerDisplay =
       value === 'grayscale' ? { kind: 'grayscale' } : { kind: 'colormap', name: value };
-    this.layerDisplays.update((map) => new Map(map).set(id, display));
+    this.layerStore.setDisplay(id, display);
   }
 
   /** True in the side-by-side Compare layout (vs. the composited fusion views). */
@@ -1733,20 +1651,19 @@ export class Viewer {
   );
 
   /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
-  protected readonly checkerboardEnabled = signal(false);
+  protected readonly checkerboardEnabled = this.layerStore.checkerboardEnabled;
 
   /** Checkerboard density in cells across the image (at zoom 1); the slider's value. */
-  protected readonly checkerCells = signal(DEFAULT_CHECKER_CELLS);
+  protected readonly checkerCells = this.layerStore.checkerCells;
 
   /** Toggle compositing the fusion overlay as a checkerboard. */
   protected toggleCheckerboard(): void {
-    this.checkerboardEnabled.update((on) => !on);
+    this.layerStore.toggleCheckerboard();
   }
 
   /** Set the checkerboard density (cells across the image) from the slider, clamped. */
   protected onCheckerCellsInput(event: Event): void {
-    const cells = Number((event.target as HTMLInputElement).value);
-    this.checkerCells.set(clamp(cells, CHECKER_CELLS_MIN, CHECKER_CELLS_MAX));
+    this.layerStore.setCheckerCells(Number((event.target as HTMLInputElement).value));
   }
 
   /**
@@ -1773,7 +1690,9 @@ export class Viewer {
   /** Drag/keyboard the blend bar: set the active overlay's opacity from its 0..100 value. */
   protected onBlendInput(event: Event): void {
     const overlay = this.selectedOverlay();
-    if (overlay) this.setLayerOpacity(overlay.id, Number((event.target as HTMLInputElement).value));
+    if (overlay) {
+      this.layerStore.setOpacity(overlay.id, Number((event.target as HTMLInputElement).value));
+    }
   }
 
   /**
@@ -3827,10 +3746,7 @@ export class Viewer {
     this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
     this.roiOpacities.set(new Map()); // …fully opaque
     // A fresh base load drops any layers-panel edits (overlays load at their defaults).
-    this.hiddenLayers.set(new Set());
-    this.layerOpacities.set(new Map());
-    this.layerDisplays.set(new Map());
-    this.layerWindows.set(new Map()); // per-column windows back to volume defaults
+    this.layerStore.reset();
     this.activeCompareGroup.set(0); // window/level controls target the base column
     this.selectedSetIndex.set(-1); // showing every associated structure set
     // Per-volume view state is per-session: always reset to volume-derived defaults.
