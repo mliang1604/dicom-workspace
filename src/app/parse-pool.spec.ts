@@ -70,6 +70,7 @@ function successResponse(req: ParseRequest): ParseResponse {
     ok: true,
     slices: [sliceNamed(req.name)],
     structureSets: req.id % 2 === 1 ? [structNamed(req.name)] : [],
+    registrations: [],
   };
 }
 
@@ -185,7 +186,7 @@ describe('parseFilesInWorkers', () => {
     const pool = new FakeWorkerPool();
     const result = await parseFilesInWorkers([], undefined, pool.create);
 
-    expect(result).toEqual({ slices: [], structureSets: [] });
+    expect(result).toEqual({ slices: [], structureSets: [], registrations: [] });
     expect(pool.workers).toHaveLength(0);
   });
 });

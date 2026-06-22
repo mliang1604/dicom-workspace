@@ -9,6 +9,7 @@ import {
   framesMatch,
   overlayImageLayer,
   type Layer,
+  type Registration,
   type StructureSet,
 } from '../dicom/types';
 import { parseFilesInWorkers, type LoadProgress } from './parse-pool';
@@ -48,6 +49,14 @@ export interface LoadResult {
    * {@link structureSets} for the current selection.
    */
   readonly allStructureSets: readonly StructureSet[];
+  /**
+   * Spatial Registration objects (rigid or deformable) parsed in the load,
+   * regardless of which frames they link. Retained like {@link allStructureSets}
+   * so a later selection or merge can resolve cross-frame alignment without
+   * re-parsing. Empty when the load held no registration. Nothing consumes these
+   * yet — Phase 1 (rigid) and Phase 2 (deformable) wire them into fusion.
+   */
+  readonly registrations: readonly Registration[];
   /** Number of files the user selected. */
   readonly fileCount: number;
   /** Number of image slices the selected series contributed. */
@@ -68,7 +77,7 @@ export class VolumeLoader {
    * Assembly (grouping + {@link buildVolume}) stays on the main thread.
    */
   async loadFromFiles(files: readonly File[], onProgress?: LoadProgress): Promise<LoadResult> {
-    const { slices, structureSets } = await parseFilesInWorkers(files, onProgress);
+    const { slices, structureSets, registrations } = await parseFilesInWorkers(files, onProgress);
 
     const series = groupSeries(slices);
     // initialImportSeries returns undefined only for an empty batch; assemble it to
@@ -76,7 +85,7 @@ export class VolumeLoader {
     const selected = initialImportSeries(series);
     if (!selected) buildVolume(slices); // throws the canonical "no slices" error
 
-    return this.buildResult(series, selected!, structureSets, files.length);
+    return this.buildResult(series, selected!, structureSets, registrations, files.length);
   }
 
   /**
@@ -87,7 +96,13 @@ export class VolumeLoader {
   selectSeries(result: LoadResult, uid: string): LoadResult {
     const series = result.series.find((s) => s.uid === uid);
     if (!series) return result;
-    return this.buildResult(result.series, series, result.allStructureSets, result.fileCount);
+    return this.buildResult(
+      result.series,
+      series,
+      result.allStructureSets,
+      result.registrations,
+      result.fileCount,
+    );
   }
 
   /**
@@ -99,8 +114,18 @@ export class VolumeLoader {
    * the current view's `allStructureSets`, or none. The viewer routes the result
    * through {@link merge} for the same-FoR-fuses / different-study-replaces rule.
    */
-  loadSeries(series: Series, allStructureSets: readonly StructureSet[] = []): LoadResult {
-    return this.buildResult([series], series, allStructureSets, series.slices.length);
+  loadSeries(
+    series: Series,
+    allStructureSets: readonly StructureSet[] = [],
+    registrations: readonly Registration[] = [],
+  ): LoadResult {
+    return this.buildResult(
+      [series],
+      series,
+      allStructureSets,
+      registrations,
+      series.slices.length,
+    );
   }
 
   /**
@@ -116,6 +141,7 @@ export class VolumeLoader {
     series: readonly Series[],
     selected: Series,
     allStructureSets: readonly StructureSet[],
+    registrations: readonly Registration[],
     fileCount: number,
   ): LoadResult {
     const baseVolume = buildVolume(selected.slices);
@@ -135,6 +161,7 @@ export class VolumeLoader {
       layers,
       structureSets: structureSetsForSeries(allStructureSets, selected),
       allStructureSets,
+      registrations,
       fileCount,
       sliceCount: selected.slices.length,
     };
@@ -208,7 +235,14 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
     uniqueLayerId(current.layers, incoming.selectedUid),
     overlayVolume,
   );
-  return { result: { ...current, layers: [...current.layers, overlay] }, added: true };
+  // Keep any registration that arrived with the incoming series alongside the
+  // current load's, so a REG dropped with the moving image is available to align
+  // the overlay (consumed in Phase 1+).
+  const registrations = [...current.registrations, ...incoming.registrations];
+  return {
+    result: { ...current, layers: [...current.layers, overlay], registrations },
+    added: true,
+  };
 }
 
 /**

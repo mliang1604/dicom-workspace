@@ -1,0 +1,262 @@
+import { parseRegistration } from './registration';
+
+// --- Minimal Explicit-VR-Little-Endian DICOM P10 writer --------------------
+//
+// Just enough to build synthetic Spatial Registration fixtures (no PixelData,
+// nested sequences, binary OF/UL/FD values). No real patient data; every byte
+// here is fabricated. Mirrors the writer in structure-set.spec.ts / loader.spec.ts.
+
+const EXPLICIT_VR_LE = '1.2.840.10008.1.2.1';
+const SPATIAL_REGISTRATION = '1.2.840.10008.5.1.4.1.1.66.1';
+const DEFORMABLE_REGISTRATION = '1.2.840.10008.5.1.4.1.1.66.3';
+const CT_IMAGE_STORAGE = '1.2.840.10008.5.1.4.1.1.2';
+
+/** VRs that use the 2-reserved-byte + 4-byte-length header form. */
+const LONG_VRS = new Set(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN']);
+
+function concat(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+function padEven(bytes: Uint8Array, padByte: number): Uint8Array {
+  if (bytes.length % 2 === 0) return bytes;
+  return concat([bytes, Uint8Array.of(padByte)]);
+}
+
+function ascii(s: string): Uint8Array {
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+}
+
+function text(s: string): Uint8Array {
+  return padEven(ascii(s), 0x20);
+}
+
+function uid(s: string): Uint8Array {
+  return padEven(ascii(s), 0x00);
+}
+
+/** Decimal/Integer string value(s), backslash-separated. */
+function numbers(values: readonly number[]): Uint8Array {
+  return text(values.join('\\'));
+}
+
+/** Double (FD) values, little-endian. */
+function fdValues(values: readonly number[]): Uint8Array {
+  const out = new Uint8Array(values.length * 8);
+  const view = new DataView(out.buffer);
+  values.forEach((v, i) => view.setFloat64(i * 8, v, true));
+  return out;
+}
+
+/** 32-bit float (OF) values, little-endian. */
+function ofValues(values: readonly number[]): Uint8Array {
+  const out = new Uint8Array(values.length * 4);
+  const view = new DataView(out.buffer);
+  values.forEach((v, i) => view.setFloat32(i * 4, v, true));
+  return out;
+}
+
+function element(group: number, el: number, vr: string, value: Uint8Array): Uint8Array {
+  const header = new Uint8Array(LONG_VRS.has(vr) ? 12 : 8);
+  const view = new DataView(header.buffer);
+  view.setUint16(0, group, true);
+  view.setUint16(2, el, true);
+  header[4] = vr.charCodeAt(0);
+  header[5] = vr.charCodeAt(1);
+  if (LONG_VRS.has(vr)) {
+    view.setUint32(8, value.length, true); // bytes 6-7 reserved, left zero
+  } else {
+    view.setUint16(6, value.length, true);
+  }
+  return concat([header, value]);
+}
+
+function sequence(group: number, el: number, itemBodies: Uint8Array[]): Uint8Array {
+  const body = concat(
+    itemBodies.map((item) => {
+      const header = new Uint8Array(8);
+      const view = new DataView(header.buffer);
+      view.setUint16(0, 0xfffe, true); // Item tag (FFFE,E000)
+      view.setUint16(2, 0xe000, true);
+      view.setUint32(4, item.length, true);
+      return concat([header, item]);
+    }),
+  );
+  return element(group, el, 'SQ', body);
+}
+
+function u32le(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value, true);
+  return out;
+}
+
+/** Assemble a full P10 file (preamble + DICM + meta group + data set). */
+function dicomFile(dataSetBody: Uint8Array, sopClass: string): ArrayBuffer {
+  const metaBody = concat([
+    element(0x0002, 0x0002, 'UI', uid(sopClass)), // MediaStorageSOPClassUID
+    element(0x0002, 0x0010, 'UI', uid(EXPLICIT_VR_LE)), // TransferSyntaxUID
+  ]);
+  const groupLength = element(0x0002, 0x0000, 'UL', u32le(metaBody.length));
+
+  const file = concat([
+    new Uint8Array(128), // preamble
+    ascii('DICM'),
+    groupLength,
+    metaBody,
+    dataSetBody,
+  ]);
+  return file.buffer as ArrayBuffer;
+}
+
+// --- Fixtures ---------------------------------------------------------------
+
+/** A Matrix Registration Sequence (0070,0309) wrapping one matrix + type. */
+function matrixRegistration(matrix: readonly number[], type: string): Uint8Array {
+  const matrixItem = concat([
+    element(0x3006, 0x00c6, 'DS', numbers(matrix)), // Frame of Reference Transformation Matrix
+    element(0x0070, 0x030c, 'CS', text(type)), // ... Matrix Type
+  ]);
+  const matrixSequence = sequence(0x0070, 0x030a, [matrixItem]); // Matrix Sequence
+  return sequence(0x0070, 0x0309, [matrixSequence]); // Matrix Registration Sequence
+}
+
+/** One Registration Sequence (0070,0308) item: a frame and its matrix. */
+function registrationItem(frame: string, matrix: readonly number[], type: string): Uint8Array {
+  return concat([
+    element(0x0020, 0x0052, 'UI', uid(frame)), // Frame of Reference UID
+    matrixRegistration(matrix, type),
+  ]);
+}
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** A rigid Spatial Registration mapping frame MOVING onto fixed frame FIXED. */
+function rigidRegistration(matrix: readonly number[], type = 'RIGID'): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0016, 'UI', uid(SPATIAL_REGISTRATION)), // SOPClassUID
+    element(0x0008, 0x0060, 'CS', text('REG')), // Modality
+    element(0x0020, 0x0052, 'UI', uid('FIXED')), // Frame of Reference UID (target)
+    sequence(0x0070, 0x0308, [
+      registrationItem('FIXED', IDENTITY, 'RIGID'), // the fixed frame: identity
+      registrationItem('MOVING', matrix, type), // the moving frame: the transform
+    ]),
+  ]);
+  return dicomFile(body, SPATIAL_REGISTRATION);
+}
+
+/** A Deformable Registration Grid Sequence (0064,0005) item. */
+function deformationGrid(
+  origin: readonly number[],
+  dims: readonly number[],
+  spacing: readonly number[],
+  vectors: readonly number[],
+): Uint8Array {
+  const gridItem = concat([
+    element(0x0020, 0x0032, 'DS', numbers(origin)), // Image Position Patient
+    element(0x0020, 0x0037, 'DS', numbers([1, 0, 0, 0, 1, 0])), // Image Orientation Patient
+    element(0x0064, 0x0007, 'UL', concat(dims.map(u32le))), // Grid Dimensions
+    element(0x0064, 0x0008, 'FD', fdValues(spacing)), // Grid Resolution
+    element(0x0064, 0x0009, 'OF', ofValues(vectors)), // Vector Grid Data
+  ]);
+  return sequence(0x0064, 0x0005, [gridItem]);
+}
+
+/** A deformable Spatial Registration, optionally with a pre-deformation matrix. */
+function deformableRegistration(options: { preMatrix?: readonly number[] } = {}): ArrayBuffer {
+  const dims = [2, 2, 2];
+  const vectors = Array.from({ length: 3 * dims[0] * dims[1] * dims[2] }, (_, i) => i + 1);
+  const pre = options.preMatrix ? [matrixRegistrationSeq(0x0064, 0x000f, options.preMatrix)] : [];
+  const defItem = concat([
+    element(0x0064, 0x0003, 'UI', uid('MOVING')), // Source Frame of Reference UID
+    deformationGrid([10, 20, 30], dims, [3, 3, 3], vectors),
+    ...pre,
+  ]);
+  const body = concat([
+    element(0x0008, 0x0016, 'UI', uid(DEFORMABLE_REGISTRATION)), // SOPClassUID
+    element(0x0020, 0x0052, 'UI', uid('FIXED')), // Frame of Reference UID (target)
+    sequence(0x0064, 0x0002, [defItem]), // Deformable Registration Sequence
+  ]);
+  return dicomFile(body, DEFORMABLE_REGISTRATION);
+}
+
+/** A Pre/Post Deformation Matrix Registration Sequence carrying one matrix. */
+function matrixRegistrationSeq(group: number, el: number, matrix: readonly number[]): Uint8Array {
+  const item = concat([
+    element(0x3006, 0x00c6, 'DS', numbers(matrix)),
+    element(0x0070, 0x030c, 'CS', text('RIGID')),
+  ]);
+  return sequence(group, el, [item]);
+}
+
+// --- Tests ------------------------------------------------------------------
+
+describe('parseRegistration', () => {
+  it('returns null for a non-DICOM buffer', () => {
+    expect(parseRegistration('junk', ascii('not dicom').buffer as ArrayBuffer)).toBeNull();
+  });
+
+  it('returns null for an ordinary image SOP class', () => {
+    const body = concat([
+      element(0x0008, 0x0016, 'UI', uid(CT_IMAGE_STORAGE)),
+      element(0x0008, 0x0060, 'CS', text('CT')),
+    ]);
+    expect(parseRegistration('ct', dicomFile(body, CT_IMAGE_STORAGE))).toBeNull();
+  });
+
+  it('parses a rigid registration: moving→fixed matrix, frames, and type', () => {
+    const matrix = [1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7, 0, 0, 0, 1];
+    const reg = parseRegistration('rigid.dcm', rigidRegistration(matrix, 'RIGID'));
+
+    expect(reg).not.toBeNull();
+    expect(reg!.kind).toBe('rigid');
+    expect(reg!.name).toBe('rigid.dcm');
+    expect(reg!.sourceFrame).toBe('MOVING');
+    expect(reg!.targetFrame).toBe('FIXED');
+    if (reg!.kind !== 'rigid') throw new Error('expected rigid');
+    expect(reg!.matrix).toEqual(matrix);
+    expect(reg!.matrixType).toBe('RIGID');
+  });
+
+  it('carries an AFFINE matrix type through', () => {
+    const reg = parseRegistration('affine.dcm', rigidRegistration(IDENTITY, 'AFFINE'));
+    if (reg?.kind !== 'rigid') throw new Error('expected rigid');
+    expect(reg.matrixType).toBe('AFFINE');
+  });
+
+  it('parses a deformable registration grid (dims, spacing, origin, vectors)', () => {
+    const reg = parseRegistration('deform.dcm', deformableRegistration());
+
+    expect(reg).not.toBeNull();
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.sourceFrame).toBe('MOVING');
+    expect(reg.targetFrame).toBe('FIXED');
+    expect(reg.grid.dims).toEqual([2, 2, 2]);
+    expect(reg.grid.spacing).toEqual([3, 3, 3]);
+    expect(reg.grid.origin).toEqual([10, 20, 30]);
+    expect(reg.grid.orientation).toEqual([1, 0, 0, 0, 1, 0]);
+    expect(reg.grid.vectors).toHaveLength(24);
+    expect(Array.from(reg.grid.vectors.slice(0, 3))).toEqual([1, 2, 3]);
+  });
+
+  it('defaults pre/post matrices to identity when absent', () => {
+    const reg = parseRegistration('deform.dcm', deformableRegistration());
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix).toEqual(IDENTITY);
+    expect(reg.postMatrix).toEqual(IDENTITY);
+  });
+
+  it('reads a pre-deformation rigid matrix when present', () => {
+    const preMatrix = [1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 4, 0, 0, 0, 1];
+    const reg = parseRegistration('deform.dcm', deformableRegistration({ preMatrix }));
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix).toEqual(preMatrix);
+  });
+});
