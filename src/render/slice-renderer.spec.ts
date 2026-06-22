@@ -70,11 +70,13 @@ describe('packSliceParams', () => {
     expect(uints[24]).toBe(0); // invert
   });
 
-  it('is 192 bytes and leaves overlay opacity 0 when there is no overlay', () => {
+  it('is 400 bytes and leaves overlay opacity 0 when there is no overlay', () => {
     const buffer = packSliceParams(base);
-    expect(buffer.byteLength).toBe(192);
+    expect(buffer.byteLength).toBe(400);
     // Overlay opacity lives at float 46; zero means the shader skips the overlay.
     expect(new Float32Array(buffer)[46]).toBe(0);
+    // The deformable flag (float 48) is 0, so the shader uses overlayToTex.
+    expect(new Uint32Array(buffer)[48]).toBe(0);
   });
 
   it('packs the overlay block at byte 112 (float 28) without disturbing the base', () => {
@@ -130,6 +132,25 @@ describe('packSliceParams', () => {
     expect(new Uint32Array(buffer)[27]).toBe(1);
     // It rides in the pre-overlay pad without disturbing the base window.
     expect(new Float32Array(buffer)[20]).toBe(40); // windowCenter
+  });
+
+  it('packs the deformable block (flag + three mat4x4) at floats 48 / 52 / 68 / 84', () => {
+    const paneToPatientPre = Array.from({ length: 16 }, (_, i) => 200 + i);
+    const patientToField = Array.from({ length: 16 }, (_, i) => 300 + i);
+    const patientToOverlayTex = Array.from({ length: 16 }, (_, i) => 400 + i);
+    const buffer = packSliceParams({
+      ...base,
+      deformation: { paneToPatientPre, patientToField, patientToOverlayTex },
+    });
+    const floats = new Float32Array(buffer);
+    const uints = new Uint32Array(buffer);
+
+    expect(uints[48]).toBe(1); // overlayDeformable flag
+    expect(Array.from(floats.slice(52, 68))).toEqual(paneToPatientPre);
+    expect(Array.from(floats.slice(68, 84))).toEqual(patientToField);
+    expect(Array.from(floats.slice(84, 100))).toEqual(patientToOverlayTex);
+    // Base block untouched.
+    expect(floats[20]).toBe(40); // windowCenter
   });
 });
 

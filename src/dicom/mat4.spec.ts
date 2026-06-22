@@ -1,4 +1,4 @@
-import { invert, multiply, transformPoint, transformVector } from './mat4';
+import { invert, multiply, toColumnMajor, transformPoint, transformVector } from './mat4';
 import { IDENTITY_MAT4, type Mat4 } from './types';
 
 /** A rigid transform: rotate 90° about +z (x→y, y→−x) then translate by (5,6,7). */
@@ -54,5 +54,20 @@ describe('invert', () => {
   it('returns null for a singular linear part', () => {
     const singular: Mat4 = [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 1];
     expect(invert(singular)).toBeNull();
+  });
+});
+
+describe('toColumnMajor', () => {
+  it('transposes a row-major matrix into a column-major Float32Array', () => {
+    // prettier-ignore
+    const rowMajor: Mat4 = [
+      0, 1, 2, 3,
+      4, 5, 6, 7,
+      8, 9, 10, 11,
+      12, 13, 14, 15,
+    ];
+    expect(Array.from(toColumnMajor(rowMajor))).toEqual([
+      0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+    ]);
   });
 });

@@ -11,6 +11,18 @@ import type { Mat4, Vec3 } from './types';
  * is assumed `[0, 0, 0, 1]`.
  */
 
+/**
+ * Transpose a row-major {@link Mat4} into the column-major `Float32Array` a WGSL
+ * `mat4x4<f32>` uniform expects (matching `texAffineMatrix` in `render/reslice.ts`).
+ */
+export function toColumnMajor(m: Mat4): Float32Array {
+  const out = new Float32Array(16);
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) out[c * 4 + r] = m[r * 4 + c];
+  }
+  return out;
+}
+
 /** Apply a transform to a point (with translation): `(M · [x, y, z, 1]).xyz`. */
 export function transformPoint(m: Mat4, p: Vec3): Vec3 {
   return [

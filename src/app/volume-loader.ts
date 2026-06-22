@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { resolveAlignment } from '../dicom/align';
+import { resolveAlignment, resolveDeformable } from '../dicom/align';
 import { buildVolume } from '../dicom/volume';
 import { initialImportSeries } from '../dicom/catalog';
 import { groupSeries, type Series } from '../dicom/series';
@@ -219,8 +219,12 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   const baseFrame = selectedSeries(current)?.frameOfReferenceUid ?? null;
   const overlayFrame = selectedSeries(incoming)?.frameOfReferenceUid ?? null;
   const alignment = resolveAlignment(baseFrame, overlayFrame, registrations);
-  // Frames neither match nor are linked by a registration: a different study; replace.
-  if (alignment === null) return { result: incoming, added: false };
+  // A deformable registration links them only when there's no rigid/same-frame
+  // alignment to prefer (rigid is the simpler, exact transform).
+  const deformation =
+    alignment === null ? resolveDeformable(baseFrame, overlayFrame, registrations) : null;
+  // Frames neither match nor are linked by any registration: a different study; replace.
+  if (alignment === null && deformation === null) return { result: incoming, added: false };
 
   // Co-sampling an overlay in the base's patient frame maps each pane pixel
   // through both grids' index→patient affines, so both volumes need geometry;
@@ -245,10 +249,16 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
     uniqueLayerId(current.layers, incoming.selectedUid),
     overlayVolume,
   );
-  // A cross-frame overlay carries its base→overlay transform; the same-frame case
-  // needs none (resolveAlignment returns the shared identity constant by reference).
-  const overlay: Layer =
-    alignment === IDENTITY_MAT4 ? baseOverlay : { ...baseOverlay, alignToBase: alignment };
+  // A cross-frame overlay carries its base→overlay transform: a rigid matrix
+  // (alignToBase), or a deformable registration (deformation) when only a
+  // displacement field links the frames. The same-frame case needs neither
+  // (resolveAlignment returns the shared identity constant, detected by reference).
+  let overlay: Layer = baseOverlay;
+  if (alignment !== null && alignment !== IDENTITY_MAT4) {
+    overlay = { ...baseOverlay, alignToBase: alignment };
+  } else if (deformation !== null) {
+    overlay = { ...baseOverlay, deformation };
+  }
   return {
     result: { ...current, layers: [...current.layers, overlay], registrations },
     added: true,

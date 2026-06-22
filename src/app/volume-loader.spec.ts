@@ -311,4 +311,31 @@ describe('mergeLoad', () => {
     const incoming = fakeLoad('mr', 'frame-2', 'MR');
     expect(mergeLoad(current, incoming).added).toBe(false);
   });
+
+  it('adds a different-frame series as a deformable overlay when a deformable REG links them', () => {
+    const reg: Registration = {
+      kind: 'deformable',
+      name: 'reg.dcm',
+      sourceFrame: 'frame-2', // moving (overlay)
+      targetFrame: 'frame-1', // fixed (base)
+      preMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      postMatrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      grid: {
+        origin: [0, 0, 0],
+        orientation: [1, 0, 0, 0, 1, 0],
+        dims: [2, 2, 2],
+        spacing: [1, 1, 1],
+        vectors: new Float32Array(3 * 8),
+      },
+    };
+    const current = fakeLoad('ct', 'frame-1');
+    const incoming: LoadResult = { ...fakeLoad('mr', 'frame-2', 'MR'), registrations: [reg] };
+
+    const { result, added } = mergeLoad(current, incoming);
+
+    expect(added).toBe(true);
+    const overlay = result.layers[1];
+    expect(overlay.deformation).toBe(reg);
+    expect(overlay.alignToBase).toBeUndefined(); // deformable, not rigid
+  });
 });

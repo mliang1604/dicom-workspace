@@ -1,5 +1,11 @@
 import { invert } from './mat4';
-import { framesMatch, IDENTITY_MAT4, type Mat4, type Registration } from './types';
+import {
+  framesMatch,
+  IDENTITY_MAT4,
+  type DeformableRegistration,
+  type Mat4,
+  type Registration,
+} from './types';
 
 /**
  * Resolve how to sample an overlay volume in the base volume's displayed plane,
@@ -43,6 +49,32 @@ export function resolveAlignment(
       // base is the registration's target: base → overlay is the inverse.
       const inverse = invert(reg.matrix);
       if (inverse) return inverse;
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the deformable registration that warps an overlay onto the base's frame —
+ * the deformable counterpart to {@link resolveAlignment}, surfaced separately
+ * because a displacement field is sampled per fragment, not applied as a matrix.
+ *
+ * Only the direction where the base is the registration's *target* (fixed) frame
+ * and the overlay its *source* (moving) frame is supported: the field is defined
+ * over the fixed frame and maps it toward the moving one, which is exactly the
+ * lookup the renderer does (base pane point → overlay sample). The reverse needs
+ * the field's inverse — which has no closed form — so it returns null rather than
+ * guessing. Returns null when no deformable registration links the two frames.
+ */
+export function resolveDeformable(
+  baseFrame: string | null,
+  overlayFrame: string | null,
+  registrations: readonly Registration[],
+): DeformableRegistration | null {
+  for (const reg of registrations) {
+    if (reg.kind !== 'deformable') continue;
+    if (framesMatch(reg.targetFrame, baseFrame) && framesMatch(reg.sourceFrame, overlayFrame)) {
+      return reg;
     }
   }
   return null;

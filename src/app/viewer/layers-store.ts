@@ -39,7 +39,7 @@ export function layerLegend(layers: readonly Layer[]): LayerLegendEntry[] {
     label: layer.modality ?? 'Image',
     roleBadge: layer.role === 'base' ? 'BASE' : 'OVERLAY',
     isBase: layer.role === 'base',
-    registered: layer.alignToBase !== undefined,
+    registered: layer.alignToBase !== undefined || layer.deformation !== undefined,
     visible: layer.visible,
     opacityPercent: Math.round(layer.opacity * 100),
     displayValue: layer.display.kind === 'grayscale' ? 'grayscale' : layer.display.name,

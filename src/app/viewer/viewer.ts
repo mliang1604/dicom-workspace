@@ -1830,13 +1830,15 @@ export class Viewer {
       // layers-panel slider both edit it, so either re-runs setOverlay and redraws.
       const opacity = overlay ? overlay.opacity : 0;
       // A cross-frame overlay (registered onto the base) carries its base→overlay
-      // transform on the layer; same-frame overlays leave it undefined.
+      // transform on the layer — a rigid matrix (alignToBase) or a deformable
+      // registration (deformation); same-frame overlays carry neither.
       if (renderer)
         renderer.setOverlay(
           overlay?.volume ?? null,
           opacity,
           overlay?.display,
           overlay?.alignToBase,
+          overlay?.deformation,
         );
       this.scheduleFrame();
     });
