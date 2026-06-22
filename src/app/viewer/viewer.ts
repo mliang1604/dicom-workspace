@@ -4097,6 +4097,7 @@ export function filterRawTags(tags: readonly RawTag[], query: string): readonly 
   return tags.filter(
     (tag) =>
       tag.tag.toLowerCase().includes(q) ||
+      (tag.label !== null && tag.label.toLowerCase().includes(q)) ||
       (tag.vr !== null && tag.vr.toLowerCase().includes(q)) ||
       tag.value.toLowerCase().includes(q),
   );

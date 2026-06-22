@@ -132,9 +132,9 @@ describe('releaseSelectFocus', () => {
 
 describe('filterRawTags', () => {
   const tags: RawTag[] = [
-    { tag: '(0010,0010)', vr: 'PN', value: 'Doe, John' },
-    { tag: '(0008,0060)', vr: 'CS', value: 'CT' },
-    { tag: '(0028,0010)', vr: 'US', value: '512' },
+    { tag: '(0010,0010)', label: 'Patient Name', vr: 'PN', value: 'Doe, John' },
+    { tag: '(0008,0060)', label: 'Modality', vr: 'CS', value: 'CT' },
+    { tag: '(0028,0010)', label: 'Rows', vr: 'US', value: '512' },
   ];
 
   it('returns every tag for a blank query', () => {
@@ -151,6 +151,10 @@ describe('filterRawTags', () => {
 
   it('matches on the value', () => {
     expect(filterRawTags(tags, 'doe').map((t) => t.tag)).toEqual(['(0010,0010)']);
+  });
+
+  it('matches on the dictionary label', () => {
+    expect(filterRawTags(tags, 'modality').map((t) => t.tag)).toEqual(['(0008,0060)']);
   });
 
   it('returns nothing when there is no match', () => {
