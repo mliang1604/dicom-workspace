@@ -221,3 +221,24 @@ export function roiStats(
   }
   return { areaMm2, stats: huStats(values) };
 }
+
+/** Format a sample value: integers verbatim, otherwise to one decimal place. */
+export function formatValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+/**
+ * Readout lines for an ROI: its area, then the HU statistics when available. The
+ * `unit` (e.g. `HU`) is appended to the mean; `null` omits it. Shared by the
+ * measurement overlay and its memoised stats cache.
+ */
+export function roiLines(areaMm2: number, stats: HuStats | null, unit: string | null): string[] {
+  const u = unit ? ` ${unit}` : '';
+  const lines = [`${areaMm2.toFixed(0)} mm²`];
+  if (stats) {
+    lines.push(`mean ${formatValue(stats.mean)}${u}`);
+    lines.push(`SD ${formatValue(stats.sd)}`);
+    lines.push(`min ${formatValue(stats.min)} · max ${formatValue(stats.max)}`);
+  }
+  return lines;
+}
