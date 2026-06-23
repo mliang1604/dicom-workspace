@@ -77,6 +77,24 @@ export function rotationAzimuths(start: number, frames: number): number[] {
 }
 
 /**
+ * The pane a capture targets: the hovered pane when one is under the cursor, else
+ * the first (main) pane. Generic over the pane shape — the caller supplies its own
+ * pane type and key function — so the selection is testable without the component.
+ * Returns null when there are no panes.
+ */
+export function pickCaptureTarget<T>(
+  panes: readonly T[],
+  hoveredKey: string | null,
+  keyOf: (pane: T) => string,
+): T | null {
+  if (hoveredKey) {
+    const found = panes.find((pane) => keyOf(pane) === hoveredKey);
+    if (found) return found;
+  }
+  return panes[0] ?? null;
+}
+
+/**
  * The first candidate MIME type the recorder supports, or null when none is.
  * Lets the viewer prefer a modern codec (VP9) and fall back to older containers
  * without hard-coding the probe, which keeps it testable.

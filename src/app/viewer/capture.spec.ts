@@ -1,5 +1,6 @@
 import {
   captureFilename,
+  pickCaptureTarget,
   pickVideoMimeType,
   rotationAzimuths,
   slugify,
@@ -70,6 +71,27 @@ describe('rotationAzimuths', () => {
   it('floors the frame count to at least one', () => {
     expect(rotationAzimuths(0.5, 0)).toEqual([0.5]);
     expect(rotationAzimuths(0, 2.9).length).toBe(2);
+  });
+});
+
+describe('pickCaptureTarget', () => {
+  const panes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const keyOf = (pane: { id: string }) => pane.id;
+
+  it('targets the hovered pane when one is under the cursor', () => {
+    expect(pickCaptureTarget(panes, 'b', keyOf)).toEqual({ id: 'b' });
+  });
+
+  it('falls back to the first pane when nothing is hovered', () => {
+    expect(pickCaptureTarget(panes, null, keyOf)).toEqual({ id: 'a' });
+  });
+
+  it('falls back to the first pane when the hovered key matches none', () => {
+    expect(pickCaptureTarget(panes, 'gone', keyOf)).toEqual({ id: 'a' });
+  });
+
+  it('returns null when there are no panes', () => {
+    expect(pickCaptureTarget([], 'a', keyOf)).toBeNull();
   });
 });
 
