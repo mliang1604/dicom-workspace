@@ -241,6 +241,28 @@ function matrixRegistrationSeq(group: number, el: number, matrix: readonly numbe
   return sequence(group, el, [item]);
 }
 
+/** A moving Deformable Registration Sequence item: source frame, grid, pre matrix. */
+function movingItemWithPre(preMatrix: readonly number[]): Uint8Array {
+  const dims = [2, 2, 2];
+  const vectors = Array.from({ length: 3 * dims[0] * dims[1] * dims[2] }, (_, i) => i + 1);
+  return concat([
+    element(0x0064, 0x0003, 'UI', uid('MOVING')), // Source Frame of Reference UID
+    deformationGrid([10, 20, 30], dims, [3, 3, 3], vectors),
+    matrixRegistrationSeq(0x0064, 0x000f, preMatrix), // Pre Deformation Matrix
+  ]);
+}
+
+/** A deformable Spatial Registration carrying a Manufacturer's Model Name (0008,1090). */
+function deformableWithModel(model: string, defItems: Uint8Array[]): ArrayBuffer {
+  const body = concat([
+    element(0x0008, 0x0016, 'UI', uid(DEFORMABLE_REGISTRATION)), // SOPClassUID
+    element(0x0008, 0x1090, 'LO', text(model)), // Manufacturer's Model Name
+    element(0x0020, 0x0052, 'UI', uid('FIXED')), // Frame of Reference UID (target)
+    sequence(0x0064, 0x0002, defItems),
+  ]);
+  return dicomFile(body, DEFORMABLE_REGISTRATION);
+}
+
 // --- Tests ------------------------------------------------------------------
 
 describe('parseRegistration', () => {
@@ -362,5 +384,63 @@ describe('parseRegistration', () => {
     expect(reg.preMatrix).toEqual(pre);
     expect(reg.postMatrix).toEqual(post);
     expect(reg.grid.dims).toEqual([2, 2, 2]);
+  });
+});
+
+describe('Varian Velocity matrix-scale correction', () => {
+  // Velocity exports the matrix's linear + translation scaled by ~0.001 (the 3×3 is
+  // a 180°-about-x rotation × 0.001), which is singular and collapses the overlay.
+  // prettier-ignore
+  const scaledPre = [
+    0.001, 0, 0, 0.0006,
+    0, -0.001, 0, 0.1534,
+    0, 0, -0.001, 0.238,
+    0, 0, 0, 1,
+  ];
+
+  it('rescales a Velocity 0.001-scaled matrix back to unit scale (×1000)', () => {
+    const reg = parseRegistration(
+      'velocity.dcm',
+      deformableWithModel('Velocity', [movingItemWithPre(scaledPre)]),
+    );
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix[0]).toBeCloseTo(1, 5); // 3×3 → unit rotation
+    expect(reg.preMatrix[5]).toBeCloseTo(-1, 5);
+    expect(reg.preMatrix[10]).toBeCloseTo(-1, 5);
+    expect(reg.preMatrix[3]).toBeCloseTo(0.6, 3); // translation scales up too
+    expect(reg.preMatrix[7]).toBeCloseTo(153.4, 1);
+    expect(reg.preMatrix[11]).toBeCloseTo(238, 1);
+    expect(reg.preMatrix[15]).toBe(1); // homogeneous row untouched
+  });
+
+  it('detects Velocity by the Varian SOP Instance UID root when the model tag is absent', () => {
+    const body = concat([
+      element(0x0008, 0x0016, 'UI', uid(DEFORMABLE_REGISTRATION)),
+      element(0x0008, 0x0018, 'UI', uid('1.2.246.352.222.400.123')), // SOP Instance UID
+      element(0x0020, 0x0052, 'UI', uid('FIXED')),
+      sequence(0x0064, 0x0002, [movingItemWithPre(scaledPre)]),
+    ]);
+    const reg = parseRegistration('velocity.dcm', dicomFile(body, DEFORMABLE_REGISTRATION));
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix[0]).toBeCloseTo(1, 5);
+  });
+
+  it('leaves the same scaled matrix untouched for a non-Velocity producer', () => {
+    const reg = parseRegistration(
+      'other.dcm',
+      deformableWithModel('OtherTPS', [movingItemWithPre(scaledPre)]),
+    );
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix[0]).toBeCloseTo(0.001, 6); // unchanged
+  });
+
+  it('leaves an already unit-scale Velocity matrix untouched', () => {
+    const valid = [1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7, 0, 0, 0, 1];
+    const reg = parseRegistration(
+      'velocity.dcm',
+      deformableWithModel('Velocity', [movingItemWithPre(valid)]),
+    );
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.preMatrix).toEqual(valid);
   });
 });

@@ -11,6 +11,8 @@ import {
 const SPATIAL_REGISTRATION_SOP_CLASS = '1.2.840.10008.5.1.4.1.1.66.1';
 /** SOP Class UID of a Deformable Spatial Registration Storage object. */
 const DEFORMABLE_REGISTRATION_SOP_CLASS = '1.2.840.10008.5.1.4.1.1.66.3';
+/** Varian's UID root; Velocity instances carry it (e.g. `1.2.246.352.222…`). */
+const VARIAN_UID_ROOT = '1.2.246.352';
 
 /**
  * Parse a DICOM Spatial Registration file into a typed {@link Registration}, or
@@ -40,9 +42,68 @@ export function parseRegistration(name: string, buffer: ArrayBuffer): Registrati
   // Branch on the carried sequence rather than the SOP class alone: a Deformable
   // Registration Sequence (0064,0002) means a displacement field; otherwise a
   // Registration Sequence (0070,0308) means a rigid/affine matrix.
-  if (dataSet.elements['x00640002']) return parseDeformable(name, dataSet);
-  if (dataSet.elements['x00700308']) return parseRigid(name, dataSet);
-  return null;
+  const reg = dataSet.elements['x00640002']
+    ? parseDeformable(name, dataSet)
+    : dataSet.elements['x00700308']
+      ? parseRigid(name, dataSet)
+      : null;
+  if (!reg) return null;
+
+  // Varian Velocity exports its transformation matrices with the linear and
+  // translation parts scaled by ~0.001 (the 3×3 is a uniformly-scaled rotation; the
+  // homogeneous row stays 1), which makes the matrix singular and collapses any
+  // overlay it drives onto a point. Undo that scale for Velocity objects so the
+  // matrix is a usable transform; other producers are left untouched.
+  return isVelocity(dataSet) ? withUnitScaleMatrices(reg) : reg;
+}
+
+/**
+ * Recognise a Varian Velocity registration, to undo its scaled-matrix export bug.
+ * Prefers the descriptive tags (Manufacturer / Manufacturer's Model Name naming
+ * "Velocity"), falling back to the Varian SOP Instance UID root when they're
+ * absent (Velocity's instance UIDs are rooted under it).
+ */
+function isVelocity(dataSet: dicomParser.DataSet): boolean {
+  const model = (dataSet.string('x00081090') ?? '').toLowerCase(); // Manufacturer's Model Name
+  const manufacturer = (dataSet.string('x00080070') ?? '').toLowerCase(); // Manufacturer
+  if (model.includes('velocity') || manufacturer.includes('velocity')) return true;
+  const sopInstanceUid = (dataSet.string('x00080018') ?? dataSet.string('x00020003') ?? '').trim();
+  return sopInstanceUid.startsWith(VARIAN_UID_ROOT);
+}
+
+/** A copy of `reg` with each transformation matrix's scale normalised to ~1. */
+function withUnitScaleMatrices(reg: Registration): Registration {
+  if (reg.kind === 'rigid') return { ...reg, matrix: normalizeMatrixScale(reg.matrix) };
+  return {
+    ...reg,
+    preMatrix: normalizeMatrixScale(reg.preMatrix),
+    postMatrix: normalizeMatrixScale(reg.postMatrix),
+  };
+}
+
+/**
+ * Divide a 4×4's upper 3×4 (linear + translation) by the uniform scale of its 3×3,
+ * recovering a unit-scale rotation — the inverse of Velocity's ÷scale export. A
+ * no-op unless the 3×3 is a *uniform* scale clearly off from 1, so a genuine rigid
+ * (scale 1) or anisotropic/shearing affine is returned unchanged.
+ */
+function normalizeMatrixScale(m: Mat4): Mat4 {
+  const rowNorms = [
+    Math.hypot(m[0], m[1], m[2]),
+    Math.hypot(m[4], m[5], m[6]),
+    Math.hypot(m[8], m[9], m[10]),
+  ];
+  const scale = (rowNorms[0] + rowNorms[1] + rowNorms[2]) / 3;
+  if (!Number.isFinite(scale) || scale === 0 || Math.abs(scale - 1) < 0.1) return m;
+  if (rowNorms.some((n) => Math.abs(n - scale) > scale * 0.05)) return m; // not a uniform scale
+  const k = 1 / scale;
+  // prettier-ignore
+  return [
+    m[0] * k, m[1] * k, m[2] * k, m[3] * k,
+    m[4] * k, m[5] * k, m[6] * k, m[7] * k,
+    m[8] * k, m[9] * k, m[10] * k, m[11] * k,
+    m[12], m[13], m[14], m[15],
+  ];
 }
 
 /**
