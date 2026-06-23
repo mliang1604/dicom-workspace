@@ -20,6 +20,7 @@ export const CT_WINDOW_PRESETS: readonly WindowPreset[] = [
   { label: 'Lung', center: -600, width: 1500 },
   { label: 'Bone', center: 300, width: 1500 },
   { label: 'Brain', center: 40, width: 80 },
+  { label: 'Liver', center: 30, width: 150 },
 ] as const;
 
 /**

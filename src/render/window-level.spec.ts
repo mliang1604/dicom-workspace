@@ -34,10 +34,11 @@ describe('windowPresets', () => {
       'Lung',
       'Bone',
       'Brain',
+      'Liver',
       'Full range',
     ]);
     // The CT entries match the radiology-standard centre/width values verbatim.
-    expect(presets.slice(0, 4)).toEqual(CT_WINDOW_PRESETS);
+    expect(presets.slice(0, CT_WINDOW_PRESETS.length)).toEqual(CT_WINDOW_PRESETS);
   });
 
   it('derives Full range from the volume min/max', () => {
