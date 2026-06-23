@@ -3,369 +3,75 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
-  DestroyRef,
-  effect,
   ElementRef,
   inject,
   signal,
   viewChild,
 } from '@angular/core';
-import { initWebGpu, type GpuContext } from '../../render/device';
-import {
-  blendBarPlacement,
-  compareLayout,
-  LayoutMode,
-  mprLayout,
-  scaleRect,
-  singleLayout,
-  triLayout,
-  type BlendBar,
-  type PaneRect,
-  type Vec2,
-} from '../../render/layout';
-import {
-  defaultSlabThicknessMm,
-  ensureSurfaceSortScratch,
-  isDvr,
-  oneToOneZoom,
-  packSurfaceFrame,
-  ProjectionMode,
-  SliceRenderer,
-  type PaneView,
-  type SurfaceFrame,
-  type SurfaceSortScratch,
-} from '../../render/slice-renderer';
-import { composePaneViews } from '../../render/frame';
-import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
-import { type DvrLighting } from '../../render/dvr';
-import {
-  linkedSliceIndex,
-  NO_OBLIQUE,
-  planeExtentMm,
-  slicePlaneCorners,
-  volumeBounds,
-  type ObliqueRotation,
-  type PatientPlane,
-} from '../../render/reslice';
-import {
-  mmPerScreenPixel,
-  paneEdgeLabels,
-  scaleBar,
-  type PaneEdgeLabels,
-} from '../../render/pane-annotations';
-import {
-  paneToPlanePoint,
-  planePointToPane,
-  type PanePoint,
-  type PlanePoint,
-} from '../../render/pane-coords';
-import {
-  formatValue,
-  measureAngleDeg,
-  measureDistanceMm,
-  roiAreaMm2,
-  roiBounds,
-  type RoiShape,
-} from '../../render/measure';
-import { windowPresets, type WindowLevel, type WindowPreset } from '../../render/window-level';
-import {
-  cameraBasis,
-  clipPlaneGizmoGeometry,
-  projectToPane,
-  viewBasis,
-  type ClipPlaneGizmoGeometry,
-} from '../../render/camera';
-import { axisIndicatorGeometry, type AxisIndicatorOverlay } from '../../render/axis-indicator';
-import {
-  referenceLineGeometry,
-  type ReferenceLineGeometry,
-  type ReferenceLinePane,
-} from '../../render/reference-lines';
-import { pickProjection } from '../../render/pick';
-import { probeVoxel, sampleVolumeAtPatient, type VoxelProbe } from '../../render/probe';
-import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
-import {
-  rgbColor,
-  roiContourCoords,
-  roiKeyOf,
-  roiPlaneShapes,
-  roiScreenShapes,
-  setIsShown,
-  type ContourPaneOverlay,
-  type RoiContourCoords,
-  type RoiOverlayPane,
-  type RoiPlaneShapes,
-} from '../../render/roi-overlay';
-import {
-  baseLayer,
-  DEFAULT_OVERLAY_OPACITY,
-  modalityUnit,
-  Orientation,
-  type Layer,
-  type LayerDisplay,
-  type MissingSlices,
-  type StructureSet,
-  type Vec3,
-  type Volume,
-} from '../../dicom/types';
-import { COLORMAPS } from '../../render/colormap';
+import { LayoutMode, scaleRect, type Vec2 } from '../../render/layout';
+import { SliceRenderer } from '../../render/slice-renderer';
+import { NO_OBLIQUE } from '../../render/reslice';
+import { Orientation } from '../../dicom/types';
 import { clamp } from '../../dicom/math';
-import { add, scale } from '../../dicom/vec3';
-import {
-  flattenSurfaceMeshes,
-  loftRoiMesh,
-  type ColoredSurfaceMesh,
-  type RoiSurfaceMesh,
-} from '../../render/surface';
-import type { DicomMetadata, RawTag } from '../../dicom/metadata';
-import type { Series } from '../../dicom/series';
-import { VolumeLoader, type LoadResult } from '../volume-loader';
-import { PatientCatalog } from '../patient-catalog';
-import { describeSelection, RecentStore, type RecentEntry } from '../recent-store';
+import { RecentStore } from '../recent-store';
 import { PreferencesStore } from '../preferences-store';
 import { modifierLabel } from '../platform';
-import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
-import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
+import { MeasurementStore } from './measurement-store';
+import { LayersStore } from './layers-store';
 import { Camera3dStore } from './camera3d-store';
 import { CineStore } from './cine-store';
-import { CompareStore, COMPARE_GROUPS, type GroupNav } from './compare-store';
-import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coordinator';
-import { readDropped } from './drop-files';
+import { CompareStore } from './compare-store';
+import { LoadCoordinator, type DropIntent } from './load-coordinator';
 import { pickCaptureTarget } from './capture';
 import { CaptureController, type ScreenshotTarget } from './capture-controller';
 import { InteractionController, type Drag } from './interaction-controller';
+import { View3dController } from './view3d-controller';
+import { LoadController, type LoadState } from './load-controller';
+import { MeasureController, type ToolMode } from './measure-controller';
+import { RenderController } from './render-controller';
+import { RoiController } from './roi-controller';
+import { LayersController } from './layers-controller';
+import { ToolbarController, LAYOUT_MODES } from './toolbar-controller';
+import { StatusController } from './status-controller';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
-import { SERIES_DND_MIME } from './history-panel/series-chip';
+import { placePanes, placementAt, type PanePlacement } from './pane-placement';
+import { downloadBlob, dropHeadlineText } from './viewer-dom';
+import { paneKeyOf } from './pane-placement';
+import { SHORTCUTS, MEASURE_TOOLS, CINE_FPS_OPTIONS } from './viewer-consts';
+import {
+  type PerOrientation,
+  type PerOrientationOblique,
+  type PerOrientationPan,
+} from './viewer-overlays';
 
 /** Re-exported for templates/specs; the drop-intent policy lives in the load coordinator. */
 export type { DropIntent } from './load-coordinator';
-
-/** What the viewer is currently showing, as one-shape-at-a-time state. */
-type LoadState =
-  | { readonly status: 'idle' }
-  | { readonly status: 'loading'; readonly loaded: number; readonly total: number }
-  | { readonly status: 'ready'; readonly result: LoadResult }
-  | { readonly status: 'error'; readonly message: string };
-
-/** A pane's placement on screen, in CSS pixels, plus what it shows. */
-export type PanePlacement =
-  | {
-      readonly kind: 'mpr';
-      readonly orientation: Orientation;
-      readonly rect: PaneRect;
-      /** Compare-group index (0 unless the Compare layout splits into columns). */
-      readonly group: number;
-    }
-  | { readonly kind: 'mip'; readonly rect: PaneRect };
-
-/** One MPR cut-plane outline projected into the 3D pane. */
-interface SlicePlaneOverlay {
-  readonly orientation: Orientation;
-  /** SVG polygon `points` in 3D-pane-local CSS pixels (origin at the pane's top-left). */
-  readonly points: string;
-  /** Outline colour, matched to the pane's orientation. */
-  readonly color: string;
-}
-
-/** The three MPR cut-planes drawn inside the 3D pane to show where each slices. */
-interface SlicePlanesOverlay {
-  /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
-  readonly rect: PaneRect;
-  readonly planes: readonly SlicePlaneOverlay[];
-}
-
-/** The three MPR orientations contours are projected for, regardless of layout. */
-const MPR_ORIENTATIONS = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
-
-/** Decimation tolerance for coplanar loops, in plane `(u, v)` units (~0.15% of a pane). */
-const CONTOUR_DECIMATE_UV = 0.0015;
-/** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
-const SURFACE_ALPHA = 0.4;
-
-/** One ROI listed in the structures panel, with its display controls. */
-export interface RoiLegendEntry {
-  /** Stable key, unique across structure sets (see {@link roiKeyOf}). */
-  readonly key: string;
-  /** Index of the structure set this ROI belongs to. */
-  readonly setIndex: number;
-  /** ROI Name, or a fallback when the RTSTRUCT left it blank. */
-  readonly name: string;
-  /** Interpreted type (ORGAN/PTV/GTV…) as a short upper-case badge, or '' when none. */
-  readonly type: string;
-  /** Effective display colour (ROI colour or the user's override) as a CSS colour. */
-  readonly color: string;
-  /** The effective colour as `#rrggbb`, for the colour `<input>`. */
-  readonly colorHex: string;
-  /** Effective draw opacity as a whole percent `[0, 100]`, for the opacity slider. */
-  readonly opacityPercent: number;
-  /** Whether the ROI's contours are currently drawn. */
-  readonly visible: boolean;
-}
-
-/** The ROIs of one structure set, grouped under its label in the structures panel. */
-export interface RoiLegendGroup {
-  /** Index of the structure set this group lists. */
-  readonly setIndex: number;
-  /** The set's display label (Structure Set Label, else file name, else a fallback). */
-  readonly label: string;
-  /** The set's listed ROIs, in file order. */
-  readonly entries: RoiLegendEntry[];
-}
-
-/** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
-interface CrosshairOverlay {
-  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
-  readonly key: string;
-  /** The pane's rectangle in CSS pixels. */
-  readonly rect: PaneRect;
-  /** Focus point in CSS pixels relative to the canvas. */
-  readonly x: number;
-  readonly y: number;
-}
-
-/** A scale bar drawn in an MPR pane corner, in CSS pixels. */
-interface ScaleBarOverlay {
-  /** Bar length in CSS pixels. */
-  readonly lengthPx: number;
-  /** Rounded physical label, e.g. "5 cm". */
-  readonly label: string;
-}
-
-/** Orientation edge letters and a scale bar overlaid on one MPR pane. */
-interface PaneAnnotation {
-  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
-  readonly key: string;
-  /** The pane's rectangle in CSS pixels; the overlay is positioned and clipped to it. */
-  readonly rect: PaneRect;
-  /** Patient-direction letters at the four edges. */
-  readonly edges: PaneEdgeLabels;
-  /** The physical scale bar, or null when the pane is too small to size one. */
-  readonly scale: ScaleBarOverlay | null;
-}
-
-/** The active measurement tool, or `none` for the default pan/orbit gestures. */
-type ToolMode = 'none' | MeasureTool;
-
-/** A measurement projected into its pane for the SVG overlay, in pane-local pixels. */
-interface MeasurementOverlay {
-  readonly key: string;
-  readonly id: number;
-  readonly tool: MeasureTool;
-  readonly rect: PaneRect;
-  /** Endpoint/corner handles in pane-local pixels; draggable only when committed. */
-  readonly handles: readonly PanePoint[];
-  /** Polyline `points` for distance/angle, in pane-local pixels; '' otherwise. */
-  readonly polyline: string;
-  /** Axis-aligned ellipse for an ellipse ROI, in pane-local pixels; null otherwise. */
-  readonly ellipse: {
-    readonly cx: number;
-    readonly cy: number;
-    readonly rx: number;
-    readonly ry: number;
-  } | null;
-  /** Box for a rectangle ROI, in pane-local pixels; null otherwise. */
-  readonly box: {
-    readonly x: number;
-    readonly y: number;
-    readonly w: number;
-    readonly h: number;
-  } | null;
-  /** Readout lines (length / angle / area + HU stats). */
-  readonly lines: readonly string[];
-  readonly labelX: number;
-  readonly labelY: number;
-  /** True while still being placed: rendered dashed, with no drag handles. */
-  readonly pending: boolean;
-}
-
-/** A value per orientation, indexed by the orientation's numeric value. */
-type PerOrientation = readonly [number, number, number];
-
-/** A pan offset per orientation, indexed by the orientation's numeric value. */
-type PerOrientationPan = readonly [Vec2, Vec2, Vec2];
-
-/** An oblique tilt per orientation, indexed by the orientation's numeric value. */
-type PerOrientationOblique = readonly [ObliqueRotation, ObliqueRotation, ObliqueRotation];
-
-/** The oblique rotation gizmo drawn over one MPR pane: a ring and a draggable knob. */
-interface ObliqueGizmo {
-  /** Key of the pane it controls (see {@link Viewer.paneKey}). */
-  readonly key: string;
-  readonly orientation: Orientation;
-  /** The pane's rectangle in CSS pixels; the overlay is positioned to it. */
-  readonly rect: PaneRect;
-  /** Ring centre in pane-local CSS pixels (the orthogonal "home"). */
-  readonly cx: number;
-  readonly cy: number;
-  /** Ring radius in CSS pixels: the largest tilt the knob reaches. */
-  readonly radius: number;
-  /** Knob centre in pane-local CSS pixels, encoding the current tilt. */
-  readonly knobX: number;
-  readonly knobY: number;
-  /** Whether the pane is currently tilted (drawn emphasised when so). */
-  readonly active: boolean;
-}
+export { placePanes, placementAt, withinRect, type PanePlacement } from './pane-placement';
+export {
+  buildRoiLegend,
+  groupRoiLegend,
+  allRoiKeys,
+  type RoiLegendEntry,
+  type RoiLegendGroup,
+} from './roi-legend';
+export {
+  formatProbe,
+  polylineOf,
+  loadingText,
+  filterRawTags,
+  nextCineIndex,
+  missingSliceWarning,
+} from './viewer-format';
+export { dropIntentOf, dropHeadlineText, isEditableTarget, releaseSelectFocus } from './viewer-dom';
 
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
 
 const NO_OBLIQUES: PerOrientationOblique = [NO_OBLIQUE, NO_OBLIQUE, NO_OBLIQUE];
-/** Largest oblique tilt (radians) the rotation knob reaches at the ring's edge. */
-const MAX_OBLIQUE_RAD = Math.PI / 3; // 60°
-/** Radius (CSS px) of the oblique rotation ring; maps px offset → tilt angle. */
-const OBLIQUE_RING_RADIUS = 56;
-/** CSS pixels the knob travels per radian of tilt. */
-const OBLIQUE_PX_PER_RAD = OBLIQUE_RING_RADIUS / MAX_OBLIQUE_RAD;
-
-/** Short 3D-pane tags, indexed by {@link ProjectionMode}, for the pane label. */
-const MODE_TAGS: Readonly<Record<ProjectionMode, string>> = {
-  [ProjectionMode.Max]: 'MIP',
-  [ProjectionMode.Min]: 'MinIP',
-  [ProjectionMode.Mean]: 'Average',
-  [ProjectionMode.Dvr]: 'DVR',
-};
-
-/** Order the main (top-left) pane cycles through when swapping. */
-const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
-
-/** Frames-per-second options offered in the cine speed selector, in display order. */
-const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
-
-/**
- * Only warn about interpolation when the widest gap spans more than this
- * multiple of the slice spacing. A gap up to 2× spacing is a single missing
- * slice (or spacing jitter), which interpolates cleanly and isn't worth a
- * banner; wider gaps leave a visible reconstructed region.
- */
-const GAP_WARNING_RATIO = 2;
-
-/**
- * Outline colour of each MPR cut-plane drawn in the 3D pane, indexed by the
- * Orientation value — distinct hues so the three planes read apart at a glance.
- */
-const SLICE_PLANE_COLORS: readonly [string, string, string] = ['#ff6b6b', '#5ee08a', '#6bb6ff'];
-
-/** Longest an MPR pane's scale bar may grow: a fraction of the pane width… */
-const SCALE_BAR_MAX_FRACTION = 0.3;
-/** …capped in absolute CSS pixels so it stays a discreet ruler on large panes. */
-const SCALE_BAR_MAX_PX = 160;
-
-/** Pixels a measurement readout sits above its anchor point. */
-const MEASURE_LABEL_OFFSET = 8;
-
-/**
- * How long after the last wheel-zoom or window/level change the 3D MIP keeps
- * rendering at reduced quality before snapping back to a full-quality frame.
- * Orbit drags don't need this — pointer-up settles them directly.
- */
-const MIP_SETTLE_MS = 200;
-
-/** How long a transient drop notice stays up before it auto-clears. */
-const NOTICE_MS = 3600;
 
 @Component({
   selector: 'app-viewer',
@@ -380,40 +86,55 @@ const NOTICE_MS = 3600;
     LoadCoordinator,
     CaptureController,
     InteractionController,
+    View3dController,
+    LoadController,
+    MeasureController,
+    RenderController,
+    RoiController,
+    LayersController,
+    ToolbarController,
+    StatusController,
   ],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
-    '(window:keydown.escape)': 'onEscapeKey($event)',
+    '(window:keydown.escape)': 'toolbar.onEscapeKey($event)',
     // Every single-letter and viewport shortcut goes through one handler that reads
     // event.key itself and case-folds it. Angular's per-key bindings (keydown.x)
     // match event.key exactly, so Shift / Caps Lock (reported as 'X') would silently
     // miss; and they'd need a separate focus guard from the digit/'?' shortcuts.
-    '(window:keydown)': 'onShortcutKey($event)',
+    '(window:keydown)': 'toolbar.onShortcutKey($event)',
     // Picking from a <select> leaves it focused, so isEditableTarget swallows every
     // subsequent shortcut until the user clicks away. Release that focus on change
     // (the event bubbles to window) so the keyboard works straight after a pick.
-    '(window:change)': 'onControlChange($event)',
+    '(window:change)': 'toolbar.onControlChange($event)',
   },
 })
 export class Viewer {
-  private readonly loader = inject(VolumeLoader);
-  private readonly catalog = inject(PatientCatalog);
-  /** Resolves load requests to a discriminated outcome; provided per-component. */
-  private readonly loadCoordinator = inject(LoadCoordinator);
   /** Owns the screenshot / rotation-capture export domain; wired in the constructor. */
   private readonly capture = inject(CaptureController);
   /** Owns the canvas pointer/drag/wheel state machine; wired in the constructor. */
-  private readonly interaction = inject(InteractionController);
+  protected readonly interaction = inject(InteractionController);
+  /** Owns the 3D-pane editing gestures (TF / clip / oblique / slab); wired in the constructor. */
+  protected readonly view3d = inject(View3dController);
+  /** Owns the load/import flow (drop overlay, pickers, resolve→apply); wired in the constructor. */
+  protected readonly loadCtl = inject(LoadController);
+  /** Owns the measurement-tool gestures and Shift+click focus picks; wired in the constructor. */
+  protected readonly measureCtl = inject(MeasureController);
+  /** Owns the WebGPU lifecycle + per-frame submission pipeline; wired in the constructor. */
+  private readonly render = inject(RenderController);
+  /** Owns the RTSTRUCT structures domain (ROI state, legend, contours, surfaces); wired in the constructor. */
+  protected readonly roiCtl = inject(RoiController);
+  /** Owns the layer registry / fusion / Compare domain (volume, window/level, blend); wired in the constructor. */
+  protected readonly layersCtl = inject(LayersController);
+  /** Owns the toolbar / keyboard view actions (layout, fit, reset, cine, capture); wired in the constructor. */
+  protected readonly toolbar = inject(ToolbarController);
+  /** Owns the read-only status / series / metadata derivations; wired in the constructor. */
+  protected readonly status = inject(StatusController);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
-  /** Fusion / layers override state and logic; provided per-component (see providers). */
-  private readonly layerStore = inject(LayersStore);
   /** 3D pane view state (camera / DVR / TF / clip); provided per-component (see providers). */
   private readonly cam = inject(Camera3dStore);
-  /** Compare-layout linking state and resolution; provided per-component (see providers). */
-  private readonly compareStore = inject(CompareStore);
-  private readonly destroyRef = inject(DestroyRef);
   /** Preferences restored at startup; seed the view signals and per-load defaults. */
   private readonly initialPrefs = this.preferencesStore.preferences();
 
@@ -432,119 +153,19 @@ export class Viewer {
   /** Per-orientation pan offset in screen-uv units; drives shader + probe. */
   private readonly pans = signal<PerOrientationPan>(NO_PANS);
   /**
-   * Whether the Compare layout's side-by-side groups navigate together (the
-   * default). Linked, scroll/pan/zoom in any group resolve to the same patient
-   * plane in every group (despite different grids); unlinked, each group keeps its
-   * own {@link groupNav}. Only meaningful in {@link LayoutMode.Compare}.
-   */
-  protected readonly compareLinked = this.compareStore.linked;
-  /**
-   * Per-group independent navigation, indexed by compare group, used only while
-   * {@link compareLinked} is false. Seeded from the current (linked) view when the
-   * groups are unlinked so the panes don't jump; group 0 always reads the master
-   * signals, so its slot is unused. Owned by {@link CompareStore}; aliased here.
-   */
-  private readonly groupNav = this.compareStore.groupNav;
-  /**
    * Per-orientation oblique tilt; {@link NO_OBLIQUE} (the default) reslices the
    * orthogonal anatomical plane, a non-zero tilt an arbitrary oblique plane. Set
    * by the rotation knob and read by the reslice, probe, crosshair and reference
    * lines so every pane and overlay shares one tilt.
    */
   private readonly obliques = signal<PerOrientationOblique>(NO_OBLIQUES);
-  /** Whether any MPR pane is currently tilted off its orthogonal default. */
-  protected readonly hasOblique = computed(() =>
-    this.obliques().some((r) => r.tiltU !== 0 || r.tiltV !== 0),
-  );
-  // The 3D pane's view state lives in Camera3dStore; these alias its signals so the
-  // existing computeds, render effects, and gesture handlers read/write unchanged.
-  /** Orbit/zoom state of the 3D MIP pane. */
+  /** Orbit/zoom state of the 3D MIP pane (aliases Camera3dStore for the frame composer). */
   private readonly camera3d = this.cam.camera3d;
-  /** What the 3D pane renders (MIP / MinIP / Average / DVR). */
-  protected readonly projectionMode = this.cam.projectionMode;
-  /** The live DVR transfer function, seeded from a preset and then editable. */
-  protected readonly transferFunction = this.cam.transferFunction;
-  /** The preset the editor is currently seeded from, driving the TF selector. */
-  protected readonly transferFunctionPreset = computed(() => this.transferFunction().preset);
-  /** DVR lighting/shading (Blinn–Phong material + posed headlight). */
-  protected readonly dvrLighting = this.cam.dvrLighting;
-  /** The TF-editor control point being dragged (index), or null. */
-  private readonly tfDrag = this.cam.tfDrag;
-  /** The selected TF control point (for recolour / removal), or null. */
-  protected readonly tfSelected = this.cam.tfSelected;
-  /** When true, clip the 3D pane to the MPR slice planes for a cut-away view. */
-  protected readonly clipToPlanes = this.cam.clipToPlanes;
-  /** When true, an arbitrary handle-driven cut-plane clips the 3D pane (independent of {@link clipToPlanes}). */
-  protected readonly clipPlaneEnabled = this.cam.clipPlaneEnabled;
-  /** Cut-plane normal in patient space (unit); the kept half is the side it points into. */
-  private readonly clipPlaneNormal = this.cam.clipPlaneNormal;
-  /** Signed offset (mm) of the cut-plane from the volume centre along its normal. */
-  private readonly clipPlaneOffsetMm = this.cam.clipPlaneOffsetMm;
-  /**
-   * The live cut-plane in patient space, or null when the handle is off. Placed
-   * at the volume centre shifted along the normal by the dragged offset; shared by
-   * the renderer (the march clip) and the 3D pick so a click tracks the cut-away.
-   */
-  protected readonly cutPlane = computed<PatientPlane | null>(() => {
-    const volume = this.volume();
-    if (!this.clipPlaneEnabled() || !volume) return null;
-    const normal = this.clipPlaneNormal();
-    const point = add(volumeBounds(volume).center, scale(normal, this.clipPlaneOffsetMm()));
-    return { point, normal };
-  });
-  /** True when the 3D pane is in direct-volume-rendering mode (drives the UI). */
-  protected readonly isDvrMode = computed(() => isDvr(this.projectionMode()));
   /**
    * Thick-slab thickness (mm) for the 3D pane, centred on the volume along the
    * view direction. Defaults to the volume's full depth (whole-volume projection).
    */
   protected readonly slabThicknessMm = signal(0);
-  /** The 3D-mode options offered in the toolbar, in display order. */
-  protected readonly projectionModes = [
-    { value: ProjectionMode.Max, label: 'MIP (max)' },
-    { value: ProjectionMode.Min, label: 'MinIP (min)' },
-    { value: ProjectionMode.Mean, label: 'Average' },
-    { value: ProjectionMode.Dvr, label: 'DVR (volume)' },
-  ] as const;
-  /** Transfer-function presets offered for DVR, in display order. */
-  protected readonly transferFunctions = TRANSFER_FUNCTION_PRESETS;
-  /** Short tag for the 3D pane's current mode (with the cut-away state appended). */
-  protected readonly mode3dTag = computed(() => {
-    const label = MODE_TAGS[this.projectionMode()];
-    return this.clipToPlanes() ? `${label} ✂` : label;
-  });
-  /**
-   * Geometry for the TF editor's SVG: each control point as a `(x, y)` in the
-   * editor's 0..100 viewBox (intensity left→right, opacity bottom→top) plus a
-   * polyline for the opacity curve and a closed area under it for an opacity fill.
-   */
-  protected readonly tfEditor = computed(() => {
-    const tf = this.transferFunction();
-    const [lo, hi] = tf.domain;
-    const span = hi - lo || 1;
-    const points = tf.controlPoints.map((p, index) => ({
-      index,
-      x: ((p.intensity - lo) / span) * 100,
-      y: (1 - p.opacity) * 100,
-      color: rgbToHex(p.color),
-      intensity: Math.round(p.intensity),
-      isEndpoint: index === 0 || index === tf.controlPoints.length - 1,
-    }));
-    const line = points.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
-    return { lo, hi, points, line, area: `0,100 ${line} 100,100` };
-  });
-  /** Hex colour of the selected TF control point, for the colour input. */
-  protected readonly tfSelectedColor = computed(() => {
-    const index = this.tfSelected();
-    const points = this.transferFunction().controlPoints;
-    return index !== null && points[index] ? rgbToHex(points[index].color) : '#ffffff';
-  });
-  /** Whether the selected TF control point can be removed (interior, ≥ 3 points). */
-  protected readonly tfCanRemove = computed(() => {
-    const index = this.tfSelected();
-    const points = this.transferFunction().controlPoints;
-    return index !== null && index > 0 && index < points.length - 1 && points.length > 2;
-  });
   /**
    * The in-progress drag (pan / orbit / window-level / gizmo), or null when no
    * button is held. Owned by the {@link interaction} controller, which runs the
@@ -580,33 +201,10 @@ export class Viewer {
 
   /** Whether the keyboard-shortcut help overlay is open. */
   protected readonly helpOpen = signal(false);
-  /** The modal help panel, so focus can move into it on open. */
+  /** The modal help panel, so the toolbar controller can move focus into it on open. */
   private readonly helpPanelRef = viewChild<ElementRef<HTMLElement>>('helpPanel');
-  /** The control focused before the help modal opened, restored when it closes. */
-  private helpReturnFocus: HTMLElement | null = null;
   /** The shortcuts listed in the help overlay, in display order. */
-  protected readonly shortcuts = [
-    { keys: 'X', label: 'Swap the main view to the next orientation' },
-    { keys: 'F', label: 'Flip the sagittal view left/right' },
-    { keys: 'L', label: 'Cycle the viewport layout' },
-    { keys: 'C', label: 'Toggle linked crosshairs & 3D cut-planes' },
-    { keys: 'P', label: 'Play / pause cine through the hovered pane' },
-    { keys: 'I', label: 'Toggle the metadata / tag inspector' },
-    { keys: '0', label: 'Zoom every pane to fit' },
-    { keys: '1', label: 'Native voxel scale (1:1)' },
-    { keys: 'R', label: 'Reset zoom, pan & window/level' },
-    { keys: 'V', label: 'Invert the grayscale' },
-    { keys: 'H', label: 'Collapse / expand the study history panel' },
-    { keys: '?', label: 'Toggle this shortcuts help' },
-    { keys: 'Esc', label: 'Cancel a measurement / close overlays' },
-    { keys: 'Drag', label: 'Pan an MPR pane · orbit the 3D pane' },
-    { keys: 'Middle-drag / Alt+drag', label: 'Pan the 3D pane (and MPR panes)' },
-    { keys: 'Scroll', label: 'Change slice (MPR) · zoom (3D)' },
-    { keys: 'Ctrl+Scroll', label: 'Zoom an MPR pane about the cursor' },
-    { keys: 'Shift+Click', label: 'Link every pane to the clicked point' },
-    { keys: 'Knob drag', label: 'Tilt an MPR pane to an oblique plane (double-click resets)' },
-    { keys: 'Right-drag', label: 'Adjust window / level' },
-  ] as const;
+  protected readonly shortcuts = SHORTCUTS;
   /** Cine playback state/logic; provided per-component (see providers). */
   private readonly cine = inject(CineStore);
   // Cine state lives in CineStore; these alias its signals so the template reads
@@ -622,33 +220,9 @@ export class Viewer {
   /** Measurement / ROI-tool state and logic; provided per-component (see providers). */
   private readonly measure = inject(MeasurementStore);
   /** The measurement tools offered in the palette, in display order. */
-  protected readonly measureTools = [
-    { value: 'distance', label: 'Distance', glyph: '╱' },
-    { value: 'angle', label: 'Angle', glyph: '∠' },
-    { value: 'ellipse', label: 'Ellipse', glyph: '◯' },
-    { value: 'rectangle', label: 'Rectangle', glyph: '▭' },
-  ] as const;
+  protected readonly measureTools = MEASURE_TOOLS;
   /** Whether any measurement (placed or in-progress) exists, for the Clear button. */
   protected readonly hasMeasurements = this.measure.hasMeasurements;
-  /**
-   * Keys of ROIs whose contours are hidden (see {@link roiKeyOf}). A freshly
-   * loaded structure set starts with every ROI hidden (#257), so the user opts
-   * contours in from the structures legend rather than having them drawn over the
-   * anatomy unbidden. Reset on each load to that set's keys (stale keys never match).
-   */
-  private readonly hiddenRois = signal<ReadonlySet<string>>(new Set());
-  /**
-   * Per-ROI colour overrides keyed by {@link roiKeyOf}, as `#rrggbb`. An ROI
-   * absent from the map keeps its RTSTRUCT display colour; the structures panel's
-   * colour picker writes an entry here. Reset on each load.
-   */
-  private readonly roiColorOverrides = signal<ReadonlyMap<string, string>>(new Map());
-  /**
-   * Per-ROI draw opacity in `[0, 1]` keyed by {@link roiKeyOf}. An ROI absent from
-   * the map draws fully opaque (1); the structures panel's opacity slider writes
-   * here. Reset on each load.
-   */
-  private readonly roiOpacities = signal<ReadonlyMap<string, number>>(new Map());
   /**
    * The Compare column the toolbar window/level controls (preset selector, WL/WW
    * inputs) target: the index of the last MPR pane hovered. Sticky — it survives
@@ -657,12 +231,6 @@ export class Viewer {
    * meaningful in {@link LayoutMode.Compare}; reset on a fresh load.
    */
   private readonly activeCompareGroup = signal(0);
-  /**
-   * Which structure set the panel and overlays show: an index into
-   * {@link structureSets}, or -1 for all of them. Only meaningful when more than
-   * one structure set annotates the series; reset to "all" on each load.
-   */
-  protected readonly selectedSetIndex = signal<number>(-1);
   /** Key of the hovered pane (see {@link paneKey}), or null when away. */
   protected readonly hoveredKey = signal<string | null>(null);
   /** True while files are being dragged over the viewport, for the drop overlay. */
@@ -695,82 +263,25 @@ export class Viewer {
    * couldn't fuse — auto-cleared after {@link NOTICE_MS}. Null when none is up.
    */
   protected readonly notice = signal<string | null>(null);
-  /** Pending auto-clear of {@link notice}, so a fresh notice cancels the previous. */
-  private noticeHandle: ReturnType<typeof setTimeout> | null = null;
   /** The recent loads, most recent first, surfaced for the toolbar re-pick list. */
   protected readonly recent = this.recentStore.entries;
   /** Cursor position in CSS pixels relative to the canvas, or null when away. */
   private readonly cursor = signal<{ readonly x: number; readonly y: number } | null>(null);
-  protected readonly windowCenter = signal(0);
-  protected readonly windowWidth = signal(1);
-
-  /**
-   * Window/level presets offered for the window/level controls' active target: the
-   * base volume normally, or the hovered Compare column's overlay volume — so a
-   * dose column gets its own presets (e.g. its full range) rather than the CT's.
-   */
-  protected readonly wlPresets = computed<WindowPreset[]>(() => {
-    const volume = this.activeWlLayer()?.volume ?? this.volume();
-    return volume ? windowPresets(volume) : [];
-  });
 
   protected readonly isReady = computed(
     () => this.load().status === 'ready' && this.renderer() !== null,
   );
-
-  /** Series found in the loaded files, for the picker. Empty until a load succeeds. */
-  protected readonly seriesList = computed<readonly Series[]>(() => {
-    const state = this.load();
-    return state.status === 'ready' ? state.result.series : [];
-  });
-  /** UID of the series currently displayed; '' when nothing is loaded. */
-  protected readonly selectedSeriesUid = computed(() => {
-    const state = this.load();
-    return state.status === 'ready' ? state.result.selectedUid : '';
-  });
-  /**
-   * UIDs of every series currently composited — the base and any fusion overlay
-   * layers (their layer ids are the source series' UIDs). Drives the history
-   * panel's active-series highlight so a fused load lights up both chips, not
-   * just the base. Empty when nothing is loaded.
-   */
-  protected readonly loadedSeriesUids = computed<readonly string[]>(() => {
-    const state = this.load();
-    return state.status === 'ready' ? state.result.layers.map((layer) => layer.id) : [];
-  });
-  /** Only show the picker when a folder held more than one series. */
-  protected readonly hasMultipleSeries = computed(() => this.seriesList().length > 1);
 
   /** Whether the metadata / tag inspector panel is open. */
   protected readonly infoPanelOpen = signal(false);
   /** Case-insensitive filter typed into the raw-tag search box. */
   protected readonly rawTagFilter = signal('');
 
-  /** Captured metadata of the displayed series, or null when none is loaded. */
-  protected readonly metadata = computed<DicomMetadata | null>(() => {
-    const uid = this.selectedSeriesUid();
-    return this.seriesList().find((series) => series.uid === uid)?.metadata ?? null;
-  });
-
-  /** Raw tags of the displayed series, narrowed by the search box. */
-  protected readonly filteredRawTags = computed<readonly RawTag[]>(() => {
-    const metadata = this.metadata();
-    if (!metadata) return [];
-    return filterRawTags(metadata.rawTags, this.rawTagFilter());
-  });
-
   /** The selected viewport layout; defaults to the classic 3-pane MPR (1+2) view. */
   protected readonly layoutMode = signal<LayoutMode>(this.initialPrefs.layoutMode);
-  /** The layout options the cycle button steps through, in display order. */
-  protected readonly layoutModes = [
-    { value: LayoutMode.TriMpr, label: '3-pane MPR' },
-    { value: LayoutMode.Quad, label: '4-pane' },
-    { value: LayoutMode.Compare, label: 'Compare' },
-    { value: LayoutMode.Volume3d, label: '3D only' },
-  ] as const;
   /** Human label for the current layout, shown on the cycle button. */
   protected readonly layoutLabel = computed(
-    () => this.layoutModes.find((m) => m.value === this.layoutMode())?.label ?? '',
+    () => LAYOUT_MODES.find((m) => m.value === this.layoutMode())?.label ?? '',
   );
 
   /** Pane placements in CSS pixels, for the label overlay. */
@@ -783,820 +294,6 @@ export class Viewer {
   protected readonly has3dPane = computed(() => this.panes().some((pane) => pane.kind === 'mip'));
   /** Whether the current layout includes any MPR pane (drives swap/flip enablement). */
   protected readonly hasMprPane = computed(() => this.panes().some((pane) => pane.kind === 'mpr'));
-
-  /**
-   * Linked crosshairs to overlay: the shared focus voxel projected into every MPR
-   * pane via {@link focusPanePoint} — the forward map the probe inverts — so each
-   * mark tracks pan, zoom, scroll and flip. A pane is dropped when the point falls
-   * outside its rect (panned/zoomed off-screen).
-   *
-   * Layer-stack rule (#132): the crosshair, measurements ({@link measurementOverlays})
-   * and contours ({@link contourOverlays}) are all keyed to the BASE layer's geometry
-   * — the focus voxel, measurement points and RTSTRUCT contours live in the base's
-   * patient frame. Overlays share that frame, so the marks register over a fusion
-   * overlay; only the live probe ({@link probeText}) reads per-layer values.
-   */
-  protected readonly crosshairs = computed<CrosshairOverlay[]>(() => {
-    const voxel = this.focusVoxel();
-    const volume = this.volume();
-    if (!this.crosshairsEnabled() || !voxel || !volume) return [];
-
-    const zooms = this.zooms();
-    const pans = this.pans();
-    const obliques = this.obliques();
-    const flipped = this.sagittalFlipped();
-    const result: CrosshairOverlay[] = [];
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      const point = focusPanePoint(
-        volume,
-        pane.orientation,
-        voxel,
-        zooms[pane.orientation],
-        pane.rect,
-        pane.orientation === Orientation.Sagittal && flipped,
-        pans[pane.orientation],
-        obliques[pane.orientation],
-      );
-      if (!point || !withinRect(pane.rect, point.x, point.y)) continue;
-      result.push({ key: this.paneKey(pane), rect: pane.rect, x: point.x, y: point.y });
-    }
-    return result;
-  });
-
-  /**
-   * Cross-pane reference lines: for each MPR pane, where every *other* in-group
-   * pane's (possibly oblique) plane crosses it ({@link referenceLineGeometry}).
-   * The lines tilt live as a plane is made oblique, so they show the oblique angle
-   * on the panes that stay orthogonal. Shares the {@link crosshairsEnabled} toggle
-   * with the linked crosshairs and is coloured to match each plane's 3D cut-plane.
-   */
-  protected readonly referenceLines = computed<ReferenceLineGeometry[]>(() => {
-    const volume = this.volume();
-    if (!this.crosshairsEnabled() || !volume) return [];
-    const mprPanes: ReferenceLinePane[] = this.panes().filter(
-      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> => pane.kind === 'mpr',
-    );
-    return referenceLineGeometry(
-      volume,
-      mprPanes,
-      this.sliceIndices(),
-      this.obliques(),
-      this.zooms(),
-      this.pans(),
-      this.sagittalFlipped(),
-      SLICE_PLANE_COLORS,
-    );
-  });
-
-  /**
-   * The oblique rotation gizmo for each MPR pane that is hovered or already
-   * tilted: a ring centred on the pane and a draggable knob whose offset from the
-   * centre encodes the plane's tilt ({@link OBLIQUE_PX_PER_RAD}). Dragging the
-   * knob ({@link onObliqueHandleDown}) yaws/pitches the plane; the reference lines
-   * on the other panes follow. The orthogonal home is the ring centre, so a knob
-   * at rest there means no tilt.
-   */
-  protected readonly obliqueGizmos = computed<ObliqueGizmo[]>(() => {
-    if (!this.crosshairsEnabled() || !this.isReady()) return [];
-    const hovered = this.hoveredKey();
-    const obliques = this.obliques();
-    const result: ObliqueGizmo[] = [];
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      const key = this.paneKey(pane);
-      const tilt = obliques[pane.orientation];
-      const active = tilt.tiltU !== 0 || tilt.tiltV !== 0;
-      // Show the knob only where it's discoverable (hovered pane) or already in use.
-      if (key !== hovered && !active) continue;
-      const cx = pane.rect.width / 2;
-      const cy = pane.rect.height / 2;
-      const radius = Math.min(OBLIQUE_RING_RADIUS, Math.min(cx, cy) - 4);
-      if (radius < 8) continue;
-      const px = OBLIQUE_PX_PER_RAD;
-      result.push({
-        key,
-        orientation: pane.orientation,
-        rect: pane.rect,
-        cx,
-        cy,
-        radius,
-        knobX: cx + clampPx(tilt.tiltV * px, radius),
-        knobY: cy + clampPx(tilt.tiltU * px, radius),
-        active,
-      });
-    }
-    return result;
-  });
-
-  /**
-   * The three MPR cut-planes drawn inside the 3D pane: each orientation's slice
-   * rectangle ({@link slicePlaneCorners}) projected through the orbit camera with
-   * {@link projectToPane} — the forward map the 3D pick inverts — so the outlines
-   * track the MPR slice positions and rotate live with the orbit. A pure SVG
-   * overlay clipped to the pane, sharing the {@link crosshairsEnabled} toggle with
-   * the linked crosshairs. Recomputed only from the camera and slice indices.
-   */
-  protected readonly slicePlanes = computed<SlicePlanesOverlay | null>(() => {
-    const volume = this.volume();
-    if (!this.crosshairsEnabled() || !this.isReady() || !volume) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!mip) return null;
-
-    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
-    const indices = this.sliceIndices();
-    const planes = ORIENTATION_ORDER.map((orientation) => {
-      const points = slicePlaneCorners(volume, orientation, indices[orientation])
-        .map((corner) => {
-          const { u, v } = projectToPane(basis, corner);
-          return `${(u * mip.rect.width).toFixed(1)},${(v * mip.rect.height).toFixed(1)}`;
-        })
-        .join(' ');
-      return { orientation, points, color: SLICE_PLANE_COLORS[orientation] };
-    });
-    return { rect: mip.rect, planes };
-  });
-
-  /**
-   * Per-ROI 3D surface meshes, lofted from each ROI's contour stack
-   * ({@link loftContours}) in patient space. The 3D pane draws these as
-   * translucent shaded shells (rendered in the WebGPU pass) instead of a busy
-   * stack of wireframe rings, so the volume stays visible through them. Camera-
-   * and visibility-independent — recomputed only when the structure sets change.
-   */
-  private readonly surfaceMeshes = computed<RoiSurfaceMesh[]>(() => {
-    const sets = this.structureSets();
-    if (!this.isReady() || sets.length === 0) return [];
-    const meshes: RoiSurfaceMesh[] = [];
-    sets.forEach((ss, setIndex) => {
-      for (const roi of ss.rois) {
-        const loops = roi.contours
-          .filter((c) => c.geometricType !== 'OPEN_PLANAR' && c.geometricType !== 'POINT')
-          .map((c) => c.points);
-        const baseColor = roi.color ?? ([200, 200, 200] as const);
-        const mesh = loftRoiMesh(setIndex, roi.number, baseColor, loops);
-        if (mesh) meshes.push(mesh);
-      }
-    });
-    return meshes;
-  });
-
-  /**
-   * The interactive cut-plane gizmo for the 3D pane: the arbitrary clip plane
-   * (centre + normal in patient space) projected through the orbit camera into
-   * pane-local pixels — a square outline, a draggable handle at its centre, and a
-   * stub along the kept-side normal ({@link clipPlaneGizmoGeometry}). The handle
-   * drag maps a pointer move onto the plane's offset via `axisX`/`axisY`, the
-   * screen projection of a 1 mm step along the normal. Null unless the handle is
-   * enabled.
-   */
-  protected readonly clipPlaneGizmo = computed<ClipPlaneGizmoGeometry | null>(() => {
-    const volume = this.volume();
-    if (!this.clipPlaneEnabled() || !this.isReady() || !volume) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!mip) return null;
-    return clipPlaneGizmoGeometry(
-      volume,
-      this.camera3d(),
-      this.clipPlaneNormal(),
-      this.clipPlaneOffsetMm(),
-      mip.rect,
-    );
-  });
-
-  /**
-   * Anatomical orientation indicator for the 3D pane: the six patient axes
-   * projected through the orbit camera and placed in a small widget in the pane's
-   * top-right corner ({@link axisIndicatorGeometry}), so it rotates live with the
-   * orbit. It's a pure-CSS/SVG overlay — no extra GPU pass — keyed only off the
-   * camera angles, so panning or scrolling the MPR panes never touches it.
-   */
-  protected readonly axisIndicator = computed<AxisIndicatorOverlay | null>(() => {
-    if (!this.isReady()) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!mip) return null;
-    const camera = this.camera3d();
-    return axisIndicatorGeometry(mip.rect, camera.azimuth, camera.elevation);
-  });
-
-  /**
-   * Per-MPR-pane 2D overlays: anatomical edge letters and a physical scale bar.
-   * The letters come from {@link paneEdgeLabels} (orientation + sagittal flip), so
-   * they track the swap and flip toggles; the scale bar is sized from the plane's
-   * physical extent through the pane's letterbox fit and zoom ({@link
-   * mmPerScreenPixel}), so it rescales as the pane zooms. A pure CSS overlay,
-   * recomputed only from the panes, zooms and flip — never the window/level or 3D
-   * camera.
-   */
-  protected readonly paneAnnotations = computed<PaneAnnotation[]>(() => {
-    const volume = this.volume();
-    if (!this.isReady() || !volume) return [];
-
-    const zooms = this.zooms();
-    const flipped = this.sagittalFlipped();
-    const result: PaneAnnotation[] = [];
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      const flipX = pane.orientation === Orientation.Sagittal && flipped;
-      const [planeW, planeH] = planeExtentMm(volume, pane.orientation);
-      const mmPerPixel = mmPerScreenPixel(
-        planeW,
-        planeH,
-        pane.rect.width,
-        pane.rect.height,
-        zooms[pane.orientation],
-      );
-      const maxLengthPx = Math.min(pane.rect.width * SCALE_BAR_MAX_FRACTION, SCALE_BAR_MAX_PX);
-      const bar = scaleBar(mmPerPixel, maxLengthPx);
-      result.push({
-        key: this.paneKey(pane),
-        rect: pane.rect,
-        edges: paneEdgeLabels(pane.orientation, flipX),
-        scale: bar ? { lengthPx: bar.lengthPx, label: bar.label } : null,
-      });
-    }
-    return result;
-  });
-
-  /**
-   * Cached ROI readout lines (area + HU stats) keyed by measurement id. ROI stats
-   * sweep the slice's voxels, but depend only on the volume and the measurement's
-   * own points/slice — never the pan or zoom — so memoising them here keeps a pan
-   * or zoom drag from re-sweeping every region each frame. Recomputed only when a
-   * measurement is added, edited, or the volume changes.
-   */
-  private readonly measurementStats = computed<ReadonlyMap<number, readonly string[]>>(() =>
-    this.measure.statsFor(this.volume(), this.obliques()),
-  );
-
-  /**
-   * Measurements (and the in-progress one) projected into their panes for the SVG
-   * overlay. Each is pinned to its orientation and slice: it is dropped when that
-   * orientation isn't currently shown, or when the pane has scrolled to another
-   * slice. Stored as in-plane points, the screen geometry is re-derived here from
-   * the live zoom/pan/flip, so annotations track the view. Recomputed only from
-   * the panes, zoom, pan, flip, slice and measurement state — never the
-   * window/level or 3D camera.
-   */
-  protected readonly measurementOverlays = computed<MeasurementOverlay[]>(() => {
-    const volume = this.volume();
-    if (!this.isReady() || !volume) return [];
-    const panes = this.panes();
-    const zooms = this.zooms();
-    const pans = this.pans();
-    const flipped = this.sagittalFlipped();
-    const indices = this.sliceIndices();
-
-    const result: MeasurementOverlay[] = [];
-    for (const m of this.measure.measurements()) {
-      const overlay = this.buildOverlay(
-        volume,
-        panes,
-        zooms,
-        pans,
-        flipped,
-        indices,
-        m,
-        m.points,
-        false,
-      );
-      if (overlay) result.push(overlay);
-    }
-
-    // The in-progress measurement, previewed with a provisional point under the
-    // cursor so the segment/box is visible as it's drawn. Reading the cursor only
-    // while placing keeps the overlay from recomputing on every idle pointer move.
-    const pending = this.measure.pending();
-    if (pending) {
-      const preview = this.previewPoint(volume, panes, zooms, pans, flipped, pending.orientation);
-      const points = preview ? [...pending.points, preview] : pending.points;
-      const overlay = this.buildOverlay(
-        volume,
-        panes,
-        zooms,
-        pans,
-        flipped,
-        indices,
-        {
-          id: -1,
-          orientation: pending.orientation,
-          sliceIndex: pending.sliceIndex,
-          tool: pending.tool,
-        },
-        points,
-        true,
-      );
-      if (overlay) result.push(overlay);
-    }
-    return result;
-  });
-
-  /** Structure sets (RTSTRUCT) annotating the displayed series; empty when none. */
-  private readonly structureSets = computed<readonly StructureSet[]>(() => {
-    const state = this.load();
-    return state.status === 'ready' ? state.result.structureSets : [];
-  });
-
-  /** Whether any structure set annotates the displayed series (gates the panel). */
-  protected readonly hasStructures = computed(() => this.structureSets().length > 0);
-
-  /**
-   * Options for the structure-set selector: an "All structure sets" entry plus one
-   * per set (labelled by its Structure Set Label, falling back to the file name).
-   * Only surfaced when more than one set is associated (see {@link hasManyStructureSets}).
-   */
-  protected readonly structureSetChoices = computed<{ value: number; label: string }[]>(() => {
-    const sets = this.structureSets();
-    return [
-      { value: -1, label: 'All structure sets' },
-      ...sets.map((ss, index) => ({
-        value: index,
-        label: structureSetLabel(ss, index),
-      })),
-    ];
-  });
-
-  /** Whether more than one structure set is associated, gating the set selector. */
-  protected readonly hasManyStructureSets = computed(() => this.structureSets().length > 1);
-
-  /**
-   * The ROIs of the shown structure set(s) flattened for the panel: each with a
-   * stable key, name, interpreted type, effective colour, opacity and visibility.
-   * Filtered by the {@link selectedSetIndex} selector. Recomputed from the
-   * structure sets and the visibility / colour / opacity / selection state.
-   */
-  protected readonly roiLegend = computed<RoiLegendEntry[]>(() =>
-    buildRoiLegend(
-      this.structureSets(),
-      this.hiddenRois(),
-      this.roiColorOverrides(),
-      this.roiOpacities(),
-      this.selectedSetIndex(),
-    ),
-  );
-
-  /**
-   * The listed ROIs grouped by their structure set, each group labelled by the
-   * set, for the structures panel. With one set shown this is a single group; with
-   * "All structure sets" selected the panel renders one labelled group per set.
-   */
-  protected readonly roiGroups = computed<RoiLegendGroup[]>(() =>
-    groupRoiLegend(this.roiLegend(), this.structureSets()),
-  );
-
-  /** Whether to show per-set group headings: only when more than one group is listed. */
-  protected readonly showRoiGroupLabels = computed(() => this.roiGroups().length > 1);
-
-  /** Whether every listed ROI is visible: drives the master toggle's checked state. */
-  protected readonly allRoisVisible = computed(() => this.roiLegend().every((e) => e.visible));
-
-  /**
-   * Whether the listed ROIs are a mix of shown and hidden, for the master toggle's
-   * indeterminate state. False when they are uniformly all-on or all-off.
-   */
-  protected readonly someRoisHidden = computed(() => {
-    const entries = this.roiLegend();
-    return entries.some((e) => e.visible) && entries.some((e) => !e.visible);
-  });
-
-  /**
-   * The expensive half: every ROI's contours projected into each MPR
-   * orientation's plane frame once ({@link projectContour}), with each contour's
-   * through-plane span precomputed. Recomputed only when the volume, structure
-   * sets or oblique tilt change — never on slice scroll, pan, zoom, flip,
-   * window/level, ROI visibility/colour, or the 3D camera. Projects all three
-   * MPR orientations regardless of layout so cycling panes needs no re-projection.
-   */
-  private readonly contourCoords = computed<Map<Orientation, RoiContourCoords[]>>(() => {
-    const volume = this.volume();
-    const sets = this.structureSets();
-    if (!this.isReady() || !volume || sets.length === 0)
-      return new Map<Orientation, RoiContourCoords[]>();
-    return roiContourCoords(volume, sets, MPR_ORIENTATIONS, this.obliques());
-  });
-
-  /**
-   * The cheap, per-slice half: classify the cached {@link contourCoords} against
-   * the current slice — coplanar loops on this slice (decimated), crossing
-   * contours folded into the cross-section outline — and apply ROI visibility,
-   * colour and opacity. Scrolling slices re-runs only this (an O(1) span test
-   * skips off-slice contours; no re-projection), and only for the scrolled
-   * orientation's pane. Result is still in plane `(u, v)`; pan/zoom map to pixels.
-   */
-  private readonly contourPlaneGeometry = computed<Map<Orientation, RoiPlaneShapes[]>>(() => {
-    const volume = this.volume();
-    const coordsByOrientation = this.contourCoords();
-    if (!volume || coordsByOrientation.size === 0) return new Map<Orientation, RoiPlaneShapes[]>();
-
-    const shown = new Set<Orientation>();
-    for (const pane of this.panes()) if (pane.kind === 'mpr') shown.add(pane.orientation);
-
-    return roiPlaneShapes(volume, coordsByOrientation, {
-      sliceIndices: this.sliceIndices(),
-      shown,
-      hidden: this.hiddenRois(),
-      colorOverrides: this.roiColorOverrides(),
-      opacities: this.roiOpacities(),
-      selectedSet: this.selectedSetIndex(),
-      decimateTolerance: CONTOUR_DECIMATE_UV,
-    });
-  });
-
-  /**
-   * RTSTRUCT ROI contours mapped to each MPR pane's pixels — the cheap half. It
-   * takes the cached plane-space geometry ({@link contourPlaneGeometry}) and
-   * applies the current pan/zoom/flip with {@link planePointToPane} (the same
-   * forward map the measurements and crosshair use), so dragging to pan moves the
-   * contours in lockstep with the image without re-projecting any patient points.
-   */
-  protected readonly contourOverlays = computed<ContourPaneOverlay[]>(() => {
-    const volume = this.volume();
-    const geometry = this.contourPlaneGeometry();
-    if (!volume || geometry.size === 0) return [];
-
-    const panes: RoiOverlayPane[] = [];
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      panes.push({ key: this.paneKey(pane), orientation: pane.orientation, rect: pane.rect });
-    }
-
-    return roiScreenShapes(
-      volume,
-      geometry,
-      panes,
-      this.zooms(),
-      this.pans(),
-      this.sagittalFlipped(),
-    );
-  });
-
-  protected readonly statusIsError = computed(
-    () => this.gpuError() !== null || this.load().status === 'error',
-  );
-
-  /** True while a load is in flight, gating the progress bar. */
-  protected readonly isLoading = computed(() => this.load().status === 'loading');
-
-  /**
-   * Progress of an in-flight load as a 0–1 fraction for the progress bar. Reports
-   * 0 when not loading or before the file count is known (the bar's empty state).
-   */
-  protected readonly loadProgress = computed<number>(() => {
-    const state = this.load();
-    if (state.status !== 'loading' || state.total <= 0) return 0;
-    return state.loaded / state.total;
-  });
-
-  /** {@link loadProgress} as a 0–100 whole percent for the progress bar's `aria-valuenow`. */
-  protected readonly loadPercent = computed<number>(() => Math.round(this.loadProgress() * 100));
-
-  /** Warns that reconstructed planes are interpolated across significant gaps. */
-  protected readonly interpolationWarning = computed<string | null>(() => {
-    const volume = this.volume();
-    return volume ? missingSliceWarning(volume.missingSlices, volume.spacing[2]) : null;
-  });
-
-  protected readonly statusText = computed(() => {
-    const gpuError = this.gpuError();
-    if (gpuError) return gpuError;
-    const state = this.load();
-    switch (state.status) {
-      case 'idle':
-        // After an import nothing auto-loads (#241): point the user at the history
-        // panel; before any import, prompt them to open files.
-        return this.catalog.currentPatient()
-          ? 'Pick a series from the history below to view it.'
-          : 'Open a DICOM folder or files to begin.';
-      case 'loading':
-        return loadingText(state.loaded, state.total);
-      case 'ready':
-        return describeVolume(state.result);
-      case 'error':
-        return state.message;
-      default: {
-        const exhaustive: never = state;
-        return exhaustive;
-      }
-    }
-  });
-
-  /**
-   * The loaded layer registry, or empty until a load succeeds. The base entry
-   * backs every single-layer consumer (see {@link volume}); fusion overlays will
-   * sit above it.
-   */
-  private readonly layers = computed<readonly Layer[]>(() => {
-    const state = this.load();
-    if (state.status !== 'ready') return [];
-    return this.layerStore.apply(state.result.layers);
-  });
-
-  /**
-   * The base layer's volume — what reslice, probe, contours, crosshair and
-   * capture all read. Routing through {@link baseLayer} keeps one-layer behaviour
-   * identical to the pre-registry single volume while overlays are added above.
-   */
-  private readonly volume = computed<Volume | null>(() => baseLayer(this.layers())?.volume ?? null);
-
-  /**
-   * The active fusion overlay: the first visible `'overlay'`-role layer, or null.
-   * Composited over the base in the MPR panes (see the setOverlay effect). A
-   * single active overlay for now — the layers panel will let the user pick which.
-   */
-  private readonly selectedOverlay = computed<Layer | null>(
-    () => this.layers().find((layer) => layer.role === 'overlay' && layer.visible) ?? null,
-  );
-
-  /**
-   * The layer the window/level controls (preset, WL/WW inputs, Alt+right-drag) target.
-   * Outside Compare it's always the base. In Compare it's the hovered column's
-   * layer: the overlay for the right column (group ≥ 1), the base otherwise — so
-   * each column windows independently. Null until a volume loads.
-   */
-  private readonly activeWlLayer = computed<Layer | null>(() => {
-    const base = baseLayer(this.layers()) ?? null;
-    if (!this.isCompare()) return base;
-    const overlay = this.selectedOverlay();
-    if (!overlay) return base;
-    return this.activeCompareGroup() >= 1 ? overlay : base;
-  });
-
-  /**
-   * Resolve a layer's window/level: the base (or null) reads the shared
-   * {@link windowCenter}/{@link windowWidth} signals; an overlay reads its
-   * per-layer override ({@link layerWindows}), falling back to its volume's default
-   * window. The single reader both the controls and {@link composePaneViews} use.
-   */
-  private layerWindow(layer: Layer | null): WindowLevel {
-    if (!layer || layer.role === 'base') {
-      return { center: this.windowCenter(), width: this.windowWidth() };
-    }
-    return this.layerStore.windowFor(layer);
-  }
-
-  /** Write a layer's window/level: the base updates the shared signals, an overlay its override. */
-  private setLayerWindow(layer: Layer | null, next: WindowLevel): void {
-    if (!layer || layer.role === 'base') {
-      this.windowCenter.set(next.center);
-      this.windowWidth.set(next.width);
-    } else {
-      this.layerStore.setWindow(layer.id, next);
-    }
-  }
-
-  /** The active target's window centre, shown in the WL input (the hovered Compare column's). */
-  protected readonly activeWindowCenter = computed(
-    () => this.layerWindow(this.activeWlLayer()).center,
-  );
-  /** The active target's window width, shown in the WW input. */
-  protected readonly activeWindowWidth = computed(
-    () => this.layerWindow(this.activeWlLayer()).width,
-  );
-
-  /** Whether the layers panel applies: more than the lone base layer is loaded. */
-  protected readonly hasLayersPanel = computed(() => this.layers().length > 1);
-
-  /** The layers for the panel, each with its display controls (base first). */
-  protected readonly layerLegend = computed<LayerLegendEntry[]>(() => layerLegend(this.layers()));
-
-  /** Overlay display choices for the layers panel: grayscale plus each colormap. */
-  protected readonly displayOptions = ['grayscale', ...Object.keys(COLORMAPS)];
-
-  /** Toggle an overlay layer's visibility (the base underlay is never hidden). */
-  protected toggleLayerVisible(id: string): void {
-    this.layerStore.toggleVisible(id);
-  }
-
-  /** Layers-panel opacity slider for a layer. */
-  protected onLayerOpacity(id: string, event: Event): void {
-    this.layerStore.setOpacity(id, Number((event.target as HTMLInputElement).value));
-  }
-
-  /** Layers-panel display selector: grayscale or a named colormap for the layer. */
-  protected onLayerDisplay(id: string, event: Event): void {
-    const value = (event.target as HTMLSelectElement).value;
-    const display: LayerDisplay =
-      value === 'grayscale' ? { kind: 'grayscale' } : { kind: 'colormap', name: value };
-    this.layerStore.setDisplay(id, display);
-  }
-
-  /** True in the side-by-side Compare layout (vs. the composited fusion views). */
-  protected readonly isCompare = computed(() => this.layoutMode() === LayoutMode.Compare);
-
-  /** True in the composited Fusion view (the 3-pane MPR with the overlay blended in). */
-  protected readonly isFusion = computed(() => this.layoutMode() === LayoutMode.TriMpr);
-
-  /** View-mode selector: Fusion (composited 3-pane) vs Compare (side-by-side 6-pane). */
-  protected setViewMode(mode: 'fusion' | 'compare'): void {
-    this.layoutMode.set(mode === 'compare' ? LayoutMode.Compare : LayoutMode.TriMpr);
-  }
-
-  /**
-   * The volume a Compare group draws: the base layer for group 0, the active
-   * overlay for the others (falling back to the base when no overlay is loaded, so
-   * both columns then show the same series). Drives the per-group slice resolution.
-   */
-  private groupVolume(group: number): Volume | null {
-    if (group === 0) return this.volume();
-    return this.selectedOverlay()?.volume ?? this.volume();
-  }
-
-  /** Whether a Compare group navigates on its own (unlinked, and not the base group). */
-  private groupIsIndependent(group: number): boolean {
-    return this.compareStore.isIndependent(group, this.isCompare());
-  }
-
-  /**
-   * The slice index a pane shows, resolving linked/unlinked Compare navigation: the
-   * master index outside Compare and for group 0; while linked, the same patient
-   * plane mapped onto the group's own grid (so a coarse dose lines up with a fine
-   * CT); while unlinked, the group's independent index. The cross-grid linked map
-   * (the only branch needing the volumes) is supplied as a callback.
-   */
-  private paneSliceIndex(group: number, orientation: Orientation): number {
-    const master = this.sliceIndices()[orientation];
-    return this.compareStore.resolveSlice(group, orientation, this.isCompare(), master, () => {
-      const base = this.volume();
-      const target = this.groupVolume(group);
-      if (!base || !target) return master;
-      return linkedSliceIndex(base, target, orientation, master, this.obliques()[orientation]);
-    });
-  }
-
-  /** The zoom a pane uses: shared while linked, the group's own when unlinked. */
-  private paneZoom(group: number, orientation: Orientation): number {
-    return this.compareStore.resolveZoom(
-      group,
-      orientation,
-      this.isCompare(),
-      this.zooms()[orientation],
-    );
-  }
-
-  /** The pan a pane uses: shared while linked, the group's own when unlinked. */
-  private panePan(group: number, orientation: Orientation): Vec2 {
-    return this.compareStore.resolvePan(
-      group,
-      orientation,
-      this.isCompare(),
-      this.pans()[orientation],
-    );
-  }
-
-  /**
-   * Link or unlink the Compare groups. Unlinking snapshots each group's current
-   * (linked) slice/zoom/pan into {@link groupNav} so the panes hold still; relinking
-   * drops back to the shared master signals.
-   */
-  protected toggleCompareLinked(): void {
-    this.compareStore.toggleLinked(() => this.snapshotGroupNav());
-  }
-
-  /** Snapshot the current per-group view (while still linked) for unlinked editing. */
-  private snapshotGroupNav(): GroupNav[] {
-    return this.compareStore.snapshot(this.zooms(), this.pans(), (group, orientation) =>
-      this.paneSliceIndex(group, orientation),
-    );
-  }
-
-  /** Replace one field of one group's independent nav (used by the unlinked handlers). */
-  private updateGroupNav(group: number, patch: Partial<GroupNav>): void {
-    this.compareStore.updateGroupNav(group, patch);
-  }
-
-  /**
-   * Whether the fusion controls (blend bar, checkerboard) apply: an overlay is
-   * active AND we're compositing (not the side-by-side Compare layout).
-   */
-  protected readonly hasOverlay = computed(
-    () => this.selectedOverlay() !== null && !this.isCompare(),
-  );
-
-  /** Checkerboard the overlay (alternating cells) instead of a uniform blend. */
-  protected readonly checkerboardEnabled = this.layerStore.checkerboardEnabled;
-
-  /** Checkerboard density in cells across the image (at zoom 1); the slider's value. */
-  protected readonly checkerCells = this.layerStore.checkerCells;
-
-  /** Toggle compositing the fusion overlay as a checkerboard. */
-  protected toggleCheckerboard(): void {
-    this.layerStore.toggleCheckerboard();
-  }
-
-  /** Set the checkerboard density (cells across the image) from the slider, clamped. */
-  protected onCheckerCellsInput(event: Event): void {
-    this.layerStore.setCheckerCells(Number((event.target as HTMLInputElement).value));
-  }
-
-  /**
-   * The active overlay's composite opacity as a 0..100 percentage, for the in-pane
-   * blend bar and its readout. The bar and the layers-panel slider edit the same
-   * per-layer opacity (see {@link layerOpacities}).
-   */
-  protected readonly blendPercent = computed(() =>
-    Math.round((this.selectedOverlay()?.opacity ?? DEFAULT_OVERLAY_OPACITY) * 100),
-  );
-
-  /**
-   * Placement of the in-pane blend bar over the largest MPR pane, or null when no
-   * fusion overlay is active (so the bar is hidden) or no MPR pane can host it.
-   */
-  protected readonly blendBar = computed<BlendBar | null>(() => {
-    if (!this.hasOverlay()) return null;
-    const mprRects = this.panes()
-      .filter((pane) => pane.kind === 'mpr')
-      .map((pane) => pane.rect);
-    return blendBarPlacement(mprRects);
-  });
-
-  /** Drag/keyboard the blend bar: set the active overlay's opacity from its 0..100 value. */
-  protected onBlendInput(event: Event): void {
-    const overlay = this.selectedOverlay();
-    if (overlay) {
-      this.layerStore.setOpacity(overlay.id, Number((event.target as HTMLInputElement).value));
-    }
-  }
-
-  /**
-   * The volume's full depth (mm): the upper bound and default for the slab
-   * thickness control, at which the slab covers the whole volume.
-   */
-  protected readonly slabMaxMm = computed(() => {
-    const volume = this.volume();
-    return volume ? Math.round(2 * volumeBounds(volume).radius) : 0;
-  });
-
-  /**
-   * Live readout of the voxel under the cursor, or null when none is hovered.
-   *
-   * The hovered pane's own layer drives the geometry (the base in fusion / group 0;
-   * the overlay in a Compare overlay column); every *other* visible layer is then
-   * read at the same patient point, so a fused CT+dose hover reports HU and Gy
-   * together. Crosshairs and measurements stay keyed to the base — see
-   * {@link crosshairs}.
-   */
-  protected readonly probeText = computed<string | null>(() => {
-    if (!this.isReady()) return null;
-    const cursor = this.cursor();
-    if (!cursor) return null;
-
-    const pane = placementAt(this.panes(), cursor.x, cursor.y);
-    if (!pane || pane.kind !== 'mpr') return null; // no voxel probe over the 3D pane
-
-    const group = pane.group;
-    const hoveredVolume = this.groupVolume(group);
-    if (!hoveredVolume) return null;
-    const orientation = pane.orientation;
-    const sample = probeVoxel(
-      hoveredVolume,
-      orientation,
-      this.paneSliceIndex(group, orientation),
-      this.paneZoom(group, orientation),
-      pane.rect,
-      cursor.x,
-      cursor.y,
-      orientation === Orientation.Sagittal && this.sagittalFlipped(),
-      this.panePan(group, orientation),
-      this.obliques()[orientation],
-    );
-    if (!sample) return null;
-
-    // Read every other visible layer at the probed patient point (e.g. dose Gy
-    // under the CT HU). A layer that doesn't cover the point is dropped.
-    const others = this.layers()
-      .filter((layer) => layer.visible && layer.volume !== hoveredVolume)
-      .flatMap((layer) => {
-        const s = sampleVolumeAtPatient(layer.volume, sample.patient);
-        return s ? [{ layer, sample: s }] : [];
-      });
-    return formatProbe(this.orientationName(orientation), sample, hoveredVolume, others);
-  });
-
-  private gpu: GpuContext | null = null;
-
-  /** Views computed by the render effect, awaiting the next animation frame. */
-  private pendingViews: PaneView[] | null = null;
-  /** Handle of the scheduled animation frame, or null when none is pending. */
-  private frameHandle: number | null = null;
-  /** Handle of the MIP settle timeout, or null when not settling. */
-  private settleHandle: ReturnType<typeof setTimeout> | null = null;
-  /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
-  private resizeHandle: number | null = null;
-  /** Triangle centroids (3 floats each) for the visible ROI surface mesh, for depth sorting. */
-  private surfaceCentroids: Float32Array | null = null;
-  private surfaceTriangleCount = 0;
-  /**
-   * Reusable per-frame surface depth-sort + camera scratch, grown as needed by
-   * {@link ensureSurfaceSortScratch} so a steady orbit allocates nothing. Owned
-   * here but laid out (and filled) by the render layer's {@link packSurfaceFrame}.
-   */
-  private surfaceSort: SurfaceSortScratch | null = null;
-  /**
-   * Nesting depth of drag-enter over the viewport's children. `dragenter`/
-   * `dragleave` fire for every descendant, so a counter (not a bare flag) keeps
-   * the drop overlay steady as the pointer crosses pane borders.
-   */
-  private dragDepth = 0;
 
   constructor() {
     // Seed the 3D pane's projection mode from the persisted preference before any
@@ -1611,13 +308,11 @@ export class Viewer {
       isReady: () => this.isReady(),
       screenshotTarget: () => this.screenshotTarget(),
       canRecordRotation: () => this.canRecordRotation(),
-      composeViews: () => this.composePaneViews(),
-      presentViews: (views) => {
-        this.pendingViews = views;
-        this.renderer()?.renderPanes(views);
-      },
+      composeViews: () => this.render.composeViews(),
+      presentViews: (views) => this.render.present(views),
       camera: this.camera3d,
-      naming: () => this.seriesList().find((s) => s.uid === this.selectedSeriesUid()) ?? null,
+      naming: () =>
+        this.status.seriesList().find((s) => s.uid === this.status.selectedSeriesUid()) ?? null,
       now: () => new Date(),
       download: downloadBlob,
     });
@@ -1631,13 +326,13 @@ export class Viewer {
       canvas: () => this.canvasRef().nativeElement,
       placementAt: (event) => this.placementAtEvent(event),
       paneKey: (pane) => this.paneKey(pane),
-      volume: () => this.volume(),
-      groupVolume: (group) => this.groupVolume(group),
-      groupIsIndependent: (group) => this.groupIsIndependent(group),
-      paneZoom: (group, orientation) => this.paneZoom(group, orientation),
-      panePan: (group, orientation) => this.panePan(group, orientation),
+      volume: () => this.layersCtl.volume(),
+      groupVolume: (group) => this.layersCtl.groupVolume(group),
+      groupIsIndependent: (group) => this.layersCtl.groupIsIndependent(group),
+      paneZoom: (group, orientation) => this.layersCtl.paneZoom(group, orientation),
+      panePan: (group, orientation) => this.layersCtl.panePan(group, orientation),
       masterSliceIndex: (orientation) => this.sliceIndices()[orientation],
-      groupSliceIndex: (group, orientation) => this.paneSliceIndex(group, orientation),
+      groupSliceIndex: (group, orientation) => this.layersCtl.paneSliceIndex(group, orientation),
       setMasterPan: (orientation, pan) =>
         this.pans.update((pans) => withValue(pans, orientation, pan)),
       setMasterZoom: (orientation, zoom) =>
@@ -1645,469 +340,211 @@ export class Viewer {
       setMasterSlice: (orientation, index) =>
         this.sliceIndices.update((indices) => withValue(indices, orientation, index)),
       setGroupPan: (group, orientation, pan) => {
-        const nav = this.groupNav()[group];
-        if (nav) this.updateGroupNav(group, { pans: withValue(nav.pans, orientation, pan) });
+        const nav = this.layersCtl.groupNav()[group];
+        if (nav)
+          this.layersCtl.updateGroupNav(group, { pans: withValue(nav.pans, orientation, pan) });
       },
       setGroupZoomPan: (group, orientation, zoom, pan) => {
-        const nav = this.groupNav()[group];
+        const nav = this.layersCtl.groupNav()[group];
         if (nav)
-          this.updateGroupNav(group, {
+          this.layersCtl.updateGroupNav(group, {
             zooms: withValue(nav.zooms, orientation, zoom),
             pans: withValue(nav.pans, orientation, pan),
           });
       },
       setGroupSlice: (group, orientation, index) => {
-        const nav = this.groupNav()[group];
+        const nav = this.layersCtl.groupNav()[group];
         if (nav)
-          this.updateGroupNav(group, {
+          this.layersCtl.updateGroupNav(group, {
             sliceIndices: withValue(nav.sliceIndices, orientation, index),
           });
       },
       clampZoom: (zoom) => clamp(zoom, MIN_ZOOM, MAX_ZOOM),
-      layers: () => this.layers(),
-      isCompare: () => this.isCompare(),
-      selectedOverlay: () => this.selectedOverlay(),
-      layerWindow: (layer) => this.layerWindow(layer),
-      setLayerWindow: (layer, next) => this.setLayerWindow(layer, next),
+      layers: () => this.layersCtl.layers(),
+      isCompare: () => this.layersCtl.isCompare(),
+      selectedOverlay: () => this.layersCtl.selectedOverlay(),
+      layerWindow: (layer) => this.layersCtl.layerWindow(layer),
+      setLayerWindow: (layer, next) => this.layersCtl.setLayerWindow(layer, next),
       camera3d: this.camera3d,
       renderer: () => this.renderer(),
       stopCine: () => this.cine.stop(),
-      markMipSettling: () => this.markMipSettling(),
+      markMipSettling: () => this.render.markMipSettling(),
       setCursor: (point) => this.cursor.set(point),
       setHoveredKey: (key) => this.hoveredKey.set(key),
       setActiveCompareGroup: (group) => this.activeCompareGroup.set(group),
-      setFocus: (placement, event) => this.setFocus(placement, event),
-      setFocusFromMip: (placement, event) => this.setFocusFromMip(placement, event),
+      setFocus: (placement, event) => this.measureCtl.setFocus(placement, event),
+      setFocusFromMip: (placement, event) => this.measureCtl.setFocusFromMip(placement, event),
       activeTool: () => this.activeTool(),
-      placeMeasurePoint: (placement, event) => this.placeMeasurePoint(placement, event),
+      placeMeasurePoint: (placement, event) => this.measureCtl.placeMeasurePoint(placement, event),
     });
 
-    afterNextRender(() => void this.initGpu());
-
-    // The effect tracks every signal the frame depends on and computes the
-    // views, but defers the actual GPU submission to a single requestAnimationFrame
-    // (see scheduleFrame). Multiple signal changes within one frame — e.g. the
-    // stream of pointer moves during an orbit drag — collapse into one render.
-    effect(() => {
-      const views = this.composePaneViews();
-      if (!views) return;
-      this.pendingViews = views;
-      this.scheduleFrame();
+    // Wire the 3D-pane editing controller: it owns the TF / clip-plane / oblique /
+    // slab gestures, driving Camera3dStore and the shared oblique/slab/drag signals
+    // through these lazy hooks without reaching into the component directly.
+    this.view3d.init({
+      volume: () => this.layersCtl.volume(),
+      isReady: () => this.isReady(),
+      panes: () => this.panes(),
+      camera3d: () => this.camera3d(),
+      sliceIndices: this.sliceIndices,
+      crosshairsEnabled: () => this.crosshairsEnabled(),
+      obliques: this.obliques,
+      slabThicknessMm: this.slabThicknessMm,
+      drag: this.drag,
+      markMipSettling: () => this.render.markMipSettling(),
     });
 
-    // Mirror the curated view preferences into persistent storage whenever they
-    // change. Gated on a loaded volume so the window/level and slab — which only
-    // become meaningful once a volume is shown — never persist their placeholder
-    // pre-load values. The store skips redundant writes, so re-running this on an
-    // unrelated change (or during a drag that lands on the same values) is cheap.
-    effect(() => {
-      if (!this.isReady()) return;
-      this.preferencesStore.update({
-        layoutMode: this.layoutMode(),
-        projectionMode: this.projectionMode(),
-        sagittalFlipped: this.sagittalFlipped(),
-        windowCenter: this.windowCenter(),
-        windowWidth: this.windowWidth(),
-        slabThicknessMm: this.slabThicknessMm(),
-      });
+    // Wire the load/import controller: it owns the drop overlay, file pickers and
+    // the resolve→apply pipeline, driving the shared load/notice/drag-overlay
+    // signals and calling back into the component for the per-load view reset.
+    this.loadCtl.init({
+      load: this.load,
+      notice: this.notice,
+      isDraggingFiles: this.isDraggingFiles,
+      dropIntent: this.dropIntent,
+      draggingSeries: this.draggingSeries,
+      renderer: () => this.renderer(),
+      setCompareLayout: () => this.layoutMode.set(LayoutMode.Compare),
+      sliceIndices: this.sliceIndices,
+      zooms: this.zooms,
+      pans: this.pans,
+      obliques: this.obliques,
+      slabThicknessMm: this.slabThicknessMm,
+      mainOrientation: this.mainOrientation,
+      invert: this.invert,
+      activeTool: this.activeTool,
+      focusVoxel: this.focusVoxel,
+      activeCompareGroup: this.activeCompareGroup,
     });
 
-    // Focus management for the modal shortcut help: move focus into the panel
-    // when it opens so keyboard/AT users land inside it, and restore focus to the
-    // trigger when it closes. Focus is moved, not trapped — Tab still reaches the
-    // chrome behind it and Esc closes (see onEscapeKey), per the a11y brief.
-    effect(() => {
-      const panel = this.helpPanelRef()?.nativeElement;
-      if (this.helpOpen()) {
-        // Capture the trigger and move focus in once, on first appearance.
-        if (panel && this.helpReturnFocus === null) {
-          this.helpReturnFocus = document.activeElement as HTMLElement | null;
-          panel.focus();
-        }
-      } else if (this.helpReturnFocus) {
-        this.helpReturnFocus.focus();
-        this.helpReturnFocus = null;
-      }
+    // Wire the measurement controller: it owns the measure-tool place/drag gestures
+    // and the Shift+click crosshair-focus picks, reading the view tuples and driving
+    // the focus/slice/tool signals and the MeasurementStore through these hooks.
+    this.measureCtl.init({
+      volume: () => this.layersCtl.volume(),
+      isReady: () => this.isReady(),
+      panes: () => this.panes(),
+      canvasBounds: () => this.canvasRef().nativeElement.getBoundingClientRect(),
+      zooms: this.zooms,
+      pans: this.pans,
+      obliques: this.obliques,
+      sliceIndices: this.sliceIndices,
+      sagittalFlipped: () => this.sagittalFlipped(),
+      focusVoxel: this.focusVoxel,
+      crosshairsEnabled: this.crosshairsEnabled,
+      hoveredKey: () => this.hoveredKey(),
+      cursor: () => this.cursor(),
+      activeTool: this.activeTool,
+      camera3d: () => this.camera3d(),
+      projectionMode: () => this.view3d.projectionMode(),
+      slabThicknessMm: () => this.slabThicknessMm(),
+      clipToPlanes: () => this.view3d.clipToPlanes(),
+      cutPlane: () => this.view3d.cutPlane(),
+      transferFunction: () => this.view3d.transferFunction(),
     });
 
-    // Rebuild the GPU surface vertex buffer whenever the meshes or per-ROI
-    // visibility / colour / opacity change (not on camera — orbit/pan only need a
-    // re-sort + redraw, handled in the render frame). Then schedule a frame.
-    effect(() => {
-      const renderer = this.renderer();
-      const meshes = this.surfaceMeshes();
-      const hidden = this.hiddenRois();
-      const overrides = this.roiColorOverrides();
-      const opacities = this.roiOpacities();
-      const selectedSet = this.selectedSetIndex();
-      if (renderer)
-        this.buildSurfaceMesh(renderer, meshes, hidden, overrides, opacities, selectedSet);
-      this.scheduleFrame();
+    // Wire the render controller: it owns the WebGPU lifecycle, the resize sync and
+    // the coalesced per-frame submit, reading the frame's view state through
+    // composeViews and the renderer/error/viewport slots.
+    this.render.init({
+      canvas: () => this.canvasRef().nativeElement,
+      volume: () => this.layersCtl.volume(),
+      panes: () => this.panes(),
+      camera3d: () => this.camera3d(),
+      renderer: this.renderer,
+      gpuError: this.gpuError,
+      viewport: this.viewport,
+      sliceIndices: this.sliceIndices,
+      zooms: this.zooms,
+      pans: this.pans,
+      obliques: this.obliques,
+      invert: () => this.invert(),
+      sagittalFlipped: () => this.sagittalFlipped(),
+      slabThicknessMm: () => this.slabThicknessMm(),
+      layoutMode: () => this.layoutMode(),
+      drag: () => this.drag(),
+      auxEffects: [() => this.toolbar.persistPreferences(), () => this.toolbar.manageHelpFocus()],
     });
 
-    // Upload / swap / clear the active fusion overlay whenever it changes. Unlike
-    // the base volume this doesn't reset the view state — setOverlay re-uploads
-    // only the overlay texture and rebuilds the MPR bind groups, then we redraw.
-    effect(() => {
-      const renderer = this.renderer();
-      const overlay = this.selectedOverlay();
-      // The layer's (overridable) opacity drives compositing; the blend bar and the
-      // layers-panel slider both edit it, so either re-runs setOverlay and redraws.
-      const opacity = overlay ? overlay.opacity : 0;
-      if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
-      this.scheduleFrame();
+    // Wire the ROI/structures controller: it owns the RTSTRUCT state and derives
+    // the legend, contour overlays and surface meshes, reading the view tuples that
+    // drive the per-slice/per-pane stages through these hooks.
+    this.roiCtl.init({
+      load: () => this.load(),
+      isReady: () => this.isReady(),
+      volume: () => this.layersCtl.volume(),
+      panes: () => this.panes(),
+      obliques: this.obliques,
+      sliceIndices: this.sliceIndices,
+      zooms: this.zooms,
+      pans: this.pans,
+      sagittalFlipped: () => this.sagittalFlipped(),
     });
 
-    // Checkerboard vs. uniform-blend overlay compositing, and the cell size — both
-    // per-frame uniforms (no texture re-upload), so this is its own effect.
-    effect(() => {
-      const renderer = this.renderer();
-      if (renderer) {
-        renderer.setOverlayCheckerboard(this.checkerboardEnabled());
-        renderer.setCheckerCells(this.checkerCells());
-      }
-      this.scheduleFrame();
+    // Wire the layers/fusion/Compare controller: it owns the layer registry, the
+    // base volume, the window/level and the Compare per-group resolution, reading
+    // the load state and the view tuples through these hooks.
+    this.layersCtl.init({
+      load: () => this.load(),
+      layoutMode: this.layoutMode,
+      panes: () => this.panes(),
+      sliceIndices: this.sliceIndices,
+      zooms: this.zooms,
+      pans: this.pans,
+      obliques: this.obliques,
+      activeCompareGroup: () => this.activeCompareGroup(),
+      markMipSettling: () => this.render.markMipSettling(),
     });
 
-    // Test seam: reflect the 3D-camera pan onto the canvas as data attributes. The
-    // 3D pane renders in the WebGPU canvas, whose pixels can't be read back under a
-    // software adapter (headless CI), so e2e asserts on this (and on
-    // `data-roi-surface-triangles`, set in buildSurfaceMesh) instead of sampling
-    // the removed 2D overlay.
-    effect(() => {
-      const el = this.canvasRef().nativeElement;
-      const camera = this.camera3d();
-      el.dataset['cameraPanX'] = camera.panX.toFixed(3);
-      el.dataset['cameraPanY'] = camera.panY.toFixed(3);
+    // Wire the toolbar / keyboard view-action controller: it owns the layout cycle,
+    // fits, reset, the toggles, cine and capture triggers, mutating the view signals
+    // through these hooks.
+    this.toolbar.init({
+      renderer: () => this.renderer(),
+      isReady: () => this.isReady(),
+      hasMprPane: () => this.hasMprPane(),
+      panes: () => this.panes(),
+      volume: () => this.layersCtl.volume(),
+      viewportDpr: () => this.viewport().dpr,
+      hoveredKey: () => this.hoveredKey(),
+      layoutMode: this.layoutMode,
+      mainOrientation: this.mainOrientation,
+      sagittalFlipped: this.sagittalFlipped,
+      crosshairsEnabled: this.crosshairsEnabled,
+      invert: this.invert,
+      helpOpen: this.helpOpen,
+      infoPanelOpen: this.infoPanelOpen,
+      rawTagFilter: this.rawTagFilter,
+      zooms: this.zooms,
+      pans: this.pans,
+      sliceIndices: this.sliceIndices,
+      slabThicknessMm: () => this.slabThicknessMm(),
+      helpPanel: () => this.helpPanelRef()?.nativeElement,
+      activeTool: this.activeTool,
+      toggleHistory: () => this.historyPanel()?.toggleCollapsedFromHotkey(),
     });
 
-    this.destroyRef.onDestroy(() => {
-      if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
-      if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
-      if (this.settleHandle !== null) clearTimeout(this.settleHandle);
-      if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
-      // The capture controller stops its own in-flight recording via its DestroyRef.
-      // Free the renderer's GPU resources (uniform buffers, LUTs, volume textures).
-      this.renderer()?.dispose();
+    // Wire the status controller: it derives the banner text, load progress, the
+    // series picker and the metadata inspector feed from the load state.
+    this.status.init({
+      load: () => this.load(),
+      gpuError: () => this.gpuError(),
+      volume: () => this.layersCtl.volume(),
+      rawTagFilter: this.rawTagFilter,
     });
-  }
 
-  /**
-   * Build the WebGPU vertex buffer for the visible ROI surfaces — one flat-shaded
-   * triangle list (position + face normal + RGBA per vertex) across every shown
-   * ROI — and hand it to the renderer. The component's job is only to pick the
-   * visible ROIs and resolve each one's display colour and opacity; the interleave
-   * and the per-triangle centroids (kept for the per-frame depth sort) come from
-   * the render layer's {@link flattenSurfaceMeshes}. Camera-independent: only
-   * rebuilt when the meshes or ROI visibility / colour / opacity change.
-   */
-  private buildSurfaceMesh(
-    renderer: SliceRenderer,
-    meshes: readonly RoiSurfaceMesh[],
-    hidden: ReadonlySet<string>,
-    overrides: ReadonlyMap<string, string>,
-    opacities: ReadonlyMap<string, number>,
-    selectedSet: number,
-  ): void {
-    // Select the shown ROIs and resolve each one's RGBA (override colour or the
-    // RTSTRUCT display colour, alpha folded with the base surface alpha).
-    const visible: ColoredSurfaceMesh[] = [];
-    for (const mesh of meshes) {
-      if (!setIsShown(selectedSet, mesh.setIndex)) continue;
-      const key = roiKeyOf(mesh.setIndex, mesh.roiNumber);
-      const opacity = opacities.get(key) ?? 1;
-      if (hidden.has(key) || opacity <= 0) continue;
-      const [r, g, b] = parseHexColor(overrides.get(key)) ?? mesh.baseColor;
-      visible.push({ mesh, rgba: [r / 255, g / 255, b / 255, opacity * SURFACE_ALPHA] });
-    }
+    afterNextRender(() => void this.render.initGpu());
 
-    const { vertices, centroids, count } = flattenSurfaceMeshes(visible);
-    this.surfaceTriangleCount = count;
-    this.surfaceCentroids = count > 0 ? centroids : null;
-    this.canvasRef().nativeElement.dataset['roiSurfaceTriangles'] = String(count);
-    renderer.setSurfaceMesh(vertices);
-  }
-
-  /**
-   * Per-frame surface data for the WebGPU pass: depth-sort the triangles
-   * back-to-front against the current camera and pack the camera uniform. The
-   * sort + packing live in the render layer ({@link packSurfaceFrame}); the
-   * component only supplies the camera basis and reusable scratch. Null when
-   * there's no 3D pane or no surface mesh.
-   */
-  private surfaceFrame(): SurfaceFrame | null {
-    const volume = this.volume();
-    const centroids = this.surfaceCentroids;
-    const n = this.surfaceTriangleCount;
-    if (!volume || !centroids || n === 0) return null;
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!mip || mip.rect.width < 1 || mip.rect.height < 1) return null;
-
-    const camera = this.camera3d();
-    const basis = cameraBasis(volume, camera, mip.rect.width, mip.rect.height);
-    const light = viewBasis(camera.azimuth, camera.elevation).forward;
-    this.surfaceSort = ensureSurfaceSortScratch(this.surfaceSort, n);
-    return packSurfaceFrame(centroids, n, basis, light, this.surfaceSort);
-  }
-
-  /**
-   * Build the pane views to draw from the current state, in device pixels — the
-   * single source the render effect and the rotation capture both submit to the
-   * renderer. Reading every signal here (not in the effect body) keeps the
-   * effect's dependency tracking intact while letting the capture loop re-derive
-   * a frame synchronously after nudging the camera. Returns null until the GPU
-   * and a volume are ready.
-   */
-  private composePaneViews(): PaneView[] | null {
-    const renderer = this.renderer();
-    const volume = this.volume();
-    if (!renderer || !volume) return null;
-
-    // The overlay column windows on its own per-layer window/level (independent of
-    // the base column's shared window), falling back to its volume's default.
-    const overlay = this.selectedOverlay();
-    return composePaneViews({
-      panes: this.panes(),
-      dpr: this.viewport().dpr,
-      baseVolume: volume,
-      overlayVolume: overlay?.volume ?? null,
-      sliceIndices: this.sliceIndices(),
-      zooms: this.zooms(),
-      pans: this.pans(),
-      obliques: this.obliques(),
-      windowCenter: this.windowCenter(),
-      windowWidth: this.windowWidth(),
-      overlayWindow: overlay ? this.layerWindow(overlay) : null,
-      compareMode: this.layoutMode() === LayoutMode.Compare,
-      compareLinked: this.compareLinked(),
-      groupNav: this.groupNav(),
-      hasOverlay: overlay !== null,
-      invert: this.invert(),
-      sagittalFlipped: this.sagittalFlipped(),
-      // The MIP renders at reduced quality while it's being orbited, zoomed, or
-      // window/levelled, then at full quality once interaction settles.
-      mipInteractive: this.drag()?.kind === 'orbit' || this.mipSettling(),
-      camera: this.camera3d(),
-      projectionMode: this.projectionMode(),
-      transferFunction: this.transferFunction(),
-      lighting: this.dvrLighting(),
-      clipToPlanes: this.clipToPlanes(),
-      cutPlane: this.cutPlane(),
-      slabThicknessMm: this.slabThicknessMm(),
-    });
-  }
-
-  /** Submit the latest computed views on the next frame, coalescing rapid updates. */
-  private scheduleFrame(): void {
-    if (this.frameHandle !== null) return;
-    this.frameHandle = requestAnimationFrame(() => {
-      this.frameHandle = null;
-      const renderer = this.renderer();
-      const views = this.pendingViews;
-      // Render the panes and the ROI surfaces in one WebGPU pass/frame, so the
-      // structures never present a frame apart from the anatomy (no pan/orbit lag).
-      if (renderer && views) renderer.renderPanes(views, this.surfaceFrame());
-    });
-  }
-
-  /**
-   * Mark the MIP as actively changing (wheel-zoom or window/level), keeping it at
-   * reduced quality until {@link MIP_SETTLE_MS} of quiet, then a full-quality frame.
-   */
-  private markMipSettling(): void {
-    this.mipSettling.set(true);
-    if (this.settleHandle !== null) clearTimeout(this.settleHandle);
-    this.settleHandle = setTimeout(() => {
-      this.settleHandle = null;
-      this.mipSettling.set(false);
-    }, MIP_SETTLE_MS);
-  }
-
-  protected orientationName(orientation: Orientation): string {
-    switch (orientation) {
-      case Orientation.Axial:
-        return 'Axial';
-      case Orientation.Coronal:
-        return 'Coronal';
-      case Orientation.Sagittal:
-        return 'Sagittal';
-      default: {
-        const exhaustive: never = orientation;
-        return exhaustive;
-      }
-    }
+    // The render controller owns the GPU-redraw effects (frame compose+submit,
+    // surface-mesh rebuild, overlay upload, checkerboard uniforms, camera-pan seam)
+    // plus the auxiliary effects passed above, frees the renderer on destroy, and
+    // the capture controller stops its own recording.
+    this.render.startEffects();
   }
 
   /** Stable identity for a placement, used for `@for` tracking and hover state. */
   protected paneKey(pane: PanePlacement): string {
-    return pane.kind === 'mip' ? 'mip' : `mpr-${pane.group}-${pane.orientation}`;
-  }
-
-  /** Show or hide one ROI's contours, from the structures panel checkbox. */
-  protected toggleRoi(key: string): void {
-    this.hiddenRois.update((hidden) => {
-      const next = new Set(hidden);
-      if (!next.delete(key)) next.add(key);
-      return next;
-    });
-  }
-
-  /**
-   * Show or hide every currently-listed ROI at once, from the master toggle. The
-   * listed ROIs are the panel's current set-filtered view, so this never touches
-   * ROIs hidden behind the structure-set selector.
-   */
-  protected setAllRoisVisible(visible: boolean): void {
-    const keys = this.roiLegend().map((e) => e.key);
-    this.hiddenRois.update((hidden) => {
-      const next = new Set(hidden);
-      for (const key of keys) {
-        if (visible) next.delete(key);
-        else next.add(key);
-      }
-      return next;
-    });
-  }
-
-  /** Override one ROI's contour colour from the panel's colour picker. */
-  protected onRoiColor(key: string, event: Event): void {
-    const hex = (event.target as HTMLInputElement).value;
-    this.roiColorOverrides.update((map) => new Map(map).set(key, hex));
-  }
-
-  /** Set one ROI's contour opacity (whole percent) from the panel's slider. */
-  protected onRoiOpacity(key: string, event: Event): void {
-    const percent = Number((event.target as HTMLInputElement).value);
-    this.roiOpacities.update((map) => new Map(map).set(key, clamp(percent, 0, 100) / 100));
-  }
-
-  /** Switch which structure set the panel and overlays show (-1 for all). */
-  protected onStructureSetChange(event: Event): void {
-    this.selectedSetIndex.set(Number((event.target as HTMLSelectElement).value));
-  }
-
-  protected paneSliceLabel(orientation: Orientation): string {
-    const renderer = this.renderer();
-    const count = renderer ? renderer.sliceCount(orientation) : 0;
-    return count > 0 ? `${this.sliceIndices()[orientation] + 1} / ${count}` : '–';
-  }
-
-  /** Step the viewport to the next layout (3-pane → 4-pane → 3D-only → …). */
-  protected cycleLayout(): void {
-    this.cine.stop(); // the cined pane may move or vanish in the new layout
-    this.layoutMode.update((mode) => {
-      const i = this.layoutModes.findIndex((m) => m.value === mode);
-      return this.layoutModes[(i + 1) % this.layoutModes.length].value;
-    });
-  }
-
-  protected swapMain(): void {
-    this.cine.stop(); // swapping reshuffles the panes, so stop the cined one
-    this.mainOrientation.update((current) => {
-      const next = (ORIENTATION_ORDER.indexOf(current) + 1) % ORIENTATION_ORDER.length;
-      return ORIENTATION_ORDER[next];
-    });
-  }
-
-  protected toggleSagittalFlip(): void {
-    this.sagittalFlipped.update((flipped) => !flipped);
-  }
-
-  protected toggleCrosshairs(): void {
-    this.crosshairsEnabled.update((enabled) => !enabled);
-  }
-
-  /**
-   * Zoom-to-fit every MPR pane: the letterbox fit (zoom 1) with no pan. Applied
-   * across all orientations at once so the panes stay consistent.
-   */
-  protected fitView(): void {
-    this.zooms.set([1, 1, 1]);
-    this.pans.set(NO_PANS);
-    // Fit unlinked groups too, keeping each group's own slice level.
-    if (this.isCompare() && !this.compareLinked()) {
-      this.groupNav.update((navs) =>
-        navs.map((nav) => ({ ...nav, zooms: [1, 1, 1], pans: NO_PANS })),
-      );
-    }
-  }
-
-  /**
-   * Show each MPR pane at native voxel scale (1:1): one resampled output voxel
-   * per device pixel, centred (pan reset). Computed per orientation from its
-   * current pane size, clamped to the zoom range, so every shown pane lands on
-   * the same physical scale.
-   */
-  protected oneToOne(): void {
-    const volume = this.volume();
-    if (!volume) return;
-    const { dpr } = this.viewport();
-    let zooms = this.zooms();
-    let pans = this.pans();
-    for (const pane of this.panes()) {
-      if (pane.kind !== 'mpr') continue;
-      const rect = scaleRect(pane.rect, dpr);
-      if (rect.width < 1 || rect.height < 1) continue;
-      const independent = this.groupIsIndependent(pane.group);
-      // 1:1 against the grid each pane actually draws (an unlinked overlay group
-      // sizes to its own voxels), keeping that group's slice level.
-      const paneVolume = independent ? this.groupVolume(pane.group) : volume;
-      if (!paneVolume) continue;
-      const zoom = clamp(
-        oneToOneZoom(paneVolume, pane.orientation, rect.width, rect.height),
-        MIN_ZOOM,
-        MAX_ZOOM,
-      );
-      if (independent) {
-        const nav = this.groupNav()[pane.group];
-        if (!nav) continue;
-        this.updateGroupNav(pane.group, {
-          zooms: withValue(nav.zooms, pane.orientation, zoom),
-          pans: withValue(nav.pans, pane.orientation, NO_PAN),
-        });
-      } else {
-        zooms = withValue(zooms, pane.orientation, zoom);
-        pans = withValue(pans, pane.orientation, NO_PAN);
-      }
-    }
-    this.zooms.set(zooms);
-    this.pans.set(pans);
-  }
-
-  /**
-   * Reset the view to its defaults: fit every pane (zoom/pan), clear the grayscale
-   * inversion, and restore the window/level to the volume's own suggested window.
-   */
-  protected resetView(): void {
-    this.fitView();
-    this.invert.set(false);
-    this.resetOblique();
-    const volume = this.volume();
-    if (!volume) return;
-    this.windowCenter.set(Math.round(volume.windowCenter));
-    this.windowWidth.set(Math.max(1, Math.round(volume.windowWidth)));
-    this.markMipSettling();
-  }
-
-  /** Toggle the display grayscale inversion (white ⇄ black) across every pane. */
-  protected toggleInvert(): void {
-    this.invert.update((on) => !on);
-    this.markMipSettling();
-  }
-
-  /** Open/close the keyboard-shortcut help overlay. */
-  protected toggleHelp(): void {
-    this.helpOpen.update((open) => !open);
-  }
-
-  /** Save a PNG of the active pane; the export plumbing lives in the controller. */
-  protected captureScreenshot(): void {
-    this.capture.screenshot();
-  }
-
-  /** Record a 360° spin of the 3D pane to WebM; orchestrated by the controller. */
-  protected captureRotation(): void {
-    this.capture.recordRotation();
+    return paneKeyOf(pane);
   }
 
   /**
@@ -2120,1418 +557,13 @@ export class Viewer {
   private screenshotTarget(): ScreenshotTarget | null {
     const pane = pickCaptureTarget(this.panes(), this.hoveredKey(), (p) => this.paneKey(p));
     if (!pane) return null;
-    return { rect: scaleRect(pane.rect, this.viewport().dpr), tag: this.paneViewTag(pane) };
+    return { rect: scaleRect(pane.rect, this.viewport().dpr), tag: this.toolbar.paneViewTag(pane) };
   }
-
-  /** A short view tag for a capture filename: an orientation name, or `3d`. */
-  private paneViewTag(pane: PanePlacement): string {
-    return pane.kind === 'mip' ? '3d' : this.orientationName(pane.orientation).toLowerCase();
-  }
-
-  /**
-   * The single code path for every keyboard shortcut bar Escape: the single-letter
-   * actions (swap x, flip f, crosshair c, cine p, layout l, info i, reset r, invert
-   * v, history h), the viewport controls (fit 0, native 1:1 1), and the help
-   * overlay (?).
-   *
-   * Reads {@link KeyboardEvent.key} and case-folds it so Shift / Caps Lock (which
-   * report 'X', 'R', …) still match, and applies one {@link isEditableTarget} focus
-   * guard so every shortcut is suppressed uniformly while typing in a field.
-   */
-  protected onShortcutKey(event: KeyboardEvent): void {
-    if (isEditableTarget(event.target) || !this.isReady()) return;
-    // Case-fold single characters; '?', '0', '1' are unaffected by toLowerCase().
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-    switch (key) {
-      case 'x':
-        event.preventDefault();
-        this.swapMain();
-        break;
-      case 'f':
-        event.preventDefault();
-        this.toggleSagittalFlip();
-        break;
-      case 'c':
-        event.preventDefault();
-        this.toggleCrosshairs();
-        break;
-      case 'p':
-        if (!this.hasMprPane()) return;
-        event.preventDefault();
-        this.toggleCine();
-        break;
-      case 'l':
-        event.preventDefault();
-        this.cycleLayout();
-        break;
-      case 'i':
-        event.preventDefault();
-        this.toggleInfoPanel();
-        break;
-      case 'r':
-        event.preventDefault();
-        this.resetView();
-        break;
-      case 'v':
-        event.preventDefault();
-        this.toggleInvert();
-        break;
-      case 'h':
-        event.preventDefault();
-        this.historyPanel()?.toggleCollapsedFromHotkey();
-        break;
-      case '?':
-        event.preventDefault();
-        this.toggleHelp();
-        break;
-      case '0':
-        if (!this.hasMprPane()) return;
-        event.preventDefault();
-        this.fitView();
-        break;
-      case '1':
-        if (!this.hasMprPane()) return;
-        event.preventDefault();
-        this.oneToOne();
-        break;
-    }
-  }
-
-  /**
-   * Start or stop cine playback. When starting it cines the hovered MPR pane if
-   * one is under the cursor, otherwise the main pane — so you can review whichever
-   * stack you're looking at — advancing its slice index on a timer and looping
-   * back to the first slice at the end.
-   */
-  protected toggleCine(): void {
-    this.cine.toggle(() => {
-      if (!this.isReady() || !this.hasMprPane()) return null;
-      return { orientation: this.cinePaneOrientation(), advance: (o) => this.cineTick(o) };
-    });
-  }
-
-  /** Change the cine speed; the store re-arms a running timer so it takes effect at once. */
-  protected onCineFpsChange(event: Event): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    this.cine.setFps(Number(event.target.value));
-  }
-
-  /** Advance the given orientation's pane by one slice, looping back to the start at the end. */
-  private cineTick(orientation: Orientation): void {
-    const renderer = this.renderer();
-    if (!renderer) return;
-    const count = renderer.sliceCount(orientation);
-    this.sliceIndices.update((indices) =>
-      withValue(indices, orientation, nextCineIndex(indices[orientation], count, 1)),
-    );
-  }
-
-  /** The orientation cine should drive: the hovered MPR pane's, else the main pane's. */
-  private cinePaneOrientation(): Orientation {
-    const hovered = this.hoveredKey();
-    for (const pane of this.panes()) {
-      if (pane.kind === 'mpr' && this.paneKey(pane) === hovered) return pane.orientation;
-    }
-    return this.mainOrientation();
-  }
-
-  /** Open/close the metadata & raw-tag inspector panel. */
-  protected toggleInfoPanel(): void {
-    this.infoPanelOpen.update((open) => !open);
-  }
-
-  protected onRawTagFilterInput(event: Event): void {
-    if (event.target instanceof HTMLInputElement) this.rawTagFilter.set(event.target.value);
-  }
-
-  /**
-   * Set the shared focus voxel from a Shift+click on an MPR pane and scroll every
-   * orientation to the slice that contains it. The clicked pane keeps its slice
-   * (the voxel lies on it); the other two move to show the same anatomical point.
-   */
-  private setFocus(placement: Extract<PanePlacement, { kind: 'mpr' }>, event: PointerEvent): void {
-    const volume = this.volume();
-    if (!volume) return;
-    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-    const sample = probeVoxel(
-      volume,
-      placement.orientation,
-      this.sliceIndices()[placement.orientation],
-      this.zooms()[placement.orientation],
-      placement.rect,
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-      placement.orientation === Orientation.Sagittal && this.sagittalFlipped(),
-      this.pans()[placement.orientation],
-      this.obliques()[placement.orientation],
-    );
-    if (!sample) return; // clicked the letterbox margin or outside the volume
-
-    this.navigateToVoxel(volume, sample.voxel);
-  }
-
-  /**
-   * Set the shared focus from a Shift+click on the 3D pane: ray-cast the clicked
-   * pixel to the location its projection came from (the brightest sample for MIP),
-   * then navigate every MPR pane there — the 3D view acting as a locator. Uses the
-   * same camera, projection mode and slab the pane is rendering, so the pick lands
-   * on the voxel shown under the cursor.
-   */
-  private setFocusFromMip(
-    placement: Extract<PanePlacement, { kind: 'mip' }>,
-    event: PointerEvent,
-  ): void {
-    const volume = this.volume();
-    if (!volume) return;
-    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-    const pick = pickProjection(
-      volume,
-      this.camera3d(),
-      this.projectionMode(),
-      this.slabThicknessMm(),
-      placement.rect,
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-      {
-        clipToPlanes: this.clipToPlanes(),
-        sliceIndices: this.sliceIndices(),
-        cutPlane: this.cutPlane() ?? undefined,
-        transferFunction: this.transferFunction(),
-      },
-    );
-    if (!pick) return; // the ray missed the volume (or, for DVR, hit nothing solid)
-    this.navigateToVoxel(volume, pick.voxel);
-  }
-
-  /** Make `voxel` the shared focus and scroll every orientation to its slice. */
-  private navigateToVoxel(volume: Volume, voxel: readonly [number, number, number]): void {
-    this.focusVoxel.set(voxel);
-    this.crosshairsEnabled.set(true); // a fresh pick should always be visible
-    const obliques = this.obliques();
-    this.sliceIndices.set([
-      focusSliceIndex(volume, Orientation.Axial, voxel, obliques[Orientation.Axial]),
-      focusSliceIndex(volume, Orientation.Coronal, voxel, obliques[Orientation.Coronal]),
-      focusSliceIndex(volume, Orientation.Sagittal, voxel, obliques[Orientation.Sagittal]),
-    ]);
-  }
-
-  /** Activate a measurement tool, or toggle it off if it's already active. */
-  protected setTool(tool: MeasureTool): void {
-    this.activeTool.update((current) => (current === tool ? 'none' : tool));
-    this.measure.cancelPending(); // abandon any half-placed measurement when the tool changes
-  }
-
-  /** Remove every placed measurement and any in-progress one. */
-  protected clearMeasurements(): void {
-    this.measure.clear();
-  }
-
-  /**
-   * Return focus to the document after a `<select>` is changed. A picked dropdown
-   * stays focused, and {@link isEditableTarget} then suppresses every shortcut, so
-   * hotkeys go dead until the user clicks away (issue #175). Blurring the select on
-   * change releases that focus. Other controls (checkboxes) are left untouched.
-   */
-  protected onControlChange(event: Event): void {
-    releaseSelectFocus(event.target);
-  }
-
-  /**
-   * Escape closes the open overlays (help, then metadata), then cancels an
-   * in-progress measurement, then deactivates the tool — most-modal first so one
-   * press peels off one layer.
-   */
-  protected onEscapeKey(event: Event): void {
-    if (isEditableTarget(event.target)) return;
-    if (this.helpOpen()) {
-      this.helpOpen.set(false);
-      return;
-    }
-    if (this.infoPanelOpen()) {
-      this.infoPanelOpen.set(false);
-      return;
-    }
-    if (this.measure.pending()) {
-      this.measure.cancelPending();
-      return;
-    }
-    if (this.activeTool() !== 'none') this.activeTool.set('none');
-  }
-
-  /**
-   * Add the next point of the active measurement from a click on an MPR pane.
-   * Points accumulate on the pane's current slice; once the tool's full set is
-   * placed the measurement is committed and the pending state cleared. Clicking a
-   * different pane or slice mid-measurement starts a fresh one.
-   */
-  private placeMeasurePoint(
-    placement: Extract<PanePlacement, { kind: 'mpr' }>,
-    event: PointerEvent,
-  ): void {
-    const volume = this.volume();
-    const tool = this.activeTool();
-    if (!volume || tool === 'none') return;
-    const orientation = placement.orientation;
-    const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
-    if (!point) return; // clicked the letterbox margin outside the image
-
-    this.measure.place(tool, orientation, this.sliceIndices()[orientation], point);
-  }
-
-  /** Begin dragging a placed measurement's endpoint or ROI corner. */
-  protected onMeasureHandleDown(id: number, pointIndex: number, event: PointerEvent): void {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const target = event.target as Element;
-    target.setPointerCapture?.(event.pointerId);
-    this.measure.beginDrag(id, pointIndex);
-  }
-
-  /** Move the dragged measurement point to follow the cursor. */
-  protected onMeasureHandleMove(event: PointerEvent): void {
-    if (!this.measure.drag()) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const volume = this.volume();
-    if (!volume) return;
-    const measurement = this.measure.draggedMeasurement();
-    if (!measurement) return;
-    const orientation = measurement.orientation;
-    const placement = this.mprPlacement(orientation);
-    if (!placement) return;
-    const point = this.eventPlanePoint(volume, orientation, placement.rect, event);
-    if (!point) return;
-    this.measure.applyDragPoint(point);
-  }
-
-  /** End a measurement-point drag. */
-  protected onMeasureHandleUp(event: PointerEvent): void {
-    if (!this.measure.drag()) return;
-    event.stopPropagation();
-    const target = event.target as Element;
-    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
-    this.measure.endDrag();
-  }
-
-  /** Map a pointer event to the in-plane point it covers on a given MPR pane. */
-  private eventPlanePoint(
-    volume: Volume,
-    orientation: Orientation,
-    rect: PaneRect,
-    event: PointerEvent,
-  ): PlanePoint | null {
-    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-    return paneToPlanePoint(
-      volume,
-      orientation,
-      this.zooms()[orientation],
-      rect,
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-      orientation === Orientation.Sagittal && this.sagittalFlipped(),
-      this.pans()[orientation],
-    );
-  }
-
-  /** The MPR placement currently showing an orientation, or null when it isn't shown. */
-  private mprPlacement(orientation: Orientation): Extract<PanePlacement, { kind: 'mpr' }> | null {
-    return (
-      this.panes().find(
-        (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
-          pane.kind === 'mpr' && pane.orientation === orientation,
-      ) ?? null
-    );
-  }
-
-  /** A provisional point under the cursor for previewing the pending measurement. */
-  private previewPoint(
-    volume: Volume,
-    panes: readonly PanePlacement[],
-    zooms: PerOrientation,
-    pans: PerOrientationPan,
-    flipped: boolean,
-    orientation: Orientation,
-  ): PlanePoint | null {
-    const cursor = this.cursor();
-    if (!cursor) return null;
-    const placement = panes.find(
-      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
-        pane.kind === 'mpr' && pane.orientation === orientation,
-    );
-    if (!placement) return null;
-    return paneToPlanePoint(
-      volume,
-      orientation,
-      zooms[orientation],
-      placement.rect,
-      cursor.x,
-      cursor.y,
-      orientation === Orientation.Sagittal && flipped,
-      pans[orientation],
-    );
-  }
-
-  /** Project one measurement into its pane, or null if it's hidden (wrong slice/pane). */
-  private buildOverlay(
-    volume: Volume,
-    panes: readonly PanePlacement[],
-    zooms: PerOrientation,
-    pans: PerOrientationPan,
-    flipped: boolean,
-    indices: PerOrientation,
-    m: { id: number; tool: MeasureTool; orientation: Orientation; sliceIndex: number },
-    points: readonly PlanePoint[],
-    pending: boolean,
-  ): MeasurementOverlay | null {
-    const orientation = m.orientation;
-    const placement = panes.find(
-      (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
-        pane.kind === 'mpr' && pane.orientation === orientation,
-    );
-    if (!placement) return null;
-    if (indices[orientation] !== m.sliceIndex) return null; // scrolled off its slice
-    const rect = placement.rect;
-    if (rect.width < 1 || rect.height < 1 || points.length === 0) return null;
-
-    const flipX = orientation === Orientation.Sagittal && flipped;
-    const zoom = zooms[orientation];
-    const pan = pans[orientation];
-    const local: PanePoint[] = [];
-    for (const p of points) {
-      const screen = planePointToPane(volume, orientation, p, zoom, rect, flipX, pan);
-      if (!screen) return null;
-      local.push({ x: screen.x - rect.x, y: screen.y - rect.y });
-    }
-
-    const [widthMm, heightMm] = planeExtentMm(volume, orientation);
-    const scale = { widthMm, heightMm };
-    const full = points.length >= TOOL_POINTS[m.tool];
-
-    let polyline = '';
-    let ellipse: MeasurementOverlay['ellipse'] = null;
-    let box: MeasurementOverlay['box'] = null;
-    let lines: readonly string[] = [];
-    let labelX = local[0].x;
-    let labelY = local[0].y - MEASURE_LABEL_OFFSET;
-
-    switch (m.tool) {
-      case 'distance': {
-        polyline = polylineOf(local);
-        const mid = midpoint(local);
-        labelX = mid.x;
-        labelY = mid.y - MEASURE_LABEL_OFFSET;
-        if (full) lines = [`${measureDistanceMm(points[0], points[1], scale).toFixed(1)} mm`];
-        break;
-      }
-      case 'angle': {
-        polyline = polylineOf(local);
-        labelX = local[1].x;
-        labelY = local[1].y - MEASURE_LABEL_OFFSET;
-        if (full) {
-          lines = [`${measureAngleDeg(points[0], points[1], points[2], scale).toFixed(1)}°`];
-        }
-        break;
-      }
-      case 'ellipse':
-      case 'rectangle': {
-        if (local.length >= 2) {
-          const [a, b] = local;
-          const x = Math.min(a.x, b.x);
-          const y = Math.min(a.y, b.y);
-          const w = Math.abs(a.x - b.x);
-          const h = Math.abs(a.y - b.y);
-          if (m.tool === 'ellipse') {
-            ellipse = { cx: x + w / 2, cy: y + h / 2, rx: w / 2, ry: h / 2 };
-          } else {
-            box = { x, y, w, h };
-          }
-          labelX = x;
-          labelY = y - MEASURE_LABEL_OFFSET;
-          const shape: RoiShape = m.tool;
-          if (pending) {
-            // Live preview shows the area only (cheap); committed ROIs add HU stats
-            // from the memoised, pan-independent sweep in measurementStats.
-            const area = roiAreaMm2(shape, roiBounds(points[0], points[1]), scale);
-            lines = [`${area.toFixed(0)} mm²`];
-          } else {
-            lines = this.measurementStats().get(m.id) ?? [];
-          }
-        }
-        break;
-      }
-      default: {
-        const exhaustive: never = m.tool;
-        return exhaustive;
-      }
-    }
-
-    return {
-      key: pending ? 'pending' : `measure-${m.id}`,
-      id: m.id,
-      tool: m.tool,
-      rect,
-      handles: local,
-      polyline,
-      ellipse,
-      box,
-      lines,
-      labelX,
-      labelY,
-      pending,
-    };
-  }
-
-  /** Switch the displayed series, rebuilding its volume from the parsed slices. */
-  protected onSeriesChange(event: Event): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    const state = this.load();
-    if (state.status !== 'ready' || event.target.value === state.result.selectedUid) return;
-    this.applyVolume(this.loader.selectSeries(state.result, event.target.value));
-  }
-
-  /** Picker label: description (or a fallback) · modality · slice count. */
-  protected seriesLabel(series: Series): string {
-    const name = series.description || series.modality || `Series ${series.seriesNumber ?? '?'}`;
-    const modality = series.modality ? ` · ${series.modality}` : '';
-    return `${name}${modality} · ${series.imageCount} img`;
-  }
-
-  protected async onFilesSelected(event: Event): Promise<void> {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement) || !input.files) return;
-    const files = Array.from(input.files);
-    input.value = ''; // allow re-selecting the same folder
-    // Picking files leaves focus on this hidden <input type=file>. Since it's an
-    // editable target, every subsequent window keydown is swallowed by
-    // isEditableTarget and the viewer's shortcuts go dead until the user clicks
-    // the canvas. Release that focus so the keyboard works straight after upload.
-    input.blur();
-    if (files.length > 0) await this.loadFiles(files, describeSelection(files));
-  }
-
-  /**
-   * A file/folder drag entered the viewport: raise the drop overlay. The depth
-   * counter keeps it up while the pointer moves between child elements.
-   */
-  protected onDragEnter(event: DragEvent): void {
-    if (!isLoadableDrag(event)) return;
-    this.dragDepth++;
-    this.dropIntent.set(dropIntentOf(event));
-    this.draggingSeries.set(hasSeriesDrag(event));
-    this.isDraggingFiles.set(true);
-  }
-
-  /** Allow the drop and show the copy cursor while a loadable drag hovers the viewport. */
-  protected onDragOver(event: DragEvent): void {
-    if (!isLoadableDrag(event)) return;
-    event.preventDefault();
-    // `dragover` fires continuously with the live modifier state, so the overlay
-    // hint follows ⌥/⇧ as they're pressed or released without moving the pointer.
-    this.dropIntent.set(dropIntentOf(event));
-    this.draggingSeries.set(hasSeriesDrag(event));
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
-  }
-
-  /** A drag left a child (or the viewport): lower the overlay once fully outside. */
-  protected onDragLeave(event: DragEvent): void {
-    if (!isLoadableDrag(event)) return;
-    this.dragDepth = Math.max(0, this.dragDepth - 1);
-    if (this.dragDepth === 0) {
-      this.isDraggingFiles.set(false);
-      this.dropIntent.set('primary');
-      this.draggingSeries.set(false);
-    }
-  }
-
-  /**
-   * Handle a drop on the viewport: the modifier held selects the {@link DropIntent}
-   * (⌥ fuse / ⇧ compare / plain primary). A history-panel series chip (its UID
-   * payload) loads that retained series; otherwise the dropped folder/files are
-   * read, walking dropped directories for their slices. Both route through the
-   * smart-auto merge, with ⌥/⇧ forcing the overlay/compare path.
-   */
-  protected async onDrop(event: DragEvent): Promise<void> {
-    event.preventDefault();
-    this.dragDepth = 0;
-    this.isDraggingFiles.set(false);
-    this.dropIntent.set('primary');
-    this.draggingSeries.set(false);
-    if (!event.dataTransfer) return;
-    const intent = dropIntentOf(event);
-    const seriesUid = event.dataTransfer.getData(SERIES_DND_MIME);
-    if (seriesUid) {
-      const series = this.catalog.seriesByUid(seriesUid);
-      if (series) this.loadSeriesFromPanel(series, intent);
-      return;
-    }
-    const { files, entry } = await readDropped(event.dataTransfer);
-    if (files.length > 0) await this.loadFiles(files, entry, intent);
-  }
-
-  /**
-   * Load a series picked from the history panel (clicked, key-activated, or
-   * dropped onto the viewport). Its volume is built on demand from the retained
-   * slices ({@link VolumeLoader.loadSeries}) and routed through the same
-   * smart-auto {@link VolumeLoader.merge} rule as a file load: a series sharing
-   * the current base's frame of reference fuses as an overlay, a different study
-   * replaces. A series already composited (base or overlay) is a no-op, so a
-   * second click neither resets the view nor stacks a duplicate — except ⇧, which
-   * still opens the side-by-side compare columns for the already-fused series. The
-   * {@link intent} (set by the held modifier on a drop) routes ⌥ through the fusion
-   * overlay and ⇧ through the compare layout; clicks/keys default to primary.
-   */
-  protected loadSeriesFromPanel(series: Series, intent: DropIntent = 'primary'): void {
-    if (!this.renderer()) return; // GPU not ready; nothing to draw into yet
-    const previous = this.load();
-    const previousResult = previous.status === 'ready' ? previous.result : null;
-    let outcome: LoadOutcome;
-    try {
-      outcome = this.loadCoordinator.resolveSeries(previousResult, series, intent);
-    } catch (error) {
-      this.load.set({ status: 'error', message: messageOf(error) });
-      return;
-    }
-    this.applyOutcome(outcome, previous, null);
-  }
-
-  /**
-   * Apply a resolved {@link LoadOutcome} to the view: replace the volume or add an
-   * overlay (⇧ also opening the compare columns), or restore the prior view on a
-   * declined patient switch / a can't-fuse reject (flashing the notice). A file
-   * `entry`, when present, is recorded in the recent list — flagged as an overlay
-   * when one was added — so a layered load reads apart from a fresh one.
-   */
-  private applyOutcome(outcome: LoadOutcome, previous: LoadState, entry: RecentEntry | null): void {
-    switch (outcome.kind) {
-      case 'replace':
-        this.applyVolume(outcome.result);
-        if (entry) this.recentStore.record(entry);
-        return;
-      case 'overlay':
-        this.addLayer(outcome.result);
-        if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
-        if (entry) this.recentStore.record({ ...entry, overlay: true });
-        return;
-      case 'imported':
-        // A plain import is catalogued but not shown (#241): leave the viewport to
-        // the user's history pick. A confirmed patient switch unloads the stale view.
-        if (outcome.cleared) this.clearView();
-        if (entry) this.recentStore.record(entry);
-        return;
-      case 'reject':
-        this.load.set(previous); // leave what was showing untouched
-        this.flashNotice(outcome.message);
-        return;
-      case 'cancel':
-        this.load.set(previous); // patient-switch declined
-        return;
-      case 'noop':
-        if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
-        return;
-      default: {
-        const exhaustive: never = outcome;
-        return exhaustive;
-      }
-    }
-  }
-
-  /** Flash a transient notice over the viewport, replacing any still showing. */
-  private flashNotice(message: string): void {
-    this.notice.set(message);
-    if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
-    this.noticeHandle = setTimeout(() => {
-      this.notice.set(null);
-      this.noticeHandle = null;
-    }, NOTICE_MS);
-  }
-
-  /**
-   * Re-pick a recent entry. Browsers can't silently re-read a path, so this just
-   * re-opens the matching picker (folder or files) for the user to re-select.
-   */
-  protected onRecentPick(
-    event: Event,
-    folderInput: HTMLInputElement,
-    filesInput: HTMLInputElement,
-  ): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    const entry = this.recent()[Number(event.target.value)];
-    event.target.selectedIndex = 0; // back to the "Recent…" placeholder so re-picking fires
-    if (!entry) return;
-    (entry.kind === 'folder' ? folderInput : filesInput).click();
-  }
-
-  /** Begin a click-drag over the pane under the pointer (delegated to the controller). */
-  protected onPointerDown(event: PointerEvent): void {
-    this.interaction.onPointerDown(event);
-  }
-
-  /** Suppress the browser context menu so right-button W/L drags work. */
-  protected onContextMenu(event: Event): void {
-    this.interaction.onContextMenu(event);
-  }
-
-  protected onPointerMove(event: PointerEvent): void {
-    this.interaction.onPointerMove(event);
-  }
-
-  protected onPointerUp(event: PointerEvent): void {
-    this.interaction.onPointerUp(event);
-  }
-
-  protected onPointerLeave(event: PointerEvent): void {
-    this.interaction.onPointerLeave(event);
-  }
-
-  /**
-   * Wheel over an MPR pane scrolls its slices (MPR zoom is a right-drag); wheel
-   * over the 3D pane zooms the orbit camera. Delegated to the interaction controller.
-   */
-  protected onWheel(event: WheelEvent): void {
-    this.interaction.onWheel(event);
-  }
-
-  protected onWindowCenterInput(event: Event): void {
-    const layer = this.activeWlLayer();
-    this.setLayerWindow(layer, { center: intValue(event), width: this.layerWindow(layer).width });
-    this.markMipSettling();
-  }
-
-  protected onWindowWidthInput(event: Event): void {
-    const layer = this.activeWlLayer();
-    this.setLayerWindow(layer, {
-      center: this.layerWindow(layer).center,
-      width: Math.max(1, intValue(event)),
-    });
-    this.markMipSettling();
-  }
-
-  /**
-   * Apply the chosen window/level preset to the active target (the hovered Compare
-   * column's layer, else the base), then reset the selector to its label.
-   */
-  protected onPresetChange(event: Event): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    const preset = this.wlPresets()[Number(event.target.value)];
-    event.target.selectedIndex = 0; // back to the "Preset…" placeholder so re-picking fires
-    if (!preset) return;
-    this.setLayerWindow(this.activeWlLayer(), { center: preset.center, width: preset.width });
-    this.markMipSettling();
-  }
-
-  /** Switch the 3D pane's mode (MIP / MinIP / Average / DVR). */
-  protected onProjectionModeChange(event: Event): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    const mode = Number(event.target.value) as ProjectionMode;
-    this.projectionMode.set(mode);
-    // Reset the slab to the mode's default: full-volume for MIP/DVR, a moderate
-    // band for MinIP/Average (keeps the air margins out). Reversible across switches.
-    this.slabThicknessMm.set(Math.round(defaultSlabThicknessMm(mode, this.slabMaxMm())));
-    this.markMipSettling();
-  }
-
-  /** Re-seed the editable TF from a preset (CT Bone / Soft-tissue / Angio / Lung). */
-  protected onTransferFunctionChange(event: Event): void {
-    if (!(event.target instanceof HTMLSelectElement)) return;
-    this.cam.setPreset(Number(event.target.value) as TransferFunctionPreset);
-    this.markMipSettling();
-  }
-
-  /**
-   * Map a pointer event over the TF editor to a `[intensity, opacity]` in the
-   * transfer function's domain. The editor's viewBox is 0..100 in each axis, with
-   * intensity rising left→right across the domain and opacity rising bottom→top.
-   */
-  private tfEventValue(event: PointerEvent | MouseEvent): [number, number] {
-    const svg = (event.currentTarget ?? event.target) as SVGGraphicsElement;
-    const rect = svg.getBoundingClientRect();
-    const fx = rect.width > 0 ? clamp((event.clientX - rect.left) / rect.width, 0, 1) : 0;
-    const fy = rect.height > 0 ? clamp((event.clientY - rect.top) / rect.height, 0, 1) : 0;
-    const [lo, hi] = this.transferFunction().domain;
-    return [lo + fx * (hi - lo), 1 - fy];
-  }
-
-  /** Start dragging the TF control point at `index` (and select it). */
-  protected onTfPointerDown(event: PointerEvent, index: number): void {
-    event.preventDefault();
-    event.stopPropagation();
-    this.cam.beginPointDrag(index);
-    const svg = (event.target as SVGElement).ownerSVGElement;
-    svg?.setPointerCapture(event.pointerId);
-  }
-
-  /** Drag the active TF control point to the pointer's intensity/opacity. */
-  protected onTfPointerMove(event: PointerEvent): void {
-    const index = this.tfDrag();
-    if (index === null) return;
-    const [intensity, opacity] = this.tfEventValue(event);
-    this.cam.movePoint(index, intensity, opacity);
-    this.markMipSettling();
-  }
-
-  /** Finish a TF control-point drag. */
-  protected onTfPointerUp(event: PointerEvent): void {
-    if (this.tfDrag() === null) return;
-    this.cam.endPointDrag();
-    (event.target as SVGElement).ownerSVGElement?.releasePointerCapture(event.pointerId);
-  }
-
-  /** Double-click the TF editor background to insert a control point there. */
-  protected onTfAddPoint(event: MouseEvent): void {
-    const [intensity, opacity] = this.tfEventValue(event);
-    this.cam.addPoint(intensity, opacity);
-    this.markMipSettling();
-  }
-
-  /** Recolour the selected TF control point from the colour input. */
-  protected onTfColorChange(event: Event): void {
-    const index = this.tfSelected();
-    if (index === null || !(event.target instanceof HTMLInputElement)) return;
-    this.cam.recolorPoint(index, hexToRgb(event.target.value));
-    this.markMipSettling();
-  }
-
-  /** Remove the selected TF control point (no-op on an endpoint or the last two). */
-  protected onTfRemovePoint(): void {
-    const index = this.tfSelected();
-    if (index === null) return;
-    this.cam.removePoint(index);
-    this.markMipSettling();
-  }
-
-  /** Toggle DVR shading on/off (off renders samples at their flat TF colour). */
-  protected toggleShading(): void {
-    this.cam.toggleLighting();
-    this.markMipSettling();
-  }
-
-  /** Update one numeric DVR lighting parameter from a slider. */
-  protected onLightingInput(key: keyof DvrLighting, event: Event): void {
-    if (!(event.target instanceof HTMLInputElement)) return;
-    const value = Number(event.target.value);
-    if (!Number.isFinite(value)) return;
-    this.cam.setLightingValue(key, value);
-    this.markMipSettling();
-  }
-
-  /** Toggle the cut-away that clips the 3D pane to the current MPR slice planes. */
-  protected toggleClipToPlanes(): void {
-    this.cam.toggleClipToPlanes();
-    this.markMipSettling();
-  }
-
-  /** Toggle the arbitrary handle-driven cut-plane, aligning it to the view when enabling. */
-  protected toggleClipPlane(): void {
-    this.cam.toggleClipPlane();
-    this.markMipSettling();
-  }
-
-  /** Re-aim the cut-plane to face the current view and recentre it on the volume. */
-  protected resetClipPlane(): void {
-    this.cam.faceClipToView();
-    this.markMipSettling();
-  }
-
-  /** Begin dragging the cut-plane handle to translate the plane along its normal. */
-  protected onClipHandleDown(event: PointerEvent): void {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation(); // don't start an orbit under the handle
-    const gizmo = this.clipPlaneGizmo();
-    const volume = this.volume();
-    if (!gizmo || !volume) return;
-    const target = event.target as Element;
-    target.setPointerCapture?.(event.pointerId);
-    this.drag.set({
-      kind: 'clipPlane',
-      startOffset: this.clipPlaneOffsetMm(),
-      startX: event.clientX,
-      startY: event.clientY,
-      axisX: gizmo.axisX,
-      axisY: gizmo.axisY,
-      maxOffset: volumeBounds(volume).radius,
-    });
-  }
-
-  /** Translate the cut-plane to follow the handle drag, clamped within the volume. */
-  protected onClipHandleMove(event: PointerEvent): void {
-    const drag = this.drag();
-    if (drag?.kind !== 'clipPlane') return;
-    event.preventDefault();
-    event.stopPropagation();
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
-    // Project the pointer displacement onto the screen-space normal axis to get
-    // the offset change in mm (least-squares onto the gizmo's drag direction).
-    const len2 = drag.axisX * drag.axisX + drag.axisY * drag.axisY;
-    const delta = len2 > 1e-9 ? (dx * drag.axisX + dy * drag.axisY) / len2 : 0;
-    this.clipPlaneOffsetMm.set(clamp(drag.startOffset + delta, -drag.maxOffset, drag.maxOffset));
-    this.markMipSettling();
-  }
-
-  /** End a cut-plane handle drag. */
-  protected onClipHandleUp(event: PointerEvent): void {
-    if (this.drag()?.kind !== 'clipPlane') return;
-    event.stopPropagation();
-    const target = event.target as Element;
-    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
-    this.drag.set(null);
-  }
-
-  /** Begin dragging an MPR pane's oblique knob to tilt its reslice plane. */
-  protected onObliqueHandleDown(event: PointerEvent, orientation: Orientation): void {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation(); // don't start a pan under the knob
-    const target = event.target as Element;
-    target.setPointerCapture?.(event.pointerId);
-    const tilt = this.obliques()[orientation];
-    this.drag.set({
-      kind: 'oblique',
-      orientation,
-      startX: event.clientX,
-      startY: event.clientY,
-      startTiltU: tilt.tiltU,
-      startTiltV: tilt.tiltV,
-    });
-  }
-
-  /** Tilt the plane to follow the knob: horizontal yaws (tiltV), vertical pitches (tiltU). */
-  protected onObliqueHandleMove(event: PointerEvent): void {
-    const drag = this.drag();
-    if (drag?.kind !== 'oblique') return;
-    event.preventDefault();
-    event.stopPropagation();
-    const tiltV = clamp(
-      drag.startTiltV + (event.clientX - drag.startX) / OBLIQUE_PX_PER_RAD,
-      -MAX_OBLIQUE_RAD,
-      MAX_OBLIQUE_RAD,
-    );
-    const tiltU = clamp(
-      drag.startTiltU + (event.clientY - drag.startY) / OBLIQUE_PX_PER_RAD,
-      -MAX_OBLIQUE_RAD,
-      MAX_OBLIQUE_RAD,
-    );
-    this.obliques.update((obliques) => withValue(obliques, drag.orientation, { tiltU, tiltV }));
-  }
-
-  /** End an oblique knob drag. */
-  protected onObliqueHandleUp(event: PointerEvent): void {
-    if (this.drag()?.kind !== 'oblique') return;
-    event.stopPropagation();
-    const target = event.target as Element;
-    if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
-    this.drag.set(null);
-  }
-
-  /** Double-click a knob (or the toolbar button) to restore the orthogonal plane. */
-  protected resetOblique(orientation?: Orientation): void {
-    if (orientation === undefined) {
-      this.obliques.set(NO_OBLIQUES);
-      return;
-    }
-    this.obliques.update((obliques) => withValue(obliques, orientation, NO_OBLIQUE));
-  }
-
-  /** Set the 3D slab thickness (mm), clamped to [1, full volume depth]. */
-  protected onSlabThicknessInput(event: Event): void {
-    const max = this.slabMaxMm();
-    this.slabThicknessMm.set(clamp(intValue(event), 1, max > 0 ? max : 1));
-    this.markMipSettling();
-  }
-
   /** Placement of the pane under a pointer event, or null if outside the panes. */
   private placementAtEvent(event: MouseEvent): PanePlacement | null {
     const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
     return placementAt(this.panes(), event.clientX - bounds.left, event.clientY - bounds.top);
   }
-
-  private async initGpu(): Promise<void> {
-    const canvas = this.canvasRef().nativeElement;
-    // Free any prior renderer's GPU resources before rebuilding (e.g. a retry
-    // after a device loss) so a re-init doesn't leak the old buffers/textures.
-    this.renderer()?.dispose();
-    this.renderer.set(null);
-    try {
-      this.gpu = await initWebGpu(canvas, {
-        onDeviceLost: (info) => this.onDeviceLost(info),
-        onUncapturedError: (error) => console.error('WebGPU error:', error.message),
-      });
-      this.renderer.set(new SliceRenderer(this.gpu));
-      this.gpuError.set(null); // a successful (re)init clears any prior GPU error
-      this.observeResize(canvas);
-    } catch (error) {
-      this.gpuError.set(messageOf(error));
-    }
-  }
-
-  /**
-   * Surface a runtime device loss as a recoverable error rather than letting the
-   * canvas silently stop updating. The lost device and its renderer are dead, so
-   * drop them; {@link statusIsError} then shows the message (a reload re-runs
-   * {@link initGpu} and rebuilds the GPU stack).
-   */
-  private onDeviceLost(info: GPUDeviceLostInfo): void {
-    this.gpu = null;
-    this.renderer.set(null);
-    const reason = info.message ? ` (${info.message})` : '';
-    this.gpuError.set(`The GPU device was lost${reason}. Reload the page to continue.`);
-  }
-
-  private async loadFiles(
-    files: readonly File[],
-    entry: RecentEntry | null,
-    intent: DropIntent = 'primary',
-  ): Promise<void> {
-    // The load already showing; a same-frame-of-reference series adds atop it.
-    const previous = this.load();
-    this.load.set({ status: 'loading', loaded: 0, total: files.length });
-    try {
-      const result = await this.loader.loadFromFiles(files, (loaded, total) => {
-        // Ignore stragglers from a superseded load (a new load already started).
-        if (this.load().status === 'loading') this.load.set({ status: 'loading', loaded, total });
-      });
-      // The coordinator runs the whole load policy — held-modifier fusion, the
-      // one-patient guard (prompting through the injected confirm) and catalog
-      // mutation — and hands back what to do; the patient-switch confirm is the
-      // only browser prompt, injected so the policy stays testable.
-      const previousResult = previous.status === 'ready' ? previous.result : null;
-      const outcome = this.loadCoordinator.resolveFiles(
-        previousResult,
-        result,
-        intent,
-        confirmPatientSwitch,
-      );
-      this.applyOutcome(outcome, previous, entry);
-    } catch (error) {
-      this.load.set({ status: 'error', message: messageOf(error) });
-    }
-  }
-
-  /**
-   * Adopt a registry that *added* an overlay layer above the current base. The
-   * base layer and its volume are unchanged, so — unlike {@link applyVolume} —
-   * the view state (zoom, pan, window/level, slice indices) is preserved and the
-   * renderer's base volume isn't re-uploaded.
-   */
-  private addLayer(result: LoadResult): void {
-    this.load.set({ status: 'ready', result });
-  }
-
-  /**
-   * Unload everything from the viewport, returning it to the idle/empty state
-   * (#241). The patient catalog and history panel are kept — only the displayed
-   * volume, its fusion overlays and the per-view annotations (measurements, ROIs,
-   * focus, active tool) are dropped — so the user can re-pick a series. Invoked by
-   * the toolbar's Unload control and by a confirmed patient switch, which retires
-   * the previous patient's now-stale view.
-   */
-  protected clearView(): void {
-    this.cine.stop();
-    this.measure.clear();
-    this.measure.endDrag();
-    this.activeTool.set('none');
-    this.focusVoxel.set(null);
-    this.layerStore.reset();
-    this.load.set({ status: 'idle' });
-  }
-
-  private applyVolume(result: LoadResult): void {
-    const renderer = this.renderer();
-    if (!renderer) {
-      this.load.set({ status: 'error', message: 'GPU is not ready yet — try again.' });
-      return;
-    }
-    // The base layer backs the single-layer view; honour its volume's defaults.
-    const volume = baseLayer(result.layers)!.volume;
-    this.cine.stop(); // a fresh volume resets the view; don't keep cining the old one
-    renderer.setVolume(volume);
-    this.resetViewForVolume(renderer, volume, result);
-    this.load.set({ status: 'ready', result });
-  }
-
-  /**
-   * The one grouped reset of every per-load view default, so they live in a single
-   * place instead of being scattered (the forget-a-signal footgun). The feature
-   * stores each reset their own domain — measurements, layers (incl. the
-   * checkerboard), compare linking, and the 3D camera/TF/DVR/clip — and the
-   * remaining per-volume signals are reset here. Persisted view preferences
-   * (layout, projection mode, sagittal flip) are deliberately *not* reset; window/
-   * level and slab honour a stored preference when present, else the volume default.
-   */
-  private resetViewForVolume(renderer: SliceRenderer, volume: Volume, result: LoadResult): void {
-    const prefs = this.preferencesStore.preferences();
-    const fullDepthMm = Math.round(2 * volumeBounds(volume).radius);
-    this.windowCenter.set(prefs.windowCenter ?? Math.round(volume.windowCenter));
-    this.windowWidth.set(prefs.windowWidth ?? Math.max(1, Math.round(volume.windowWidth)));
-    this.slabThicknessMm.set(
-      prefs.slabThicknessMm !== null ? clamp(prefs.slabThicknessMm, 1, fullDepthMm) : fullDepthMm,
-    );
-    this.mainOrientation.set(Orientation.Axial);
-    this.focusVoxel.set(null);
-    this.activeTool.set('none');
-    this.measure.clear();
-    this.measure.endDrag();
-    this.hiddenRois.set(allRoiKeys(result.structureSets)); // contours start hidden (#257)
-    this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
-    this.roiOpacities.set(new Map()); // …fully opaque
-    // A fresh base load drops any layers-panel edits (overlays load at their defaults).
-    this.layerStore.reset();
-    this.activeCompareGroup.set(0); // window/level controls target the base column
-    this.selectedSetIndex.set(-1); // showing every associated structure set
-    // Per-volume view state is per-session: always reset to volume-derived defaults.
-    this.invert.set(false);
-    this.zooms.set([1, 1, 1]);
-    this.pans.set(NO_PANS);
-    // A fresh base load starts with the Compare groups linked and no per-group nav.
-    this.compareStore.reset();
-    this.obliques.set(NO_OBLIQUES);
-    this.cam.reset(); // camera / TF / DVR lighting / clips back to defaults
-    this.sliceIndices.set([
-      middleSlice(renderer, Orientation.Axial),
-      middleSlice(renderer, Orientation.Coronal),
-      middleSlice(renderer, Orientation.Sagittal),
-    ]);
-  }
-
-  private observeResize(canvas: HTMLCanvasElement): void {
-    // Coalesce the burst of notifications during a drag-resize into one sync per
-    // frame, so the canvas isn't repeatedly resized (and re-rendered) mid-layout.
-    const observer = new ResizeObserver(() => {
-      if (this.resizeHandle !== null) return;
-      this.resizeHandle = requestAnimationFrame(() => {
-        this.resizeHandle = null;
-        this.syncViewport(canvas);
-      });
-    });
-    observer.observe(canvas);
-    this.destroyRef.onDestroy(() => observer.disconnect());
-    this.syncViewport(canvas);
-  }
-
-  private syncViewport(canvas: HTMLCanvasElement): void {
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    // Round (not floor) to match scaleRect's edge rounding, so the panes tile
-    // the backing store exactly with no 1px strip or clamp at the far edges.
-    const deviceWidth = Math.max(1, Math.round(width * dpr));
-    const deviceHeight = Math.max(1, Math.round(height * dpr));
-    if (canvas.width !== deviceWidth || canvas.height !== deviceHeight) {
-      canvas.width = deviceWidth;
-      canvas.height = deviceHeight;
-    }
-    const current = this.viewport();
-    if (current.width !== width || current.height !== height || current.dpr !== dpr) {
-      this.viewport.set({ width, height, dpr });
-    }
-  }
-}
-
-/**
- * Build the pane set for the chosen {@link LayoutMode}, in CSS pixels:
- * - `TriMpr`: the 1+2 arrangement — a tall main MPR pane (cycled by swap) with the
- *   other two orientations stacked on the right; no 3D pane.
- * - `Quad`: the 2×2 grid — the three MPR orientations plus the 3D MIP pane.
- * - `Volume3d`: the 3D MIP pane filling the whole viewport.
- * The two side orientations follow `ORIENTATION_ORDER`, skipping the main one.
- */
-function placePanes(
-  mode: LayoutMode,
-  width: number,
-  height: number,
-  main: Orientation,
-): PanePlacement[] {
-  const sides = ORIENTATION_ORDER.filter((orientation) => orientation !== main);
-  switch (mode) {
-    case LayoutMode.TriMpr: {
-      const layout = triLayout(width, height);
-      return [
-        { kind: 'mpr', orientation: main, rect: layout.main, group: 0 },
-        { kind: 'mpr', orientation: sides[0], rect: layout.topRight, group: 0 },
-        { kind: 'mpr', orientation: sides[1], rect: layout.bottomRight, group: 0 },
-      ];
-    }
-    case LayoutMode.Quad: {
-      const layout = mprLayout(width, height);
-      return [
-        { kind: 'mpr', orientation: main, rect: layout.topLeft, group: 0 },
-        { kind: 'mpr', orientation: sides[0], rect: layout.topRight, group: 0 },
-        { kind: 'mpr', orientation: sides[1], rect: layout.bottomLeft, group: 0 },
-        { kind: 'mip', rect: layout.bottomRight },
-      ];
-    }
-    case LayoutMode.Compare: {
-      // Two side-by-side columns, each a full axial/coronal/sagittal stack; the
-      // left column shows the base layer, the right the second (overlay) layer.
-      const cols = compareLayout(width, height, COMPARE_GROUPS);
-      return cols.flatMap((rows, group) =>
-        ORIENTATION_ORDER.map((orientation, row) => ({
-          kind: 'mpr' as const,
-          orientation,
-          rect: rows[row],
-          group,
-        })),
-      );
-    }
-    case LayoutMode.Volume3d:
-      return [{ kind: 'mip', rect: singleLayout(width, height) }];
-    default: {
-      const exhaustive: never = mode;
-      return exhaustive;
-    }
-  }
-}
-
-/** Number of side-by-side groups in the Compare layout (base + one overlay). */
-/** The pane containing CSS-pixel point (x, y), or null. */
-function placementAt(panes: readonly PanePlacement[], x: number, y: number): PanePlacement | null {
-  for (const pane of panes) {
-    if (withinRect(pane.rect, x, y)) return pane;
-  }
-  return null;
-}
-
-/** Trigger a browser download of a blob under the given filename. */
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  // Revoke after the click has been dispatched so the download isn't cancelled.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
-/**
- * Ask whether to switch the catalog to the just-imported patient, discarding the
- * one currently loaded. The viewer holds one patient at a time, so a different-
- * patient import is a deliberate switch rather than a silent mix; `false` cancels
- * and leaves the current view untouched.
- */
-function confirmPatientSwitch(): boolean {
-  return confirm(
-    'These files belong to a different patient. Switch to them and clear the ' +
-      'current patient from the viewer?',
-  );
-}
-
-/** Whether a drag event carries files (vs. dragged text/elements within the page). */
-function hasFiles(event: DragEvent): boolean {
-  const types = event.dataTransfer?.types;
-  return types ? Array.from(types).includes('Files') : false;
-}
-
-/** Whether a drag carries a history-panel series chip (its UID payload). */
-function hasSeriesDrag(event: DragEvent): boolean {
-  const types = event.dataTransfer?.types;
-  return types ? Array.from(types).includes(SERIES_DND_MIME) : false;
-}
-
-/** Whether a drag is something the viewport can load: dropped files or a series chip. */
-function isLoadableDrag(event: DragEvent): boolean {
-  return hasFiles(event) || hasSeriesDrag(event);
-}
-
-/**
- * The {@link DropIntent} a held modifier selects: ⌥/Alt forces a fusion overlay,
- * ⇧/Shift adds a side-by-side compare column, and a plain drop loads as the
- * primary series (smart-auto). Alt wins when both are held. Pure for unit testing.
- */
-export function dropIntentOf(modifiers: { altKey: boolean; shiftKey: boolean }): DropIntent {
-  if (modifiers.altKey) return 'overlay';
-  if (modifiers.shiftKey) return 'compare';
-  return 'primary';
-}
-
-/**
- * Drop-overlay headline reflecting what the held modifier will do on release.
- * `isSeriesDrag` distinguishes a dragged history chip (replaces the view) from a
- * plain file/folder drop, which now only catalogues into the history (#241).
- */
-export function dropHeadlineText(intent: DropIntent, isSeriesDrag = true): string {
-  switch (intent) {
-    case 'overlay':
-      return 'Drop to fuse as an overlay';
-    case 'compare':
-      return 'Drop to add a compare column';
-    case 'primary':
-      return isSeriesDrag ? 'Drop to load as primary' : 'Drop to add to the history';
-    default: {
-      const exhaustive: never = intent;
-      return exhaustive;
-    }
-  }
-}
-
-/**
- * Whether a key event originates from a control where typing should win over the
- * viewer's shortcuts: text inputs, selects, textareas, and contenteditable hosts.
- * Used as the one focus guard shared by every keyboard handler.
- */
-export function isEditableTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLSelectElement ||
-    target instanceof HTMLTextAreaElement ||
-    (target instanceof HTMLElement && target.isContentEditable === true)
-  );
-}
-
-/**
- * Blur a changed `<select>` so focus returns to the document. A picked dropdown
- * stays focused and {@link isEditableTarget} would then swallow every shortcut,
- * leaving hotkeys dead until the user clicks away (issue #175). Non-select targets
- * (checkboxes, etc.) are left untouched.
- */
-export function releaseSelectFocus(target: EventTarget | null): void {
-  if (target instanceof HTMLSelectElement) target.blur();
-}
-
-/** Whether CSS-pixel point (x, y) lies within a rectangle. */
-function withinRect(rect: PaneRect, x: number, y: number): boolean {
-  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
-}
-
-/** One-line readout: orientation, voxel index, and value (plus raw if rescaled). */
-function formatProbe(
-  name: string,
-  probe: VoxelProbe,
-  volume: Volume,
-  others: ReadonlyArray<{ readonly layer: Layer; readonly sample: VoxelProbe }> = [],
-): string {
-  const [x, y, z] = probe.voxel;
-  const unit = modalityUnit(volume.modality);
-  const value = `${formatValue(probe.value)}${unit ? ` ${unit}` : ''}`;
-  const trivialLut = volume.rescaleSlope === 1 && volume.rescaleIntercept === 0;
-  const stored = trivialLut ? '' : ` · stored ${formatValue(probe.rawValue)}`;
-  // Append each other visible layer read at the same patient point (e.g. dose Gy).
-  const overlays = others
-    .map(({ layer, sample }) => {
-      const u = modalityUnit(layer.modality);
-      return ` · ${layer.modality ?? 'Image'} ${formatValue(sample.value)}${u ? ` ${u}` : ''}`;
-    })
-    .join('');
-  return `${name} · voxel (${x}, ${y}, ${z}) · value ${value}${stored}${overlays}`;
-}
-
-/** Join pane-local points into an SVG polyline `points` string. */
-function polylineOf(points: readonly PanePoint[]): string {
-  return points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-}
-
-/** Midpoint of a point list's first and last points. */
-function midpoint(points: readonly PanePoint[]): PanePoint {
-  const a = points[0];
-  const b = points[points.length - 1];
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
-
-/** Parse a `#rrggbb` colour-input value into [r, g, b] (0–255), or null. */
-function parseHexColor(hex: string | undefined): [number, number, number] | null {
-  if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
-  return [
-    parseInt(hex.slice(1, 3), 16),
-    parseInt(hex.slice(3, 5), 16),
-    parseInt(hex.slice(5, 7), 16),
-  ];
-}
-
-/**
- * An ROI's effective colour as `#rrggbb` for the colour `<input>`: the user's
- * override when set, else the RTSTRUCT display colour (0–255), else a neutral grey.
- */
-function roiColorHex(color: readonly [number, number, number] | null, override?: string): string {
-  if (override) return override;
-  if (!color) return '#c8c8c8';
-  return rgbToHex([color[0] / 255, color[1] / 255, color[2] / 255]);
-}
-
-/**
- * Flatten the structure sets into {@link RoiLegendEntry} rows for the structures
- * panel. ROIs with no contours are skipped (nothing to draw or toggle), and the
- * rows are filtered to the selected structure set (or all of them when
- * `selectedSetIndex` is negative). Each row resolves the effective colour and
- * opacity from the override maps so the panel and the overlays stay in lockstep.
- * Pure, so it can be unit-tested without the component.
- */
-export function buildRoiLegend(
-  structureSets: readonly StructureSet[],
-  hidden: ReadonlySet<string>,
-  colorOverrides: ReadonlyMap<string, string>,
-  opacities: ReadonlyMap<string, number>,
-  selectedSetIndex: number,
-): RoiLegendEntry[] {
-  const entries: RoiLegendEntry[] = [];
-  structureSets.forEach((ss, setIndex) => {
-    if (!setIsShown(selectedSetIndex, setIndex)) return;
-    for (const roi of ss.rois) {
-      if (roi.contours.length === 0) continue; // nothing to draw or toggle
-      const key = roiKeyOf(setIndex, roi.number);
-      const override = colorOverrides.get(key);
-      entries.push({
-        key,
-        setIndex,
-        name: roi.name || `ROI ${roi.number}`,
-        type: roi.interpretedType ? roi.interpretedType.toUpperCase() : '',
-        color: override ?? rgbColor(roi.color),
-        colorHex: roiColorHex(roi.color, override),
-        opacityPercent: Math.round((opacities.get(key) ?? 1) * 100),
-        visible: !hidden.has(key),
-      });
-    }
-  });
-  return entries;
-}
-
-/** A structure set's display label: its Structure Set Label, else its file name, else a fallback. */
-function structureSetLabel(ss: StructureSet | undefined, index: number): string {
-  return ss?.label || ss?.name || `Structure set ${index + 1}`;
-}
-
-/**
- * Group {@link buildRoiLegend} rows by their structure set, preserving order, so
- * the panel can render each set's ROIs under its own label rather than as one
- * flat list (#259). The rows already arrive set-by-set, so one group is opened per
- * new {@link RoiLegendEntry.setIndex}. Pure, so it can be unit-tested.
- */
-export function groupRoiLegend(
-  entries: readonly RoiLegendEntry[],
-  structureSets: readonly StructureSet[],
-): RoiLegendGroup[] {
-  const groups: RoiLegendGroup[] = [];
-  const byIndex = new Map<number, RoiLegendGroup>();
-  for (const entry of entries) {
-    let group = byIndex.get(entry.setIndex);
-    if (!group) {
-      group = {
-        setIndex: entry.setIndex,
-        label: structureSetLabel(structureSets[entry.setIndex], entry.setIndex),
-        entries: [],
-      };
-      byIndex.set(entry.setIndex, group);
-      groups.push(group);
-    }
-    group.entries.push(entry);
-  }
-  return groups;
-}
-
-/**
- * Every drawable ROI's key across the given structure sets (see {@link roiKeyOf}),
- * matching the keys {@link buildRoiLegend} emits. Used to seed {@link hiddenRois}
- * so a freshly loaded structure set starts with its contours hidden (#257).
- */
-export function allRoiKeys(structureSets: readonly StructureSet[]): Set<string> {
-  const keys = new Set<string>();
-  structureSets.forEach((ss, setIndex) => {
-    for (const roi of ss.rois) {
-      if (roi.contours.length === 0) continue; // nothing to draw or toggle
-      keys.add(roiKeyOf(setIndex, roi.number));
-    }
-  });
-  return keys;
 }
 
 function withValue<T>(
@@ -3542,100 +574,4 @@ function withValue<T>(
   const next: [T, T, T] = [...values];
   next[orientation] = value;
   return next;
-}
-
-function middleSlice(renderer: SliceRenderer, orientation: Orientation): number {
-  return Math.floor(renderer.sliceCount(orientation) / 2);
-}
-
-/**
- * The next slice index for cine playback, wrapping at the ends so the loop runs
- * continuously: stepping past the last slice returns to the first, and stepping
- * before the first returns to the last. `step` is the per-tick advance (±1) and
- * `count` the orientation's slice count. A stack of one slice (or none) has
- * nothing to cine, so the index is clamped into range and left there. Exported
- * for unit testing the advance/looping logic.
- */
-export function nextCineIndex(current: number, count: number, step: number): number {
-  if (count <= 1) return clamp(current, 0, Math.max(0, count - 1));
-  return (((current + step) % count) + count) % count;
-}
-
-function describeVolume(result: LoadResult): string {
-  const [x, y, z] = baseLayer(result.layers)!.volume.dims;
-  return `Loaded ${result.sliceCount} slice(s) — volume ${x} × ${y} × ${z}.`;
-}
-
-/**
- * Status line for an in-flight load: files parsed of the total with a percentage
- * once the count is known. Exported for unit testing the wording and rounding.
- */
-export function loadingText(loaded: number, total: number): string {
-  if (total <= 0) return 'Loading…';
-  const percent = Math.round((loaded / total) * 100);
-  return `Loading… ${loaded} / ${total} files (${percent}%)`;
-}
-
-/**
- * Narrow the raw-tag list to those matching a case-insensitive query against the
- * tag id, name, VR, or value. An empty/blank query returns the list unchanged.
- * Exported for direct unit testing of the search behaviour.
- */
-export function filterRawTags(tags: readonly RawTag[], query: string): readonly RawTag[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return tags;
-  return tags.filter(
-    (tag) =>
-      tag.tag.toLowerCase().includes(q) ||
-      (tag.name !== null && tag.name.toLowerCase().includes(q)) ||
-      (tag.vr !== null && tag.vr.toLowerCase().includes(q)) ||
-      tag.value.toLowerCase().includes(q),
-  );
-}
-
-function intValue(event: Event): number {
-  if (!(event.target instanceof HTMLInputElement)) return 0;
-  const parsed = Number(event.target.value);
-  return Number.isFinite(parsed) ? Math.round(parsed) : 0;
-}
-
-/** Clamp a pixel offset to a symmetric ±`max` range (the oblique knob's reach). */
-function clampPx(value: number, max: number): number {
-  return clamp(value, -max, max);
-}
-
-/** A linear RGB triple in [0, 1] as a `#rrggbb` hex string for an `<input type=color>`. */
-function rgbToHex(color: readonly [number, number, number]): string {
-  const hex = (c: number) =>
-    Math.round(clamp(c, 0, 1) * 255)
-      .toString(16)
-      .padStart(2, '0');
-  return `#${hex(color[0])}${hex(color[1])}${hex(color[2])}`;
-}
-
-/** Parse a `#rrggbb` hex string back into a linear RGB triple in [0, 1]. */
-function hexToRgb(hex: string): [number, number, number] {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return [1, 1, 1];
-  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * Warning text for an interpolated volume, or null when interpolation is
- * negligible. Only gaps wider than {@link GAP_WARNING_RATIO}× the slice spacing
- * are flagged, so a single missing slice or sub-voxel jitter stays quiet.
- * Exported for direct unit testing of the threshold and wording.
- */
-export function missingSliceWarning(
-  missing: MissingSlices | undefined,
-  spacingMm: number,
-): string | null {
-  if (!missing || missing.maxGapMm <= GAP_WARNING_RATIO * spacingMm) return null;
-  const slices = missing.count === 1 ? 'slice' : 'slices';
-  const gap = Math.round(missing.maxGapMm);
-  return `${missing.count} missing ${slices} interpolated (largest gap ${gap} mm). Views crossing a gap are reconstructed, not acquired.`;
 }
