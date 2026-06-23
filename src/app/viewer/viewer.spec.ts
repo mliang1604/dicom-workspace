@@ -1,4 +1,5 @@
 import {
+  allRoiKeys,
   buildRoiLegend,
   dropHeadlineText,
   dropIntentOf,
@@ -311,5 +312,45 @@ describe('buildRoiLegend', () => {
 
     expect(legend).toHaveLength(1);
     expect(legend[0]).toMatchObject({ key: '1:1', name: 'Liver' });
+  });
+});
+
+describe('allRoiKeys', () => {
+  const oneContour: Contour[] = [{ geometricType: 'CLOSED_PLANAR', points: [[0, 0, 0]] }];
+
+  const roi = (over: Partial<Roi>): Roi => ({
+    number: 1,
+    name: 'Heart',
+    color: [255, 0, 0],
+    interpretedType: 'ORGAN',
+    contours: oneContour,
+    ...over,
+  });
+
+  const set = (rois: Roi[]): StructureSet => ({
+    name: 'ss.dcm',
+    label: 'Plan',
+    frameOfReferenceUid: 'for-1',
+    referencedSeriesUids: [],
+    rois,
+  });
+
+  it('collects every drawable ROI key, qualified by structure-set index', () => {
+    const keys = allRoiKeys([
+      set([roi({ number: 1 }), roi({ number: 2 })]),
+      set([roi({ number: 1, name: 'Liver' })]),
+    ]);
+
+    expect(keys).toEqual(new Set(['0:1', '0:2', '1:1']));
+  });
+
+  it('skips ROIs that carry no contours, matching the legend', () => {
+    const keys = allRoiKeys([set([roi({ number: 1 }), roi({ number: 2, contours: [] })])]);
+
+    expect(keys).toEqual(new Set(['0:1']));
+  });
+
+  it('is empty when no structure sets are loaded', () => {
+    expect(allRoiKeys([])).toEqual(new Set());
   });
 });

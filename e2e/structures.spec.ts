@@ -64,7 +64,13 @@ test('RTSTRUCT loads, lists ROIs, and the tools pane fits without scrolling', as
     expect(anyTruncated).toBe(false);
   }
 
-  // When WebGPU is available the contours render as SVG overlays on the panes.
+  // Contours start hidden (#257): the user opts them in from the structures
+  // panel. Until then nothing is drawn over the anatomy.
+  await expect(page.locator('.contours polygon, .contours polyline')).toHaveCount(0);
+
+  // Toggling "all structures" on draws every ROI's contours. When WebGPU is
+  // available they render as SVG overlays on the panes.
+  await page.getByLabel('Toggle all structures').check();
   if (await hasWebGpu(page)) {
     await expect(page.locator('.contours polygon, .contours polyline').first()).toBeVisible({
       timeout: 10_000,
@@ -95,6 +101,10 @@ test('builds ROI surface meshes for the 3D pane', async ({ page }) => {
 
   await importAndLoad(page, [...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
   await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
+
+  // Contours (and their lofted surfaces) start hidden (#257); turn them on so
+  // the 3D pane has meshes to build.
+  await page.getByLabel('Toggle all structures').check();
 
   // Cycle to the 3D-only layout (L: 3-pane -> 4-pane -> 3D-only).
   await page.locator('body').click();
