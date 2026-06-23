@@ -2934,7 +2934,15 @@ export class Viewer {
         if (entry) this.recentStore.record(entry);
         return;
       case 'overlay':
-        this.addLayer(outcome.result);
+        // A deformable auto-orient changed which series is the base, so re-base
+        // (reset the view to the new base volume) rather than layering over the old
+        // one; an ordinary overlay keeps the base and its view state.
+        if (outcome.baseChanged) {
+          this.applyVolume(outcome.result);
+          this.flashNotice('Re-oriented: the deformable registration’s fixed image is the base.');
+        } else {
+          this.addLayer(outcome.result);
+        }
         if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
         if (entry) this.recentStore.record({ ...entry, overlay: true });
         return;

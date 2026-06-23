@@ -204,6 +204,14 @@ export interface MergedLoad {
   readonly result: LoadResult;
   /** True when {@link result} added the incoming series as an overlay layer. */
   readonly added: boolean;
+  /**
+   * True when the merge changed which series is the base — deformable auto-orient:
+   * a displacement field can only be sampled with its fixed frame as the base, so
+   * when the *incoming* series is the fixed one it becomes the base and the current
+   * series is warped onto it. The viewer then re-bases (resets the view) rather than
+   * adding a layer over the unchanged base. Absent (falsy) for an ordinary add.
+   */
+  readonly baseChanged?: boolean;
 }
 
 /**
@@ -224,13 +232,21 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   // A registration may arrive with either load (the REG dropped with the moving
   // series, or already loaded), so pool both before deciding alignability.
   const registrations = [...current.registrations, ...incoming.registrations];
-  const baseFrame = selectedSeries(current)?.frameOfReferenceUid ?? null;
-  const overlayFrame = selectedSeries(incoming)?.frameOfReferenceUid ?? null;
-  const alignment = resolveAlignment(baseFrame, overlayFrame, registrations);
-  // A deformable registration links them only when there's no rigid/same-frame
-  // alignment to prefer (rigid is the simpler, exact transform).
-  const deformation =
-    alignment === null ? resolveDeformable(baseFrame, overlayFrame, registrations) : null;
+  const currentFrame = selectedSeries(current)?.frameOfReferenceUid ?? null;
+  const incomingFrame = selectedSeries(incoming)?.frameOfReferenceUid ?? null;
+
+  // Same-frame / rigid keep the dropped base (current); rigid resolves in either
+  // direction by inverting its matrix. A deformable field can only be sampled with
+  // its FIXED frame as the base, so a forward link (current is fixed) overlays as
+  // usual, while a reverse link (the incoming series is the fixed one) auto-orients:
+  // the incoming becomes the base and the current series is warped onto it.
+  const alignment = resolveAlignment(currentFrame, incomingFrame, registrations);
+  const forwardDeform =
+    alignment === null ? resolveDeformable(currentFrame, incomingFrame, registrations) : null;
+  const reverseDeform =
+    alignment === null && forwardDeform === null
+      ? resolveDeformable(incomingFrame, currentFrame, registrations)
+      : null;
 
   // Trace the whole alignment decision: the frames being matched, every pooled
   // registration's frames (the usual culprit when fusion silently refuses), and
@@ -238,25 +254,34 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
   // so the payload is only built when tracing is on.
   const t = trace('merge');
   t?.('alignment inputs', {
-    baseFrame,
-    overlayFrame,
+    baseFrame: currentFrame,
+    overlayFrame: incomingFrame,
     registrations: registrations.map(summarizeRegistration),
     alignment: describeAlignment(alignment),
-    deformation: deformation ? summarizeRegistration(deformation) : null,
+    deformation: forwardDeform ? summarizeRegistration(forwardDeform) : null,
+    reverseDeformation: reverseDeform ? summarizeRegistration(reverseDeform) : null,
   });
 
   // Frames neither match nor are linked by any registration: a different study; replace.
-  if (alignment === null && deformation === null) {
+  if (alignment === null && forwardDeform === null && reverseDeform === null) {
     t?.('replace: frames neither match nor are linked by a registration');
     return { result: incoming, added: false };
   }
+
+  // Orient the fusion: the reverse-deformable case makes the incoming (fixed) the
+  // base and the current series the (warped) overlay; every other case keeps the
+  // dropped base.
+  const swap = reverseDeform !== null;
+  const baseLoad = swap ? incoming : current;
+  const overlayLoad = swap ? current : incoming;
+  const deformation = swap ? reverseDeform : forwardDeform;
 
   // Co-sampling an overlay in the base's patient frame maps each pane pixel
   // through both grids' index→patient affines, so both volumes need geometry;
   // without it (a series with no spatial metadata) they can't be aligned and we
   // fall back to replacing rather than stacking a mis-registered overlay.
-  const baseVolume = baseLayer(current.layers)?.volume;
-  const overlayVolume = baseLayer(incoming.layers)?.volume;
+  const baseVolume = baseLayer(baseLoad.layers)?.volume;
+  const overlayVolume = baseLayer(overlayLoad.layers)?.volume;
   if (!baseVolume?.geometry || !overlayVolume?.geometry) {
     t?.('replace: a volume lacks geometry, cannot co-sample', {
       baseHasGeometry: !!baseVolume?.geometry,
@@ -275,27 +300,29 @@ export function mergeLoad(current: LoadResult, incoming: LoadResult): MergedLoad
     return { result: incoming, added: false };
   }
 
-  const baseOverlay = overlayImageLayer(
-    uniqueLayerId(current.layers, incoming.selectedUid),
+  const overlayBase = overlayImageLayer(
+    uniqueLayerId(baseLoad.layers, overlayLoad.selectedUid),
     overlayVolume,
   );
   // A cross-frame overlay carries its base→overlay transform: a rigid matrix
   // (alignToBase), or a deformable registration (deformation) when only a
   // displacement field links the frames. The same-frame case needs neither
   // (resolveAlignment returns the shared identity constant, detected by reference).
-  let overlay: Layer = baseOverlay;
+  let overlay: Layer = overlayBase;
   if (alignment !== null && alignment !== IDENTITY_MAT4) {
-    overlay = { ...baseOverlay, alignToBase: alignment };
+    overlay = { ...overlayBase, alignToBase: alignment };
   } else if (deformation !== null) {
-    overlay = { ...baseOverlay, deformation };
+    overlay = { ...overlayBase, deformation };
   }
   t?.('added overlay layer', {
     id: overlay.id,
     via: alignment === IDENTITY_MAT4 ? 'same-frame' : alignment !== null ? 'rigid' : 'deformable',
+    baseChanged: swap,
   });
   return {
-    result: { ...current, layers: [...current.layers, overlay], registrations },
+    result: { ...baseLoad, layers: [...baseLoad.layers, overlay], registrations },
     added: true,
+    baseChanged: swap,
   };
 }
 
