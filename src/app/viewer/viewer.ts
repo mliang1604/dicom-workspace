@@ -621,9 +621,10 @@ export class Viewer {
   /** Whether any measurement (placed or in-progress) exists, for the Clear button. */
   protected readonly hasMeasurements = this.measure.hasMeasurements;
   /**
-   * Keys of ROIs whose contours are hidden (see {@link roiKeyOf}). Empty by default,
-   * so a freshly loaded structure set shows every ROI; the structures legend
-   * toggles entries in and out. Reset on each load (stale keys never match).
+   * Keys of ROIs whose contours are hidden (see {@link roiKeyOf}). A freshly
+   * loaded structure set starts with every ROI hidden (#257), so the user opts
+   * contours in from the structures legend rather than having them drawn over the
+   * anatomy unbidden. Reset on each load to that set's keys (stale keys never match).
    */
   private readonly hiddenRois = signal<ReadonlySet<string>>(new Set());
   /**
@@ -3124,7 +3125,7 @@ export class Viewer {
     const volume = baseLayer(result.layers)!.volume;
     this.cine.stop(); // a fresh volume resets the view; don't keep cining the old one
     renderer.setVolume(volume);
-    this.resetViewForVolume(renderer, volume);
+    this.resetViewForVolume(renderer, volume, result);
     this.load.set({ status: 'ready', result });
   }
 
@@ -3137,7 +3138,7 @@ export class Viewer {
    * (layout, projection mode, sagittal flip) are deliberately *not* reset; window/
    * level and slab honour a stored preference when present, else the volume default.
    */
-  private resetViewForVolume(renderer: SliceRenderer, volume: Volume): void {
+  private resetViewForVolume(renderer: SliceRenderer, volume: Volume, result: LoadResult): void {
     const prefs = this.preferencesStore.preferences();
     const fullDepthMm = Math.round(2 * volumeBounds(volume).radius);
     this.windowCenter.set(prefs.windowCenter ?? Math.round(volume.windowCenter));
@@ -3150,7 +3151,7 @@ export class Viewer {
     this.activeTool.set('none');
     this.measure.clear();
     this.measure.endDrag();
-    this.hiddenRois.set(new Set()); // a fresh structure set starts fully visible
+    this.hiddenRois.set(allRoiKeys(result.structureSets)); // contours start hidden (#257)
     this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
     this.roiOpacities.set(new Map()); // …fully opaque
     // A fresh base load drops any layers-panel edits (overlays load at their defaults).
@@ -3460,6 +3461,22 @@ export function buildRoiLegend(
     }
   });
   return entries;
+}
+
+/**
+ * Every drawable ROI's key across the given structure sets (see {@link roiKeyOf}),
+ * matching the keys {@link buildRoiLegend} emits. Used to seed {@link hiddenRois}
+ * so a freshly loaded structure set starts with its contours hidden (#257).
+ */
+export function allRoiKeys(structureSets: readonly StructureSet[]): Set<string> {
+  const keys = new Set<string>();
+  structureSets.forEach((ss, setIndex) => {
+    for (const roi of ss.rois) {
+      if (roi.contours.length === 0) continue; // nothing to draw or toggle
+      keys.add(roiKeyOf(setIndex, roi.number));
+    }
+  });
+  return keys;
 }
 
 function withValue<T>(
