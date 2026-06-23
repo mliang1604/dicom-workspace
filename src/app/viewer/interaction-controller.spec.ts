@@ -146,9 +146,25 @@ describe('InteractionController', () => {
   afterEach(() => TestBed.resetTestingModule());
 
   describe('onPointerDown drag-kind dispatch', () => {
-    it('starts a windowLevel drag on a right-button press', () => {
+    it('starts a zoom drag on a plain right-button press over an MPR pane', () => {
       const { controller } = setup();
       controller.onPointerDown(pointer({ button: 2, clientX: 50, clientY: 50 }));
+      expect(controller.drag()).toMatchObject({
+        kind: 'zoom',
+        orientation: Orientation.Axial,
+        group: 0,
+      });
+    });
+
+    it('starts a camera zoom drag on a plain right-button press over the 3D pane', () => {
+      const { controller } = setup();
+      controller.onPointerDown(pointer({ button: 2, clientX: 150, clientY: 50 }));
+      expect(controller.drag()).toMatchObject({ kind: 'cameraZoom' });
+    });
+
+    it('starts a windowLevel drag on an Alt+right-button press', () => {
+      const { controller } = setup();
+      controller.onPointerDown(pointer({ button: 2, altKey: true, clientX: 50, clientY: 50 }));
       expect(controller.drag()).toMatchObject({ kind: 'windowLevel', layerId: null });
     });
 
@@ -224,12 +240,30 @@ describe('InteractionController', () => {
       expect(camera().elevation).toBeCloseTo(10 * 0.01);
     });
 
-    it('maps a windowLevel drag onto the target window', () => {
+    it('maps an Alt+right windowLevel drag onto the target window', () => {
       const { controller, fns } = setup();
-      controller.onPointerDown(pointer({ button: 2, clientX: 50, clientY: 50 }));
+      controller.onPointerDown(pointer({ button: 2, altKey: true, clientX: 50, clientY: 50 }));
       controller.onPointerMove(pointer({ clientX: 70, clientY: 30 }));
       expect(fns.setLayerWindow).toHaveBeenCalledOnce();
       expect(fns.markMipSettling).toHaveBeenCalled();
+    });
+
+    it('zooms an MPR pane on a right-drag, anchored on the press point', () => {
+      const { controller, fns } = setup();
+      controller.onPointerDown(pointer({ button: 2, clientX: 50, clientY: 50 }));
+      controller.onPointerMove(pointer({ clientX: 50, clientY: 30 })); // drag up: zoom in
+      expect(fns.setMasterZoom).toHaveBeenCalledWith(Orientation.Axial, expect.any(Number));
+      const [, zoom] = fns.setMasterZoom!.mock.calls.at(-1)!;
+      expect(zoom).toBeGreaterThan(1); // dragging up magnifies
+      expect(fns.setMasterPan).toHaveBeenCalled();
+      expect(fns.setMasterSlice).not.toHaveBeenCalled();
+    });
+
+    it('zooms the 3D camera on a right-drag over the 3D pane', () => {
+      const { controller, camera } = setup();
+      controller.onPointerDown(pointer({ button: 2, clientX: 150, clientY: 50 }));
+      controller.onPointerMove(pointer({ clientX: 150, clientY: 30 })); // drag up: zoom in
+      expect(camera().zoom).toBeGreaterThan(1);
     });
 
     it('clears the hover when the pointer is off every pane', () => {
@@ -259,14 +293,13 @@ describe('InteractionController', () => {
       expect(fns.setMasterSlice).toHaveBeenCalledWith(Orientation.Axial, 6);
     });
 
-    it('zooms the pane (not the slice) on a Ctrl+wheel over an MPR pane', () => {
+    it('scrolls (does not zoom) on a Ctrl+wheel over an MPR pane', () => {
       const { controller, fns } = setup();
       controller.onWheel(
-        pointer({ clientX: 50, clientY: 50, deltaY: -120, ctrlKey: true }) as unknown as WheelEvent,
+        pointer({ clientX: 50, clientY: 50, deltaY: 120, ctrlKey: true }) as unknown as WheelEvent,
       );
-      expect(fns.setMasterZoom).toHaveBeenCalledWith(Orientation.Axial, expect.any(Number));
-      expect(fns.setMasterPan).toHaveBeenCalledOnce();
-      expect(fns.setMasterSlice).not.toHaveBeenCalled();
+      expect(fns.setMasterSlice).toHaveBeenCalledWith(Orientation.Axial, 6);
+      expect(fns.setMasterZoom).not.toHaveBeenCalled();
     });
 
     it('zooms the 3D camera on a wheel over the 3D pane', () => {
@@ -277,7 +310,7 @@ describe('InteractionController', () => {
       expect(camera().zoom).toBeCloseTo(1.1);
     });
 
-    it('routes scroll and zoom to the independent group when unlinked', () => {
+    it('routes scroll to the independent group when unlinked', () => {
       const { controller, fns } = setup({
         groupIsIndependent: () => true,
         groupSliceIndex: () => 1,
@@ -287,6 +320,21 @@ describe('InteractionController', () => {
       );
       expect(fns.setGroupSlice).toHaveBeenCalledWith(0, Orientation.Axial, 2);
       expect(fns.setMasterSlice).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('right-drag zoom routing', () => {
+    it('routes a right-drag zoom to the independent group when unlinked', () => {
+      const { controller, fns } = setup({ groupIsIndependent: () => true });
+      controller.onPointerDown(pointer({ button: 2, clientX: 50, clientY: 50 }));
+      controller.onPointerMove(pointer({ clientX: 50, clientY: 30 }));
+      expect(fns.setGroupZoomPan).toHaveBeenCalledWith(
+        0,
+        Orientation.Axial,
+        expect.any(Number),
+        expect.any(Object),
+      );
+      expect(fns.setMasterZoom).not.toHaveBeenCalled();
     });
   });
 });

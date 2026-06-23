@@ -40,6 +40,32 @@ export type Drag =
   | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
   | { readonly kind: 'cameraPan'; readonly lastX: number; readonly lastY: number }
   | {
+      readonly kind: 'zoom';
+      readonly orientation: Orientation;
+      /** Compare-group the zoomed pane belongs to (0 outside Compare). */
+      readonly group: number;
+      /** Canvas-relative press point the zoom pivots on (held fixed across the drag). */
+      readonly anchorX: number;
+      readonly anchorY: number;
+      /** Pointer Y when the drag began; vertical travel sets the magnification. */
+      readonly startY: number;
+      /** Zoom and pan when the drag began — the baseline the pivot re-zooms from. */
+      readonly startZoom: number;
+      readonly startPan: Vec2;
+    }
+  | {
+      readonly kind: 'cameraZoom';
+      /** Centred device coords (+y up) of the press point the 3D zoom pivots on. */
+      readonly ndcX: number;
+      readonly ndcY: number;
+      /** Pointer Y when the drag began; vertical travel sets the magnification. */
+      readonly startY: number;
+      /** Camera zoom and in-plane pan when the drag began — the pivot baseline. */
+      readonly startZoom: number;
+      readonly startPanX: number;
+      readonly startPanY: number;
+    }
+  | {
       readonly kind: 'clipPlane';
       /** Cut-plane offset (mm) when the drag began. */
       readonly startOffset: number;
@@ -72,8 +98,14 @@ export type Drag =
       readonly startTiltV: number;
     };
 
-/** Magnification factor applied per wheel notch when Ctrl+wheel zooming a pane. */
+/** Magnification factor applied per wheel notch when zooming the 3D camera. */
 const ZOOM_STEP = 1.1;
+/**
+ * Magnification per pixel of vertical travel for a right-drag zoom: the factor is
+ * `exp(pixelsUp * ZOOM_DRAG_SPEED)`, so dragging up magnifies and down shrinks. A
+ * pane-height drag (~500 px) spans roughly the full zoom range.
+ */
+const ZOOM_DRAG_SPEED = 0.005;
 /** Radians of orbit per pixel dragged over the 3D pane. */
 const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
@@ -183,9 +215,10 @@ export interface InteractionInit {
 /**
  * Owns the canvas pointer/wheel interaction state machine: the in-progress
  * {@link Drag} and the down/move/up/leave + wheel orchestration that pans/orbits
- * the panes, drives window/level, scrolls slices, and zooms (MPR Ctrl+wheel and
- * the 3D camera). The regression-prone slice-step and cursor-anchored zoom math
- * lives behind tested pure helpers in `src/render`; this stays the branchy glue.
+ * the panes, drives window/level (Alt+right-drag), scrolls slices, and zooms
+ * (right-drag on the MPR panes and the 3D camera, plus the 3D wheel). The
+ * regression-prone slice-step and cursor-anchored zoom math lives behind tested
+ * pure helpers in `src/render`; this stays the branchy glue.
  *
  * The component wires it up once via {@link init} with lazy callbacks and
  * delegates the canvas DOM handlers here. The {@link drag} signal is exposed so
@@ -218,12 +251,12 @@ export class InteractionController {
     const placement = d.placementAt(event);
     if (!placement) return;
 
-    // Right-button drag adjusts window/level over any pane — the standard PACS
-    // gesture, picked because it never clashes with the left-button pan/orbit or
-    // the Ctrl+wheel zoom. Horizontal moves the centre, vertical the width (see
-    // dragWindow). It targets the pane's own column: the overlay layer over a
-    // Compare overlay column, the base elsewhere. The context menu is suppressed below.
-    if (event.button === 2) {
+    // Alt+right-drag adjusts window/level over any pane — the standard PACS W/L
+    // gesture, moved onto Alt so the plain right-drag is free for zoom. Horizontal
+    // moves the centre, vertical the width (see dragWindow). It targets the pane's
+    // own column: the overlay layer over a Compare overlay column, the base
+    // elsewhere. The context menu is suppressed below.
+    if (event.button === 2 && event.altKey) {
       event.preventDefault();
       d.canvas().setPointerCapture(event.pointerId);
       const layer = this.wlTargetForPlacement(placement);
@@ -236,6 +269,44 @@ export class InteractionController {
         startX: event.clientX,
         startY: event.clientY,
       });
+      return;
+    }
+
+    // Plain right-drag zooms, anchored on the press point so the structure under
+    // the cursor stays put — the gesture that replaced the old Ctrl+wheel zoom.
+    // Dragging up magnifies, down shrinks (see dragZoom / dragCameraZoom). Over an
+    // MPR pane it scales that view's zoom/pan; over the 3D pane it scales the
+    // orthographic camera. The context menu is suppressed below.
+    if (event.button === 2) {
+      event.preventDefault();
+      d.canvas().setPointerCapture(event.pointerId);
+      const bounds = d.canvas().getBoundingClientRect();
+      const anchorX = event.clientX - bounds.left;
+      const anchorY = event.clientY - bounds.top;
+      if (placement.kind === 'mip') {
+        const cam = d.camera3d();
+        this.drag.set({
+          kind: 'cameraZoom',
+          // Press point → centred device coords with +y up, matching the raycaster.
+          ndcX: ((anchorX - placement.rect.x) / placement.rect.width) * 2 - 1,
+          ndcY: 1 - ((anchorY - placement.rect.y) / placement.rect.height) * 2,
+          startY: event.clientY,
+          startZoom: cam.zoom,
+          startPanX: cam.panX,
+          startPanY: cam.panY,
+        });
+      } else {
+        this.drag.set({
+          kind: 'zoom',
+          orientation: placement.orientation,
+          group: placement.group,
+          anchorX,
+          anchorY,
+          startY: event.clientY,
+          startZoom: d.paneZoom(placement.group, placement.orientation),
+          startPan: d.panePan(placement.group, placement.orientation),
+        });
+      }
       return;
     }
 
@@ -265,7 +336,7 @@ export class InteractionController {
 
     // Shift+left-click sets the shared focus voxel and navigates every pane to it,
     // instead of starting a pan/orbit — a modifier that never clashes with the
-    // plain left-drag or the right-drag W/L. Over an MPR pane it probes the slice;
+    // plain left-drag or the right-drag zoom. Over an MPR pane it probes the slice;
     // over the 3D pane it ray-casts the projection to the location it came from.
     if (event.shiftKey) {
       if (placement.kind === 'mpr') d.setFocus(placement, event);
@@ -296,7 +367,7 @@ export class InteractionController {
     );
   }
 
-  /** Suppress the browser context menu so right-button W/L drags work. */
+  /** Suppress the browser context menu so right-button zoom / W/L drags work. */
   onContextMenu(event: Event): void {
     if (this.deps?.isReady()) event.preventDefault();
   }
@@ -308,6 +379,8 @@ export class InteractionController {
     if (drag?.kind === 'pan') this.dragPan(event, drag);
     else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
     else if (drag?.kind === 'cameraPan') this.dragCameraPan(event, drag);
+    else if (drag?.kind === 'zoom') this.dragZoom(event, drag);
+    else if (drag?.kind === 'cameraZoom') this.dragCameraZoom(event, drag);
     else if (drag?.kind === 'windowLevel') this.dragWindow(event, drag);
 
     const bounds = d.canvas().getBoundingClientRect();
@@ -413,8 +486,8 @@ export class InteractionController {
 
   /**
    * The layer a window/level gesture over a pane targets: the overlay layer for a
-   * Compare overlay column (group ≥ 1), the base otherwise — so right-dragging the
-   * right column windows only that column. Mirrors `activeWlLayer`, but keyed to a
+   * Compare overlay column (group ≥ 1), the base otherwise — so Alt+right-dragging
+   * the right column windows only that column. Mirrors `activeWlLayer`, but keyed to a
    * specific pane rather than the hovered one.
    */
   private wlTargetForPlacement(placement: PanePlacement): Layer | null {
@@ -446,8 +519,9 @@ export class InteractionController {
   }
 
   /**
-   * Wheel over an MPR pane scrolls its slices (Ctrl+wheel zooms it); wheel over
-   * the 3D pane zooms the orbit camera.
+   * Wheel over an MPR pane scrolls its slices; wheel over the 3D pane zooms the
+   * orbit camera. MPR zoom now lives on the right-drag gesture (see dragZoom), so
+   * the wheel is unmodified slice scroll over the MPR panes.
    */
   onWheel(event: WheelEvent): void {
     const d = this.deps;
@@ -462,12 +536,6 @@ export class InteractionController {
         x: event.clientX - bounds.left,
         y: event.clientY - bounds.top,
       });
-    } else if (event.ctrlKey) {
-      const bounds = d.canvas().getBoundingClientRect();
-      this.zoomPane(placement, event.deltaY, {
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
-      });
     } else {
       this.scrollSlice(placement, event.deltaY);
     }
@@ -476,7 +544,7 @@ export class InteractionController {
   /**
    * Wheel over the 3D pane magnifies (scroll up) or shrinks the MIP, anchoring
    * the zoom on the cursor: the structure under the pointer stays roughly fixed,
-   * matching the MPR panes' Ctrl+wheel zoom. The orbit camera's `zoom` changes and
+   * matching the MPR panes' right-drag zoom. The orbit camera's `zoom` changes and
    * its in-plane pan shifts to hold the cursor's world point in place.
    */
   private zoomCamera(deltaY: number, rect: PaneRect, cursor: Vec2): void {
@@ -523,33 +591,39 @@ export class InteractionController {
     if (next !== current) d.setMasterSlice(orientation, next);
   }
 
-  private zoomPane(
-    placement: Extract<PanePlacement, { kind: 'mpr' }>,
-    deltaY: number,
-    cursor: Vec2,
-  ): void {
+  /**
+   * Map a right-drag over an MPR pane onto its zoom: vertical travel from the
+   * press sets a cumulative magnification (up zooms in), and the zoom pivots on the
+   * fixed press point so the structure under it stays put. Both the magnification
+   * and the pan are recomputed from the drag's baseline zoom/pan each move, so the
+   * gesture tracks total displacement and never drifts. Then re-clamp the pan,
+   * since its bound scales with zoom (see cursorZoomPan).
+   */
+  private dragZoom(event: PointerEvent, drag: Extract<Drag, { kind: 'zoom' }>): void {
     const d = this.deps!;
-    if (deltaY === 0) return;
-    const { group, orientation } = placement;
-    const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    const from = d.paneZoom(group, orientation);
-    const to = d.clampZoom(from * factor);
-    if (to === from) return;
-
+    const { group, orientation } = drag;
+    const placement = d
+      .panes()
+      .find(
+        (pane) => pane.kind === 'mpr' && pane.group === group && pane.orientation === orientation,
+      );
     const independent = d.groupIsIndependent(group);
     const volume = independent ? d.groupVolume(group) : d.volume();
-    if (!volume || placement.rect.width < 1 || placement.rect.height < 1) return;
-    // Pivot the zoom on the cursor, not the image centre: holding the plane point
-    // under the cursor fixed keeps the spot being inspected in place. Then re-clamp,
-    // since the pan bound scales with zoom (see cursorZoomPan).
+    if (!placement || !volume || placement.rect.width < 1 || placement.rect.height < 1) return;
+
+    const factor = Math.exp((drag.startY - event.clientY) * ZOOM_DRAG_SPEED); // up zooms in
+    const to = d.clampZoom(drag.startZoom * factor);
     const pan = cursorZoomPan(
       volume,
       orientation,
       placement.rect,
-      from,
+      drag.startZoom,
       to,
-      d.panePan(group, orientation),
-      cursor,
+      drag.startPan,
+      {
+        x: drag.anchorX,
+        y: drag.anchorY,
+      },
     );
 
     if (independent) d.setGroupZoomPan(group, orientation, to, pan);
@@ -557,6 +631,35 @@ export class InteractionController {
       d.setMasterZoom(orientation, to);
       d.setMasterPan(orientation, pan);
     }
+  }
+
+  /**
+   * Map a right-drag over the 3D pane onto the orthographic camera's zoom: vertical
+   * travel from the press sets a cumulative magnification (up zooms in), pivoting on
+   * the fixed press point so the structure under it stays put. Mirrors the MPR
+   * dragZoom but drives the camera; recomputed from the drag's baseline each move.
+   */
+  private dragCameraZoom(event: PointerEvent, drag: Extract<Drag, { kind: 'cameraZoom' }>): void {
+    const d = this.deps!;
+    const volume = d.volume();
+    const mip = d.panes().find((pane) => pane.kind === 'mip');
+    if (!volume || !mip || mip.rect.width < 1 || mip.rect.height < 1) return;
+
+    const factor = Math.exp((drag.startY - event.clientY) * ZOOM_DRAG_SPEED); // up zooms in
+    const to = d.clampZoom(drag.startZoom * factor);
+    const cam = d.camera3d();
+    const from = { ...cam, zoom: drag.startZoom, panX: drag.startPanX, panY: drag.startPanY };
+    const { panX, panY } = rezoomCameraPan(
+      volume,
+      from,
+      mip.rect.width,
+      mip.rect.height,
+      to,
+      drag.ndcX,
+      drag.ndcY,
+    );
+    d.camera3d.set({ ...cam, zoom: to, panX, panY });
+    d.markMipSettling();
   }
 
   /** The pane under a canvas-relative point, for hover tracking. */

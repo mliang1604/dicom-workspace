@@ -6,8 +6,9 @@ Guidance for agents and contributors working in this repo.
 
 An Angular 22 (standalone, zoneless) WebGPU DICOM **MPR viewer**: it loads a
 DICOM series into a single 3D volume and draws axial, coronal, and sagittal
-slices into one `<canvas>`, with drag-to-pan, Ctrl+wheel zoom, wheel-scroll
-through slices, window/level controls, and a live voxel probe.
+slices into one `<canvas>`, with drag-to-pan, right-drag zoom (anchored on the
+cursor), wheel-scroll through slices, Alt+right-drag window/level, and a live
+voxel probe.
 
 ## Layout
 
