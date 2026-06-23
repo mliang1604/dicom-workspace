@@ -238,7 +238,8 @@ export function describeDeformationCoverage(
     p1[1] + disp[1],
     p1[2] + disp[2],
   ]);
-  const toOverlay = patientToTexRowMajor(resolveGeometry(overlay), overlay.dims);
+  const overlayGeom = resolveGeometry(overlay);
+  const toOverlay = patientToTexRowMajor(overlayGeom, overlay.dims);
   const ocoord = toOverlay ? transformPoint(toOverlay, pMoving) : null;
 
   let maxVectorMm = 0;
@@ -250,15 +251,24 @@ export function describeDeformationCoverage(
   const round = (v: Vec3 | null): number[] | null =>
     v ? v.map((c) => Math.round(c * 100) / 100) : null;
   const inUnit = (v: Vec3 | null): boolean => v !== null && v.every((c) => c >= 0 && c <= 1);
-  const translation = (m: Mat4): number[] => round([m[3], m[7], m[11]]) ?? [];
+  const roundArr = (a: readonly number[]): number[] => a.map((c) => Math.round(c * 10000) / 10000);
+  const geomSummary = (geo: VolumeGeometry, dims: readonly [number, number, number]) => ({
+    origin: roundArr(geo.origin),
+    iStep: roundArr(geo.iStep),
+    jStep: roundArr(geo.jStep),
+    kStep: roundArr(geo.kStep),
+    dims,
+  });
 
   return {
     gridDims: reg.grid.dims,
     gridSpacingMm: reg.grid.spacing,
     gridOrigin: round(reg.grid.origin),
     maxVectorMm: Math.round(maxVectorMm * 100) / 100,
-    preTranslationMm: translation(reg.preMatrix),
-    postTranslationMm: translation(reg.postMatrix),
+    preMatrix: roundArr(reg.preMatrix),
+    postMatrix: roundArr(reg.postMatrix),
+    baseGeometry: geomSummary(g, base.dims),
+    overlayGeometry: geomSummary(overlayGeom, overlay.dims),
     baseCentrePatient: round(centre),
     fieldTexCoord: round(fuv),
     fieldCoversCentre: inUnit(fuv),
