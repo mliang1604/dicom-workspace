@@ -763,8 +763,16 @@ export class Viewer {
    * the drop overlay's hint follows the key as it's pressed or released mid-drag.
    */
   protected readonly dropIntent = signal<DropIntent>('primary');
-  /** The drop-overlay headline for the modifier currently held (see {@link dropIntent}). */
-  protected readonly dropHeadline = computed(() => dropHeadlineText(this.dropIntent()));
+  /**
+   * Whether the in-progress drag is a history-panel series chip (vs. dropped
+   * files). A chip drop replaces the view; a plain file drop only catalogues into
+   * the history (#241), so the drop-overlay headline reads differently for each.
+   */
+  protected readonly draggingSeries = signal(false);
+  /** The drop-overlay headline for the modifier held and the drag's kind (see {@link dropIntent}). */
+  protected readonly dropHeadline = computed(() =>
+    dropHeadlineText(this.dropIntent(), this.draggingSeries()),
+  );
   /**
    * Host-adapted modifier labels for the drop-hint spans — macOS glyphs (`⌥`,
    * `⇧`) on a Mac, words (`Alt`, `Shift`) elsewhere — so the hint reads as the
@@ -1414,7 +1422,11 @@ export class Viewer {
     const state = this.load();
     switch (state.status) {
       case 'idle':
-        return 'Open a DICOM folder or files to begin.';
+        // After an import nothing auto-loads (#241): point the user at the history
+        // panel; before any import, prompt them to open files.
+        return this.catalog.currentPatient()
+          ? 'Pick a series from the history below to view it.'
+          : 'Open a DICOM folder or files to begin.';
       case 'loading':
         return loadingText(state.loaded, state.total);
       case 'ready':
@@ -2836,6 +2848,7 @@ export class Viewer {
     if (!isLoadableDrag(event)) return;
     this.dragDepth++;
     this.dropIntent.set(dropIntentOf(event));
+    this.draggingSeries.set(hasSeriesDrag(event));
     this.isDraggingFiles.set(true);
   }
 
@@ -2846,6 +2859,7 @@ export class Viewer {
     // `dragover` fires continuously with the live modifier state, so the overlay
     // hint follows ⌥/⇧ as they're pressed or released without moving the pointer.
     this.dropIntent.set(dropIntentOf(event));
+    this.draggingSeries.set(hasSeriesDrag(event));
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
   }
 
@@ -2856,6 +2870,7 @@ export class Viewer {
     if (this.dragDepth === 0) {
       this.isDraggingFiles.set(false);
       this.dropIntent.set('primary');
+      this.draggingSeries.set(false);
     }
   }
 
@@ -2871,6 +2886,7 @@ export class Viewer {
     this.dragDepth = 0;
     this.isDraggingFiles.set(false);
     this.dropIntent.set('primary');
+    this.draggingSeries.set(false);
     if (!event.dataTransfer) return;
     const intent = dropIntentOf(event);
     const seriesUid = event.dataTransfer.getData(SERIES_DND_MIME);
@@ -2926,6 +2942,12 @@ export class Viewer {
         this.addLayer(outcome.result);
         if (outcome.compare) this.layoutMode.set(LayoutMode.Compare);
         if (entry) this.recentStore.record({ ...entry, overlay: true });
+        return;
+      case 'imported':
+        // A plain import is catalogued but not shown (#241): leave the viewport to
+        // the user's history pick. A confirmed patient switch unloads the stale view.
+        if (outcome.cleared) this.clearView();
+        if (entry) this.recentStore.record(entry);
         return;
       case 'reject':
         this.load.set(previous); // leave what was showing untouched
@@ -3647,6 +3669,24 @@ export class Viewer {
     this.load.set({ status: 'ready', result });
   }
 
+  /**
+   * Unload everything from the viewport, returning it to the idle/empty state
+   * (#241). The patient catalog and history panel are kept — only the displayed
+   * volume, its fusion overlays and the per-view annotations (measurements, ROIs,
+   * focus, active tool) are dropped — so the user can re-pick a series. Invoked by
+   * the toolbar's Unload control and by a confirmed patient switch, which retires
+   * the previous patient's now-stale view.
+   */
+  protected clearView(): void {
+    this.stopCine();
+    this.measure.clear();
+    this.measure.endDrag();
+    this.activeTool.set('none');
+    this.focusVoxel.set(null);
+    this.layerStore.reset();
+    this.load.set({ status: 'idle' });
+  }
+
   private applyVolume(result: LoadResult): void {
     const renderer = this.renderer();
     if (!renderer) {
@@ -3874,15 +3914,19 @@ export function dropIntentOf(modifiers: { altKey: boolean; shiftKey: boolean }):
   return 'primary';
 }
 
-/** Drop-overlay headline reflecting what the held modifier will do on release. */
-export function dropHeadlineText(intent: DropIntent): string {
+/**
+ * Drop-overlay headline reflecting what the held modifier will do on release.
+ * `isSeriesDrag` distinguishes a dragged history chip (replaces the view) from a
+ * plain file/folder drop, which now only catalogues into the history (#241).
+ */
+export function dropHeadlineText(intent: DropIntent, isSeriesDrag = true): string {
   switch (intent) {
     case 'overlay':
       return 'Drop to fuse as an overlay';
     case 'compare':
       return 'Drop to add a compare column';
     case 'primary':
-      return 'Drop to load as primary';
+      return isSeriesDrag ? 'Drop to load as primary' : 'Drop to add to the history';
     default: {
       const exhaustive: never = intent;
       return exhaustive;

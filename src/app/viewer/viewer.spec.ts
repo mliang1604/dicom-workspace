@@ -186,6 +186,12 @@ describe('dropHeadlineText', () => {
     expect(dropHeadlineText('overlay')).toBe('Drop to fuse as an overlay');
     expect(dropHeadlineText('compare')).toBe('Drop to add a compare column');
   });
+
+  it('reads as cataloguing into history for a plain file drop, not a chip (#241)', () => {
+    expect(dropHeadlineText('primary', false)).toBe('Drop to add to the history');
+    // A held modifier on a file drop still fuses against the current view.
+    expect(dropHeadlineText('overlay', false)).toBe('Drop to fuse as an overlay');
+  });
 });
 
 describe('buildRoiLegend', () => {

@@ -96,6 +96,15 @@
   <div class="toolbar-end">
     <button
       type="button"
+      (click)="clearView()"
+      [disabled]="!isReady()"
+      title="Unload the current series from the viewport — the history panel is kept so you can re-pick"
+    >
+      Unload ⏏
+    </button>
+
+    <button
+      type="button"
       (click)="toggleInfoPanel()"
       [disabled]="!isReady() || !metadata()"
       [class.active]="infoPanelOpen()"

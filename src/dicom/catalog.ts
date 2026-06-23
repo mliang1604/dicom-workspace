@@ -182,17 +182,54 @@ export function importKeepsOnePatient(
 }
 
 /**
- * The series to show first after a fresh patient import: the largest series (most
- * images) of the most recent study, so the opening view is the primary
- * acquisition of the latest examination rather than an arbitrary scout. Studies
- * are ordered by {@link groupStudies} along the ascending timeline (undated
- * last), so the most recent is its final entry. Returns undefined only for an
- * empty batch; callers with a known-non-empty import can assert the result.
+ * Modalities that carry no primary image and so must never open as the base
+ * series: the RT ancillary objects (dose grid, structure set, plan, treatment
+ * record) and the secondary / derived objects (registration, segmentation,
+ * presentation state, structured report, key-object selection). An RTDOSE grid
+ * in particular builds a perfectly valid {@link import('./volume').Volume}, so
+ * without excluding it the largest-series heuristic can promote the dose to the
+ * primary view (#241) — it belongs above a CT as a fusion overlay, not as the
+ * base. An unknown / absent modality is treated as a candidate, so a novel
+ * image modality still opens.
+ */
+const NON_PRIMARY_MODALITIES: ReadonlySet<string> = new Set([
+  'RTDOSE',
+  'RTSTRUCT',
+  'RTPLAN',
+  'RTRECORD',
+  'REG',
+  'SEG',
+  'PR',
+  'SR',
+  'KO',
+]);
+
+/**
+ * Whether a series can open as the primary base image — i.e. it isn't one of the
+ * RT/derived ancillary objects ({@link NON_PRIMARY_MODALITIES}). Used to keep a
+ * dose grid (and structures/plan) out of the initial-selection heuristic.
+ */
+export function isPrimarySeries(series: Series): boolean {
+  return series.modality === null || !NON_PRIMARY_MODALITIES.has(series.modality);
+}
+
+/**
+ * The series to show first after a fresh patient import: the largest image series
+ * (most images) of the most recent study, so the opening view is the primary
+ * acquisition of the latest examination rather than an arbitrary scout — or a
+ * dose grid (#241). Studies are ordered by {@link groupStudies} along the
+ * ascending timeline (undated last), so the most recent is its final entry; its
+ * RT/derived objects ({@link isPrimarySeries}) are skipped, falling back to the
+ * largest of all the study's series when it holds nothing but ancillary objects.
+ * Returns undefined only for an empty batch; callers with a known-non-empty
+ * import can assert the result.
  */
 export function initialImportSeries(series: readonly Series[]): Series | undefined {
   if (series.length === 0) return undefined;
   const studies = groupStudies(series);
-  return largestSeries(studies[studies.length - 1].series);
+  const latest = studies[studies.length - 1].series;
+  const candidates = latest.filter(isPrimarySeries);
+  return largestSeries(candidates.length > 0 ? candidates : latest);
 }
 
 /** The distinct, non-null modalities across a study's series, in encounter order. */
