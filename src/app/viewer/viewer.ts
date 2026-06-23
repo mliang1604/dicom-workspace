@@ -133,6 +133,7 @@ import { modifierLabel } from '../platform';
 import { MeasurementStore, TOOL_POINTS, type MeasureTool } from './measurement-store';
 import { LayersStore, layerLegend, type LayerLegendEntry } from './layers-store';
 import { Camera3dStore } from './camera3d-store';
+import { CineStore } from './cine-store';
 import { CompareStore, COMPARE_GROUPS, type GroupNav } from './compare-store';
 import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coordinator';
 import { readDropped } from './drop-files';
@@ -421,8 +422,6 @@ const MAX_ZOOM = 20;
 
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
-/** Default cine playback speed (fps), used until the user picks another. */
-const DEFAULT_CINE_FPS = 15;
 
 /** WebM containers tried, most-preferred first, for the 3D rotation capture. */
 const VIDEO_MIME_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'] as const;
@@ -472,7 +471,14 @@ const NOTICE_MS = 3600;
   selector: 'app-viewer',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [RangeFill, HistoryPanel],
-  providers: [MeasurementStore, LayersStore, Camera3dStore, CompareStore, LoadCoordinator],
+  providers: [
+    MeasurementStore,
+    LayersStore,
+    Camera3dStore,
+    CineStore,
+    CompareStore,
+    LoadCoordinator,
+  ],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
   host: {
@@ -700,14 +706,16 @@ export class Viewer {
     { keys: 'Knob drag', label: 'Tilt an MPR pane to an oblique plane (double-click resets)' },
     { keys: 'Right-drag', label: 'Adjust window / level' },
   ] as const;
+  /** Cine playback state/logic; provided per-component (see providers). */
+  private readonly cine = inject(CineStore);
+  // Cine state lives in CineStore; these alias its signals so the template reads
+  // them unchanged.
   /** True while cine playback is auto-advancing slices through a pane. */
-  protected readonly cinePlaying = signal(false);
+  protected readonly cinePlaying = this.cine.isPlaying;
   /** Cine playback speed in frames per second. */
-  protected readonly cineFps = signal(DEFAULT_CINE_FPS);
+  protected readonly cineFps = this.cine.fps;
   /** The fps options offered in the cine speed selector, in display order. */
   protected readonly cineFpsOptions = CINE_FPS_OPTIONS;
-  /** Orientation whose slices cine is advancing; captured when playback starts. */
-  private readonly cineOrientation = signal<Orientation>(Orientation.Axial);
   /** The active measurement tool, or `none` for the default pan/orbit gestures. */
   protected readonly activeTool = signal<ToolMode>('none');
   /** Measurement / ROI-tool state and logic; provided per-component (see providers). */
@@ -1740,8 +1748,6 @@ export class Viewer {
   private frameHandle: number | null = null;
   /** Handle of the MIP settle timeout, or null when not settling. */
   private settleHandle: ReturnType<typeof setTimeout> | null = null;
-  /** Handle of the cine playback interval, or null when paused. */
-  private cineHandle: ReturnType<typeof setInterval> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
   /** Handle of the in-flight rotation-capture animation frame, or null when idle. */
@@ -1873,7 +1879,6 @@ export class Viewer {
       if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
       if (this.captureHandle !== null) cancelAnimationFrame(this.captureHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
-      if (this.cineHandle !== null) clearInterval(this.cineHandle);
       if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
       // Stop an in-flight rotation capture so its recorder/stream don't outlive us.
       if (this.captureRecorder !== null && this.captureRecorder.state !== 'inactive') {
@@ -2122,7 +2127,7 @@ export class Viewer {
 
   /** Step the viewport to the next layout (3-pane → 4-pane → 3D-only → …). */
   protected cycleLayout(): void {
-    this.stopCine(); // the cined pane may move or vanish in the new layout
+    this.cine.stop(); // the cined pane may move or vanish in the new layout
     this.layoutMode.update((mode) => {
       const i = this.layoutModes.findIndex((m) => m.value === mode);
       return this.layoutModes[(i + 1) % this.layoutModes.length].value;
@@ -2130,7 +2135,7 @@ export class Viewer {
   }
 
   protected swapMain(): void {
-    this.stopCine(); // swapping reshuffles the panes, so stop the cined one
+    this.cine.stop(); // swapping reshuffles the panes, so stop the cined one
     this.mainOrientation.update((current) => {
       const next = (ORIENTATION_ORDER.indexOf(current) + 1) % ORIENTATION_ORDER.length;
       return ORIENTATION_ORDER[next];
@@ -2408,48 +2413,22 @@ export class Viewer {
    * back to the first slice at the end.
    */
   protected toggleCine(): void {
-    if (this.cinePlaying()) this.stopCine();
-    else this.startCine();
+    this.cine.toggle(() => {
+      if (!this.isReady() || !this.hasMprPane()) return null;
+      return { orientation: this.cinePaneOrientation(), advance: (o) => this.cineTick(o) };
+    });
   }
 
-  /** Change the cine speed; re-arm the running timer so the new fps takes effect at once. */
+  /** Change the cine speed; the store re-arms a running timer so it takes effect at once. */
   protected onCineFpsChange(event: Event): void {
     if (!(event.target instanceof HTMLSelectElement)) return;
-    const fps = Number(event.target.value);
-    if (!Number.isFinite(fps) || fps <= 0) return;
-    this.cineFps.set(fps);
-    if (this.cinePlaying()) this.restartCineTimer();
+    this.cine.setFps(Number(event.target.value));
   }
 
-  /** Begin auto-advancing the hovered (or main) pane's slices at the current fps. */
-  private startCine(): void {
-    if (!this.isReady() || !this.hasMprPane()) return;
-    this.cineOrientation.set(this.cinePaneOrientation());
-    this.cinePlaying.set(true);
-    this.restartCineTimer();
-  }
-
-  /** Stop cine playback and clear its timer. Idempotent — safe to call any time. */
-  private stopCine(): void {
-    if (this.cineHandle !== null) {
-      clearInterval(this.cineHandle);
-      this.cineHandle = null;
-    }
-    if (this.cinePlaying()) this.cinePlaying.set(false);
-  }
-
-  /** (Re)arm the cine interval from the current fps, replacing any running timer. */
-  private restartCineTimer(): void {
-    if (this.cineHandle !== null) clearInterval(this.cineHandle);
-    const fps = clamp(this.cineFps(), 1, 60);
-    this.cineHandle = setInterval(() => this.cineTick(), 1000 / fps);
-  }
-
-  /** Advance the cined pane by one slice, looping back to the start at the end. */
-  private cineTick(): void {
+  /** Advance the given orientation's pane by one slice, looping back to the start at the end. */
+  private cineTick(orientation: Orientation): void {
     const renderer = this.renderer();
     if (!renderer) return;
-    const orientation = this.cineOrientation();
     const count = renderer.sliceCount(orientation);
     this.sliceIndices.update((indices) =>
       withValue(indices, orientation, nextCineIndex(indices[orientation], count, 1)),
@@ -3269,7 +3248,7 @@ export class Viewer {
     const renderer = this.renderer();
     const step = Math.sign(deltaY);
     if (!renderer || step === 0) return;
-    this.stopCine(); // a manual scroll takes over from cine playback
+    this.cine.stop(); // a manual scroll takes over from cine playback
 
     const { group, orientation } = placement;
     // Unlinked non-base group: step its own index against its own grid.
@@ -3678,7 +3657,7 @@ export class Viewer {
    * the previous patient's now-stale view.
    */
   protected clearView(): void {
-    this.stopCine();
+    this.cine.stop();
     this.measure.clear();
     this.measure.endDrag();
     this.activeTool.set('none');
@@ -3695,7 +3674,7 @@ export class Viewer {
     }
     // The base layer backs the single-layer view; honour its volume's defaults.
     const volume = baseLayer(result.layers)!.volume;
-    this.stopCine(); // a fresh volume resets the view; don't keep cining the old one
+    this.cine.stop(); // a fresh volume resets the view; don't keep cining the old one
     renderer.setVolume(volume);
     this.resetViewForVolume(renderer, volume);
     this.load.set({ status: 'ready', result });
