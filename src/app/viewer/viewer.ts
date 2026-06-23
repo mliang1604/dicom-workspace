@@ -1308,7 +1308,7 @@ export class Viewer {
   );
 
   /**
-   * The layer the window/level controls (preset, WL/WW inputs, right-drag) target.
+   * The layer the window/level controls (preset, WL/WW inputs, Alt+right-drag) target.
    * Outside Compare it's always the base. In Compare it's the hovered column's
    * layer: the overlay for the right column (group ≥ 1), the base otherwise — so
    * each column windows independently. Null until a volume loads.
@@ -2785,8 +2785,8 @@ export class Viewer {
   }
 
   /**
-   * Wheel over an MPR pane scrolls its slices (Ctrl+wheel zooms it); wheel over
-   * the 3D pane zooms the orbit camera. Delegated to the interaction controller.
+   * Wheel over an MPR pane scrolls its slices (MPR zoom is a right-drag); wheel
+   * over the 3D pane zooms the orbit camera. Delegated to the interaction controller.
    */
   protected onWheel(event: WheelEvent): void {
     this.interaction.onWheel(event);
