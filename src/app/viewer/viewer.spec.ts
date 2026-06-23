@@ -8,8 +8,8 @@ import {
   missingSliceWarning,
   nextCineIndex,
   releaseSelectFocus,
-  roiKeyOf,
 } from './viewer';
+import { roiKeyOf } from '../../render/roi-overlay';
 import type { RawTag } from '../../dicom/metadata';
 import type { Contour, Roi, StructureSet } from '../../dicom/types';
 

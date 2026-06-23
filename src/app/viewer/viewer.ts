@@ -94,14 +94,17 @@ import { pickProjection } from '../../render/pick';
 import { probeVoxel, sampleVolumeAtPatient, type VoxelProbe } from '../../render/probe';
 import { focusPanePoint, focusSliceIndex } from '../../render/crosshair';
 import {
-  classifyContour,
-  crossSectionOutline,
-  decimate,
-  projectContour,
-  type ContourCoords,
-  type ContourPolyline,
-  type CrossSectionRow,
-} from '../../render/contours';
+  rgbColor,
+  roiContourCoords,
+  roiKeyOf,
+  roiPlaneShapes,
+  roiScreenShapes,
+  setIsShown,
+  type ContourPaneOverlay,
+  type RoiContourCoords,
+  type RoiOverlayPane,
+  type RoiPlaneShapes,
+} from '../../render/roi-overlay';
 import {
   baseLayer,
   DEFAULT_OVERLAY_OPACITY,
@@ -177,49 +180,6 @@ interface SlicePlanesOverlay {
   /** The 3D pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
   readonly rect: PaneRect;
   readonly planes: readonly SlicePlaneOverlay[];
-}
-
-/** One ROI contour shape projected into a pane, in pane-local pixels. */
-interface ContourShape {
-  /** Stable key for the `@for` track (ROI + contour + sub-polyline indices). */
-  readonly key: string;
-  /** SVG `points` in pane-local pixels (origin at the pane's top-left). */
-  readonly points: string;
-  /** Whether to close the loop: a coplanar `CLOSED_PLANAR` contour (a `<polygon>`). */
-  readonly closed: boolean;
-  /** Stroke colour, the ROI's (possibly overridden) display colour as a CSS colour. */
-  readonly color: string;
-  /** Draw opacity in `[0, 1]`, from the ROI's opacity control. */
-  readonly opacity: number;
-}
-
-/** All visible ROI contours projected onto one MPR pane, for one SVG overlay. */
-interface ContourPaneOverlay {
-  /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
-  readonly key: string;
-  /** The pane's rectangle in CSS pixels; the SVG is positioned and clipped to it. */
-  readonly rect: PaneRect;
-  /** The contour shapes drawn on this pane. */
-  readonly shapes: readonly ContourShape[];
-}
-
-/** One ROI's contour geometry for a pane, in plane `(u, v)` — pan/zoom-independent. */
-interface RoiPlaneShapes {
-  /** ROI key (see {@link roiKeyOf}); the `@for` track and the per-shape key prefix. */
-  readonly key: string;
-  readonly color: string;
-  readonly opacity: number;
-  /** Loops and the cross-section outline, in plane `(u, v)` coordinates. */
-  readonly polylines: readonly ContourPolyline[];
-}
-
-/** One ROI's contours projected into a pane's plane frame — slice-independent (cached). */
-interface RoiContourCoords {
-  readonly setIndex: number;
-  readonly roiNumber: number;
-  /** The ROI's display colour as a CSS colour (overrides applied later). */
-  readonly baseColor: string;
-  readonly contours: readonly ContourCoords[];
 }
 
 /** The three MPR orientations contours are projected for, regardless of layout. */
@@ -1254,37 +1214,11 @@ export class Viewer {
    * MPR orientations regardless of layout so cycling panes needs no re-projection.
    */
   private readonly contourCoords = computed<Map<Orientation, RoiContourCoords[]>>(() => {
-    const out = new Map<Orientation, RoiContourCoords[]>();
     const volume = this.volume();
     const sets = this.structureSets();
-    if (!this.isReady() || !volume || sets.length === 0) return out;
-
-    const obliques = this.obliques();
-    for (const orientation of MPR_ORIENTATIONS) {
-      const rotation = obliques[orientation];
-      const rois: RoiContourCoords[] = [];
-      sets.forEach((ss, setIndex) => {
-        for (const roi of ss.rois) {
-          const contours: ContourCoords[] = [];
-          for (const contour of roi.contours) {
-            const closed =
-              contour.geometricType !== 'OPEN_PLANAR' && contour.geometricType !== 'POINT';
-            const projected = projectContour(volume, orientation, contour.points, closed, rotation);
-            if (projected) contours.push(projected);
-          }
-          if (contours.length) {
-            rois.push({
-              setIndex,
-              roiNumber: roi.number,
-              baseColor: rgbColor(roi.color),
-              contours,
-            });
-          }
-        }
-      });
-      if (rois.length) out.set(orientation, rois);
-    }
-    return out;
+    if (!this.isReady() || !volume || sets.length === 0)
+      return new Map<Orientation, RoiContourCoords[]>();
+    return roiContourCoords(volume, sets, MPR_ORIENTATIONS, this.obliques());
   });
 
   /**
@@ -1296,53 +1230,22 @@ export class Viewer {
    * orientation's pane. Result is still in plane `(u, v)`; pan/zoom map to pixels.
    */
   private readonly contourPlaneGeometry = computed<Map<Orientation, RoiPlaneShapes[]>>(() => {
-    const out = new Map<Orientation, RoiPlaneShapes[]>();
     const volume = this.volume();
     const coordsByOrientation = this.contourCoords();
-    if (!volume || coordsByOrientation.size === 0) return out;
-
-    const indices = this.sliceIndices();
-    const hidden = this.hiddenRois();
-    const overrides = this.roiColorOverrides();
-    const opacities = this.roiOpacities();
-    const selectedSet = this.selectedSetIndex();
+    if (!volume || coordsByOrientation.size === 0) return new Map<Orientation, RoiPlaneShapes[]>();
 
     const shown = new Set<Orientation>();
     for (const pane of this.panes()) if (pane.kind === 'mpr') shown.add(pane.orientation);
 
-    for (const [orientation, rois] of coordsByOrientation) {
-      if (!shown.has(orientation)) continue;
-      const sliceIndex = indices[orientation];
-      const roiShapes: RoiPlaneShapes[] = [];
-      for (const roi of rois) {
-        if (!setIsShown(selectedSet, roi.setIndex)) continue;
-        const key = roiKeyOf(roi.setIndex, roi.roiNumber);
-        if (hidden.has(key)) continue;
-
-        const loops: ContourPolyline[] = [];
-        const rows: CrossSectionRow[] = [];
-        for (const c of roi.contours) {
-          const res = classifyContour(c, volume, orientation, sliceIndex);
-          if (!res) continue;
-          if (res.kind === 'loop') {
-            loops.push({ points: decimate(res.points, CONTOUR_DECIMATE_UV), closed: res.closed });
-          } else {
-            rows.push(res.row);
-          }
-        }
-
-        const polylines = [...loops, ...crossSectionOutline(rows)];
-        if (polylines.length === 0) continue;
-        roiShapes.push({
-          key,
-          color: overrides.get(key) ?? roi.baseColor,
-          opacity: opacities.get(key) ?? 1,
-          polylines,
-        });
-      }
-      if (roiShapes.length) out.set(orientation, roiShapes);
-    }
-    return out;
+    return roiPlaneShapes(volume, coordsByOrientation, {
+      sliceIndices: this.sliceIndices(),
+      shown,
+      hidden: this.hiddenRois(),
+      colorOverrides: this.roiColorOverrides(),
+      opacities: this.roiOpacities(),
+      selectedSet: this.selectedSetIndex(),
+      decimateTolerance: CONTOUR_DECIMATE_UV,
+    });
   });
 
   /**
@@ -1357,45 +1260,20 @@ export class Viewer {
     const geometry = this.contourPlaneGeometry();
     if (!volume || geometry.size === 0) return [];
 
-    const zooms = this.zooms();
-    const pans = this.pans();
-    const flipped = this.sagittalFlipped();
-
-    const result: ContourPaneOverlay[] = [];
+    const panes: RoiOverlayPane[] = [];
     for (const pane of this.panes()) {
       if (pane.kind !== 'mpr') continue;
-      const roiShapes = geometry.get(pane.orientation);
-      if (!roiShapes) continue;
-      const orientation = pane.orientation;
-      const rect = pane.rect;
-      if (rect.width < 1 || rect.height < 1) continue;
-      const flipX = orientation === Orientation.Sagittal && flipped;
-      const zoom = zooms[orientation];
-      const pan = pans[orientation];
-
-      const shapes: ContourShape[] = [];
-      for (const roi of roiShapes) {
-        for (let pi = 0; pi < roi.polylines.length; pi++) {
-          const polyline = roi.polylines[pi];
-          const pixels: string[] = [];
-          for (const point of polyline.points) {
-            const screen = planePointToPane(volume, orientation, point, zoom, rect, flipX, pan);
-            if (!screen) break;
-            pixels.push(`${(screen.x - rect.x).toFixed(1)},${(screen.y - rect.y).toFixed(1)}`);
-          }
-          if (pixels.length < 2) continue;
-          shapes.push({
-            key: `${roi.key}:${pi}`,
-            points: pixels.join(' '),
-            closed: polyline.closed,
-            color: roi.color,
-            opacity: roi.opacity,
-          });
-        }
-      }
-      if (shapes.length) result.push({ key: this.paneKey(pane), rect, shapes });
+      panes.push({ key: this.paneKey(pane), orientation: pane.orientation, rect: pane.rect });
     }
-    return result;
+
+    return roiScreenShapes(
+      volume,
+      geometry,
+      panes,
+      this.zooms(),
+      this.pans(),
+      this.sagittalFlipped(),
+    );
   });
 
   protected readonly statusIsError = computed(
@@ -3976,15 +3854,6 @@ function midpoint(points: readonly PanePoint[]): PanePoint {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
-/**
- * An ROI Display Color as a CSS `rgb()` string, falling back to a neutral grey
- * when the RTSTRUCT omitted the colour (3006,002A).
- */
-function rgbColor(color: readonly [number, number, number] | null): string {
-  if (!color) return 'rgb(200, 200, 200)';
-  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
-}
-
 /** Parse a `#rrggbb` colour-input value into [r, g, b] (0–255), or null. */
 function parseHexColor(hex: string | undefined): [number, number, number] | null {
   if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
@@ -3993,21 +3862,6 @@ function parseHexColor(hex: string | undefined): [number, number, number] | null
     parseInt(hex.slice(3, 5), 16),
     parseInt(hex.slice(5, 7), 16),
   ];
-}
-
-/**
- * Stable identity for an ROI across the loaded structure sets, used by the panel
- * and the contour overlays to share one visibility / colour / opacity state.
- * Qualified by the structure set's index so equal ROI Numbers in two sets don't
- * collide.
- */
-export function roiKeyOf(setIndex: number, roiNumber: number): string {
-  return `${setIndex}:${roiNumber}`;
-}
-
-/** Whether a structure set is shown given the panel's selector (-1 means all). */
-function setIsShown(selectedSetIndex: number, setIndex: number): boolean {
-  return selectedSetIndex < 0 || selectedSetIndex === setIndex;
 }
 
 /**
