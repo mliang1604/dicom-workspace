@@ -141,7 +141,8 @@ import { CineStore } from './cine-store';
 import { CompareStore, COMPARE_GROUPS, type GroupNav } from './compare-store';
 import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coordinator';
 import { readDropped } from './drop-files';
-import { captureFilename, pickVideoMimeType, rotationAzimuths, timestampSlug } from './capture';
+import { pickCaptureTarget } from './capture';
+import { CaptureController, type ScreenshotTarget } from './capture-controller';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
 import { SERIES_DND_MIME } from './history-panel/series-chip';
@@ -384,13 +385,6 @@ const MAX_ZOOM = 20;
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
 
-/** WebM containers tried, most-preferred first, for the 3D rotation capture. */
-const VIDEO_MIME_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'] as const;
-/** Frames in one full 360° rotation capture (~4 s at the capture frame rate). */
-const ROTATION_FRAMES = 120;
-/** Frame rate the rotation capture's MediaRecorder samples the canvas at. */
-const ROTATION_FPS = 30;
-
 /** Radians of orbit per pixel dragged over the 3D pane. */
 const ORBIT_SPEED = 0.01;
 /** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
@@ -439,6 +433,7 @@ const NOTICE_MS = 3600;
     CineStore,
     CompareStore,
     LoadCoordinator,
+    CaptureController,
   ],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
@@ -460,6 +455,8 @@ export class Viewer {
   private readonly catalog = inject(PatientCatalog);
   /** Resolves load requests to a discriminated outcome; provided per-component. */
   private readonly loadCoordinator = inject(LoadCoordinator);
+  /** Owns the screenshot / rotation-capture export domain; wired in the constructor. */
+  private readonly capture = inject(CaptureController);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
   /** Fusion / layers override state and logic; provided per-component (see providers). */
@@ -622,20 +619,11 @@ export class Viewer {
    * the volume at load — this flips whatever is shown, in every pane.
    */
   protected readonly invert = signal(false);
-  /**
-   * The WebM container the browser can record a rotation capture into, chosen
-   * once up front, or null when MediaRecorder/WebM isn't available (which hides
-   * the spin-capture control). MPR-only layouts still expose the PNG screenshot.
-   */
-  private readonly recordingMimeType = pickVideoMimeType(
-    VIDEO_MIME_TYPES,
-    (type) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type),
-  );
   /** True while a 3D rotation capture is recording; disables the export controls. */
-  protected readonly recordingRotation = signal(false);
+  protected readonly recordingRotation = this.capture.recordingRotation;
   /** Whether the 3D rotation capture is available (3D pane shown + WebM support). */
   protected readonly canRecordRotation = computed(
-    () => this.isReady() && this.has3dPane() && this.recordingMimeType !== null,
+    () => this.isReady() && this.has3dPane() && this.capture.recordingMimeType !== null,
   );
 
   /** Whether the keyboard-shortcut help overlay is open. */
@@ -1629,10 +1617,6 @@ export class Viewer {
   private settleHandle: ReturnType<typeof setTimeout> | null = null;
   /** Handle of the coalesced viewport-resync frame, or null when none is pending. */
   private resizeHandle: number | null = null;
-  /** Handle of the in-flight rotation-capture animation frame, or null when idle. */
-  private captureHandle: number | null = null;
-  /** The active rotation-capture recorder, or null when not recording. */
-  private captureRecorder: MediaRecorder | null = null;
   /** Triangle centroids (3 floats each) for the visible ROI surface mesh, for depth sorting. */
   private surfaceCentroids: Float32Array | null = null;
   private surfaceTriangleCount = 0;
@@ -1653,6 +1637,25 @@ export class Viewer {
     // Seed the 3D pane's projection mode from the persisted preference before any
     // effect or the template reads it (the store defaults to MIP otherwise).
     this.cam.projectionMode.set(this.initialPrefs.projectionMode);
+
+    // Wire the capture controller to the renderer/canvas/camera through lazy
+    // callbacks so it owns the export plumbing without reaching into the component.
+    this.capture.init({
+      renderer: () => this.renderer(),
+      canvas: () => this.canvasRef().nativeElement,
+      isReady: () => this.isReady(),
+      screenshotTarget: () => this.screenshotTarget(),
+      canRecordRotation: () => this.canRecordRotation(),
+      composeViews: () => this.composePaneViews(),
+      presentViews: (views) => {
+        this.pendingViews = views;
+        this.renderer()?.renderPanes(views);
+      },
+      camera: this.camera3d,
+      naming: () => this.seriesList().find((s) => s.uid === this.selectedSeriesUid()) ?? null,
+      now: () => new Date(),
+      download: downloadBlob,
+    });
 
     afterNextRender(() => void this.initGpu());
 
@@ -1756,13 +1759,9 @@ export class Viewer {
     this.destroyRef.onDestroy(() => {
       if (this.frameHandle !== null) cancelAnimationFrame(this.frameHandle);
       if (this.resizeHandle !== null) cancelAnimationFrame(this.resizeHandle);
-      if (this.captureHandle !== null) cancelAnimationFrame(this.captureHandle);
       if (this.settleHandle !== null) clearTimeout(this.settleHandle);
       if (this.noticeHandle !== null) clearTimeout(this.noticeHandle);
-      // Stop an in-flight rotation capture so its recorder/stream don't outlive us.
-      if (this.captureRecorder !== null && this.captureRecorder.state !== 'inactive') {
-        this.captureRecorder.stop();
-      }
+      // The capture controller stops its own in-flight recording via its DestroyRef.
       // Free the renderer's GPU resources (uniform buffers, LUTs, volume textures).
       this.renderer()?.dispose();
     });
@@ -2076,108 +2075,32 @@ export class Viewer {
     this.helpOpen.update((open) => !open);
   }
 
-  /**
-   * Save a PNG of the active pane (the hovered one, else the first/main pane).
-   * The canvas is re-rendered and the pane's device-pixel region snapshotted in
-   * the same frame — before the next `getCurrentTexture()` recycles the WebGPU
-   * drawing buffer — then cropped onto a 2-D canvas and downloaded.
-   */
+  /** Save a PNG of the active pane; the export plumbing lives in the controller. */
   protected captureScreenshot(): void {
-    const renderer = this.renderer();
-    if (!renderer || !this.isReady()) return;
-    const pane = this.captureTargetPane();
-    if (!pane) return;
-    const views = this.composePaneViews();
-    if (!views) return;
-    const canvas = this.canvasRef().nativeElement;
-    const rect = scaleRect(pane.rect, this.viewport().dpr);
-    const filename = this.captureName(this.paneViewTag(pane), 'png');
+    this.capture.screenshot();
+  }
 
-    requestAnimationFrame(() => {
-      renderer.renderPanes(views);
-      const region = cropCanvas(canvas, rect);
-      if (!region) return;
-      region.toBlob((blob) => {
-        if (blob) downloadBlob(blob, filename);
-      }, 'image/png');
-    });
+  /** Record a 360° spin of the 3D pane to WebM; orchestrated by the controller. */
+  protected captureRotation(): void {
+    this.capture.recordRotation();
   }
 
   /**
-   * Record a 360° spin of the 3D pane to a WebM clip. A MediaRecorder samples
-   * the canvas via {@link HTMLCanvasElement.captureStream} while the orbit camera
-   * steps through one full revolution ({@link rotationAzimuths}); each step is
-   * rendered synchronously so the captured frames track the spin. The camera is
-   * restored and the clip downloaded when recording stops. No-op (and the control
-   * is hidden) unless a 3D pane is shown and the browser supports WebM recording.
+   * The screenshot's target, for the capture controller: the hovered pane (else
+   * the main pane), as its device-pixel crop rect and a filename view tag. Null
+   * when there's no pane to capture. The pane selection and naming stay here — they
+   * read the component's layout/hover/series state — while the snapshot plumbing is
+   * the controller's.
    */
-  protected captureRotation(): void {
-    const renderer = this.renderer();
-    const mimeType = this.recordingMimeType;
-    if (!renderer || !mimeType || !this.canRecordRotation() || this.recordingRotation()) return;
-
-    const canvas = this.canvasRef().nativeElement;
-    const stream = canvas.captureStream(ROTATION_FPS);
-    const recorder = new MediaRecorder(stream, { mimeType });
-    this.captureRecorder = recorder;
-    const chunks: Blob[] = [];
-    const filename = this.captureName('rotation', 'webm');
-    const startAzimuth = this.camera3d().azimuth;
-    const azimuths = rotationAzimuths(startAzimuth, ROTATION_FRAMES);
-
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
-    };
-    recorder.onstop = () => {
-      stream.getTracks().forEach((track) => track.stop());
-      this.captureRecorder = null;
-      this.camera3d.update((camera) => ({ ...camera, azimuth: startAzimuth }));
-      this.recordingRotation.set(false);
-      if (chunks.length > 0) downloadBlob(new Blob(chunks, { type: mimeType }), filename);
-    };
-
-    this.recordingRotation.set(true);
-    recorder.start();
-
-    let frame = 0;
-    const step = () => {
-      if (frame >= azimuths.length) {
-        this.captureHandle = null;
-        recorder.stop();
-        return;
-      }
-      this.camera3d.update((camera) => ({ ...camera, azimuth: azimuths[frame] }));
-      const views = this.composePaneViews();
-      if (views) {
-        this.pendingViews = views;
-        renderer.renderPanes(views);
-      }
-      frame++;
-      this.captureHandle = requestAnimationFrame(step);
-    };
-    this.captureHandle = requestAnimationFrame(step);
-  }
-
-  /** The pane an export targets: the hovered pane, else the first (main) pane. */
-  private captureTargetPane(): PanePlacement | null {
-    const panes = this.panes();
-    const hovered = this.hoveredKey();
-    if (hovered) {
-      const found = panes.find((pane) => this.paneKey(pane) === hovered);
-      if (found) return found;
-    }
-    return panes[0] ?? null;
+  private screenshotTarget(): ScreenshotTarget | null {
+    const pane = pickCaptureTarget(this.panes(), this.hoveredKey(), (p) => this.paneKey(p));
+    if (!pane) return null;
+    return { rect: scaleRect(pane.rect, this.viewport().dpr), tag: this.paneViewTag(pane) };
   }
 
   /** A short view tag for a capture filename: an orientation name, or `3d`. */
   private paneViewTag(pane: PanePlacement): string {
     return pane.kind === 'mip' ? '3d' : this.orientationName(pane.orientation).toLowerCase();
-  }
-
-  /** A download filename from the displayed series, a view tag, and the time. */
-  private captureName(view: string, extension: string): string {
-    const series = this.seriesList().find((s) => s.uid === this.selectedSeriesUid());
-    return captureFilename(series ?? null, view, extension, timestampSlug(new Date()));
   }
 
   /**
@@ -3663,25 +3586,6 @@ function placementAt(panes: readonly PanePlacement[], x: number, y: number): Pan
     if (withinRect(pane.rect, x, y)) return pane;
   }
   return null;
-}
-
-/**
- * Copy a device-pixel region of the canvas onto a fresh 2-D canvas, for export.
- * Drawing the WebGPU canvas through `drawImage` reads its current contents, so
- * this must run in the same frame the region was rendered. Returns null for a
- * degenerate (sub-pixel) rect or when a 2-D context can't be obtained.
- */
-function cropCanvas(source: HTMLCanvasElement, rect: PaneRect): HTMLCanvasElement | null {
-  const width = Math.round(rect.width);
-  const height = Math.round(rect.height);
-  if (width < 1 || height < 1) return null;
-  const out = document.createElement('canvas');
-  out.width = width;
-  out.height = height;
-  const ctx = out.getContext('2d');
-  if (!ctx) return null;
-  ctx.drawImage(source, Math.round(rect.x), Math.round(rect.y), width, height, 0, 0, width, height);
-  return out;
 }
 
 /** Trigger a browser download of a blob under the given filename. */
