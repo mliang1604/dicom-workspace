@@ -1,5 +1,7 @@
 import {
   baseImageLayer,
+  baseLayer,
+  IDENTITY_MAT4,
   overlayImageLayer,
   type Registration,
   type Slice,
@@ -337,5 +339,66 @@ describe('mergeLoad', () => {
     const overlay = result.layers[1];
     expect(overlay.deformation).toBe(reg);
     expect(overlay.alignToBase).toBeUndefined(); // deformable, not rigid
+  });
+
+  it('auto-orients a reverse deformable so the incoming fixed series becomes the base', () => {
+    // The field is defined over frame-2 (the incoming series) — it can only be
+    // sampled with its fixed frame as the base, so the incoming becomes the base and
+    // the current (moving) series is warped onto it, even though it was dropped as
+    // the overlay.
+    const reg: Registration = {
+      kind: 'deformable',
+      name: 'reg.dcm',
+      sourceFrame: 'frame-1', // moving = the current base
+      targetFrame: 'frame-2', // fixed = the incoming series
+      preMatrix: IDENTITY_MAT4,
+      postMatrix: IDENTITY_MAT4,
+      grid: {
+        origin: [0, 0, 0],
+        orientation: [1, 0, 0, 0, 1, 0],
+        dims: [2, 2, 2],
+        spacing: [1, 1, 1],
+        vectors: new Float32Array(3 * 8),
+      },
+    };
+    const current = fakeLoad('ct', 'frame-1'); // moving
+    const incoming: LoadResult = { ...fakeLoad('mr', 'frame-2', 'MR'), registrations: [reg] };
+
+    const { result, added, baseChanged } = mergeLoad(current, incoming);
+
+    expect(added).toBe(true);
+    expect(baseChanged).toBe(true);
+    // The incoming (fixed) series is the base; the current (moving) is the overlay.
+    expect(baseLayer(result.layers)?.id).toBe('mr');
+    const overlay = result.layers.find((layer) => layer.role === 'overlay');
+    expect(overlay?.id).toBe('ct');
+    expect(overlay?.deformation).toBe(reg);
+  });
+
+  it('keeps the dropped base for a forward deformable (no auto-orient)', () => {
+    const reg: Registration = {
+      kind: 'deformable',
+      name: 'reg.dcm',
+      sourceFrame: 'frame-2', // moving = the incoming overlay
+      targetFrame: 'frame-1', // fixed = the current base
+      preMatrix: IDENTITY_MAT4,
+      postMatrix: IDENTITY_MAT4,
+      grid: {
+        origin: [0, 0, 0],
+        orientation: [1, 0, 0, 0, 1, 0],
+        dims: [2, 2, 2],
+        spacing: [1, 1, 1],
+        vectors: new Float32Array(3 * 8),
+      },
+    };
+    const current = fakeLoad('ct', 'frame-1'); // fixed
+    const incoming: LoadResult = { ...fakeLoad('mr', 'frame-2', 'MR'), registrations: [reg] };
+
+    const { result, added, baseChanged } = mergeLoad(current, incoming);
+
+    expect(added).toBe(true);
+    expect(baseChanged).toBeFalsy();
+    expect(baseLayer(result.layers)?.id).toBe('ct'); // base unchanged
+    expect(result.layers[1].deformation).toBe(reg);
   });
 });

@@ -213,6 +213,23 @@ describe('planSeriesLoad', () => {
     expect(knownSeen).toEqual([]); // the stub's allStructureSets
   });
 
+  it('carries the current registrations into the lazily-built series', () => {
+    // A Spatial Registration linking the panel series to the base must survive the
+    // lazy build, or the merge sees no registration and refuses to fuse.
+    const registrations = [{ name: 'reg' }] as unknown as LoadResult['registrations'];
+    let regsSeen: unknown = 'unset';
+    planSeriesLoad(
+      seriesDeps({
+        previous: { ...result('base'), registrations } as LoadResult,
+        loadSeries: (_s, _known, regs) => {
+          regsSeen = regs;
+          return INCOMING;
+        },
+      }),
+    );
+    expect(regsSeen).toBe(registrations);
+  });
+
   it('fuses a same-frame series as an overlay', () => {
     const outcome = planSeriesLoad(
       seriesDeps({ previous: result('base'), merge: (_c, i) => merged(i, true) }),

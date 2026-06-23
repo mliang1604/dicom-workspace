@@ -78,40 +78,72 @@ function parseRigid(name: string, dataSet: dicomParser.DataSet): Registration | 
 
 /**
  * A deformable registration: the Deformable Registration Sequence (0064,0002)
- * holds one item per frame of reference. Each item carries a Source Frame of
- * Reference UID (0064,0003), an optional displacement grid (0064,0005), and
- * optional pre/post rigid stages (0064,000F / 0064,000A). The fixed frame is the
- * object's top-level Frame of Reference.
+ * holds one or more items, carrying a Source Frame of Reference UID (0064,0003),
+ * an optional displacement grid (0064,0005), and optional pre/post rigid stages
+ * (0064,000F / 0064,000A). The fixed frame is the object's top-level Frame of
+ * Reference.
  *
- * Real objects pair a grid-less self-registration for the fixed frame (its
- * source frame is the fixed frame) with the moving-frame item that actually
- * carries the displacement grid, so — like {@link parseRigid} — this picks the
- * grid-bearing moving item rather than assuming a fixed sequence position.
+ * The source frame, grid, and pre/post matrices are *not* guaranteed to sit in the
+ * same item — some producers give each 0064,0002 element its own item — so this
+ * locates each across the whole sequence rather than off the grid item alone: the
+ * grid from whichever item carries one, the moving frame as the source frame that
+ * differs from the fixed (top-level) one, and each matrix preferring the grid item
+ * then any sibling. Returns null when no item carries a grid.
  */
 function parseDeformable(name: string, dataSet: dicomParser.DataSet): Registration | null {
   const targetFrame = frameOfReference(dataSet, 'x00200052');
-  const candidates = items(dataSet, 'x00640002')
-    .map((item) => ({ item, frame: frameOfReference(item, 'x00640003'), grid: gridOf(item) }))
-    .filter(
-      (c): c is { item: dicomParser.DataSet; frame: string | null; grid: DeformationGrid } =>
-        c.grid !== null,
-    );
+  const regItems = items(dataSet, 'x00640002');
 
-  // Prefer the moving item (a frame other than the fixed one that carries a
-  // grid); fall back to the first grid-bearing item (a self-registration whose
-  // single item shares the target frame).
-  const moving = candidates.find((c) => c.frame !== targetFrame) ?? candidates[0];
-  if (!moving) return null;
+  // The grid can live in any item of the sequence (often the last); take the first
+  // item that carries one.
+  const gridEntry = regItems
+    .map((item) => ({ item, grid: gridOf(item) }))
+    .find((entry) => entry.grid !== null);
+  if (!gridEntry || gridEntry.grid === null) return null;
+  const gridItem = gridEntry.item;
+  const grid = gridEntry.grid;
+
+  // The moving frame is the source frame (0064,0003) that differs from the fixed
+  // (top-level) frame — scanned across every item, since the item that declares it
+  // may not be the one carrying the grid. Fall back to any source frame present,
+  // then to the grid item's own (a single self-registration item).
+  const sourceFrames = regItems
+    .map((item) => frameOfReference(item, 'x00640003'))
+    .filter((frame): frame is string => frame !== null);
+  const sourceFrame =
+    sourceFrames.find((frame) => frame !== targetFrame) ??
+    sourceFrames[0] ??
+    frameOfReference(gridItem, 'x00640003');
 
   return {
     kind: 'deformable',
     name,
-    sourceFrame: moving.frame,
+    sourceFrame,
     targetFrame,
-    preMatrix: findMatrix(seqItem(moving.item, 'x0064000f'))?.matrix ?? IDENTITY_MAT4,
-    postMatrix: findMatrix(seqItem(moving.item, 'x0064000a'))?.matrix ?? IDENTITY_MAT4,
-    grid: moving.grid,
+    preMatrix: matrixAcross(regItems, gridItem, 'x0064000f') ?? IDENTITY_MAT4,
+    postMatrix: matrixAcross(regItems, gridItem, 'x0064000a') ?? IDENTITY_MAT4,
+    grid,
   };
+}
+
+/**
+ * A pre/post deformation matrix found across the Deformable Registration Sequence
+ * items, preferring the grid item (where it conventionally sits) then any sibling
+ * (for objects that give the matrix its own item). Null when none carry one.
+ */
+function matrixAcross(
+  regItems: readonly dicomParser.DataSet[],
+  gridItem: dicomParser.DataSet,
+  tag: string,
+): Mat4 | null {
+  const onGrid = findMatrix(seqItem(gridItem, tag));
+  if (onGrid) return onGrid.matrix;
+  for (const item of regItems) {
+    if (item === gridItem) continue;
+    const found = findMatrix(seqItem(item, tag));
+    if (found) return found.matrix;
+  }
+  return null;
 }
 
 /** The displacement grid of a Deformable Registration Sequence item, or null when absent. */

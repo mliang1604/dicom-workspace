@@ -20,8 +20,18 @@ export type DropIntent = 'primary' | 'overlay' | 'compare';
 export type LoadOutcome =
   /** Replace the view with a fresh base volume (`applyVolume`). */
   | { readonly kind: 'replace'; readonly result: LoadResult }
-  /** Keep the base and add `result`'s overlay layer; `compare` also opens the columns. */
-  | { readonly kind: 'overlay'; readonly result: LoadResult; readonly compare: boolean }
+  /**
+   * Add `result`'s overlay layer; `compare` also opens the columns. Usually the
+   * base is unchanged (`addLayer`, view state kept); `baseChanged` marks a
+   * deformable auto-orient where the base series changed, so the viewer re-bases
+   * (resets the view) instead.
+   */
+  | {
+      readonly kind: 'overlay';
+      readonly result: LoadResult;
+      readonly compare: boolean;
+      readonly baseChanged?: boolean;
+    }
   /** A held-modifier drop that can't fuse: restore the prior view and flash `message`. */
   | { readonly kind: 'reject'; readonly message: string }
   /** The patient-switch confirm was declined: restore the prior view, do nothing else. */
@@ -43,12 +53,17 @@ export function cantFuseMessage(intent: 'overlay' | 'compare'): string {
 function outcomeForMerged(merged: MergedLoad, intent: DropIntent): LoadOutcome {
   if (intent === 'primary') {
     return merged.added
-      ? { kind: 'overlay', result: merged.result, compare: false }
+      ? { kind: 'overlay', result: merged.result, compare: false, baseChanged: merged.baseChanged }
       : { kind: 'replace', result: merged.result };
   }
   // A held modifier forces the overlay path; a series that can't fuse is a no-op.
   if (!merged.added) return { kind: 'reject', message: cantFuseMessage(intent) };
-  return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
+  return {
+    kind: 'overlay',
+    result: merged.result,
+    compare: intent === 'compare',
+    baseChanged: merged.baseChanged,
+  };
 }
 
 /** The minimal patient-catalog surface the file-load policy mutates. */
@@ -101,7 +116,12 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
     });
     if (!merged.added) return { kind: 'reject', message: cantFuseMessage(intent) };
     catalog.add(result.series);
-    return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
+    return {
+      kind: 'overlay',
+      result: merged.result,
+      compare: intent === 'compare',
+      baseChanged: merged.baseChanged,
+    };
   }
 
   let switched = false;
@@ -127,7 +147,7 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
     added: merged.added,
   });
   return merged.added
-    ? { kind: 'overlay', result: merged.result, compare: false }
+    ? { kind: 'overlay', result: merged.result, compare: false, baseChanged: merged.baseChanged }
     : { kind: 'replace', result: merged.result };
 }
 
@@ -137,7 +157,11 @@ export interface SeriesLoadDeps {
   readonly series: Series;
   readonly intent: DropIntent;
   /** Parse the series into a registry; may throw (the caller handles it). */
-  readonly loadSeries: (series: Series, known: LoadResult['allStructureSets']) => LoadResult;
+  readonly loadSeries: (
+    series: Series,
+    known: LoadResult['allStructureSets'],
+    registrations: LoadResult['registrations'],
+  ) => LoadResult;
   readonly merge: (current: LoadResult, incoming: LoadResult) => MergedLoad;
 }
 
@@ -152,7 +176,14 @@ export function planSeriesLoad(deps: SeriesLoadDeps): LoadOutcome {
   if (previous && previous.layers.some((layer) => layer.id === series.uid)) {
     return { kind: 'noop', compare: intent === 'compare' };
   }
-  const incoming = loadSeries(series, previous ? previous.allStructureSets : []);
+  // Carry the current view's structure sets and registrations into the lazily-built
+  // series, so an RTSTRUCT still annotates it and a Spatial Registration linking it
+  // to the base survives the panel load (otherwise the merge sees no registration).
+  const incoming = loadSeries(
+    series,
+    previous ? previous.allStructureSets : [],
+    previous ? previous.registrations : [],
+  );
   const merged = previous ? merge(previous, incoming) : { result: incoming, added: false };
   return outcomeForMerged(merged, intent);
 }
@@ -197,7 +228,7 @@ export class LoadCoordinator {
       previous,
       series,
       intent,
-      loadSeries: (s, known) => this.loader.loadSeries(s, known),
+      loadSeries: (s, known, regs) => this.loader.loadSeries(s, known, regs),
       merge: (current, incoming) => this.loader.merge(current, incoming),
     });
   }

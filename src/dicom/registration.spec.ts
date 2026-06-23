@@ -210,6 +210,28 @@ function movingGridItem(): Uint8Array {
   ]);
 }
 
+/** A Deformable Registration Sequence item carrying only a Source Frame of Reference UID. */
+function sourceFrameItem(frame: string): Uint8Array {
+  return element(0x0064, 0x0003, 'UI', uid(frame)); // Source Frame of Reference UID
+}
+
+/** A Deformable Registration Sequence item carrying only the grid (no source frame). */
+function gridOnlyItem(): Uint8Array {
+  const dims = [2, 2, 2];
+  const vectors = Array.from({ length: 3 * dims[0] * dims[1] * dims[2] }, (_, i) => i + 1);
+  return deformationGrid([10, 20, 30], dims, [3, 3, 3], vectors);
+}
+
+/** A Deformable Registration Sequence item carrying only a Pre Deformation Matrix. */
+function preMatrixItem(matrix: readonly number[]): Uint8Array {
+  return matrixRegistrationSeq(0x0064, 0x000f, matrix);
+}
+
+/** A Deformable Registration Sequence item carrying only a Post Deformation Matrix. */
+function postMatrixItem(matrix: readonly number[]): Uint8Array {
+  return matrixRegistrationSeq(0x0064, 0x000a, matrix);
+}
+
 /** A Pre/Post Deformation Matrix Registration Sequence carrying one matrix. */
 function matrixRegistrationSeq(group: number, el: number, matrix: readonly number[]): Uint8Array {
   const item = concat([
@@ -297,5 +319,48 @@ describe('parseRegistration', () => {
     expect(reg.targetFrame).toBe('FIXED');
     expect(reg.grid.dims).toEqual([2, 2, 2]);
     expect(Array.from(reg.grid.vectors.slice(0, 3))).toEqual([1, 2, 3]);
+  });
+
+  it('recovers the source frame when it and the grid are in separate sequence items', () => {
+    // Some producers split the Deformable Registration Sequence: one item declares
+    // the Source Frame of Reference UID, a later item carries the grid. The moving
+    // frame must still be recovered, not read off the (source-less) grid item.
+    const reg = parseRegistration(
+      'split.dcm',
+      deformableFromItems([sourceFrameItem('MOVING'), gridOnlyItem()]),
+    );
+
+    expect(reg).not.toBeNull();
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.sourceFrame).toBe('MOVING');
+    expect(reg.targetFrame).toBe('FIXED');
+    expect(reg.grid.dims).toEqual([2, 2, 2]);
+    expect(Array.from(reg.grid.vectors.slice(0, 3))).toEqual([1, 2, 3]);
+  });
+
+  it('recovers source, grid, and pre/post matrices when each is in its own item', () => {
+    // The real-world layout that exposed this: 0064,0002 has four items, one
+    // element each — [Source FoR][Pre Deformation Matrix][Post Deformation
+    // Matrix][Grid] — not one item holding all four. Each must be read from its own
+    // item, not off the grid item.
+    const pre = [1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 4, 0, 0, 0, 1];
+    const post = [1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7, 0, 0, 0, 1];
+    const reg = parseRegistration(
+      'split4.dcm',
+      deformableFromItems([
+        sourceFrameItem('MOVING'),
+        preMatrixItem(pre),
+        postMatrixItem(post),
+        gridOnlyItem(),
+      ]),
+    );
+
+    expect(reg).not.toBeNull();
+    if (reg?.kind !== 'deformable') throw new Error('expected deformable');
+    expect(reg.sourceFrame).toBe('MOVING');
+    expect(reg.targetFrame).toBe('FIXED');
+    expect(reg.preMatrix).toEqual(pre);
+    expect(reg.postMatrix).toEqual(post);
+    expect(reg.grid.dims).toEqual([2, 2, 2]);
   });
 });
