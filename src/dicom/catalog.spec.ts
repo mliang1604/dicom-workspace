@@ -280,6 +280,25 @@ describe('initialImportSeries', () => {
     expect(chosen?.uid).toBe('b');
   });
 
+  it('skips a dose grid even when it is the largest series of the study (#241)', () => {
+    const chosen = initialImportSeries([
+      series('rt', { uid: 'ct', modality: 'CT', imageCount: 120 }),
+      series('rt', { uid: 'dose', modality: 'RTDOSE', imageCount: 300 }),
+      series('rt', { uid: 'struct', modality: 'RTSTRUCT', imageCount: 1 }),
+    ]);
+
+    expect(chosen?.uid).toBe('ct');
+  });
+
+  it('falls back to the largest series when a study holds only ancillary objects', () => {
+    const chosen = initialImportSeries([
+      series('rt', { uid: 'dose', modality: 'RTDOSE', imageCount: 200 }),
+      series('rt', { uid: 'struct', modality: 'RTSTRUCT', imageCount: 1 }),
+    ]);
+
+    expect(chosen?.uid).toBe('dose');
+  });
+
   it('returns undefined for an empty import', () => {
     expect(initialImportSeries([])).toBeUndefined();
   });

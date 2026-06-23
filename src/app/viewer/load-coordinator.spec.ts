@@ -63,21 +63,27 @@ describe('cantFuseMessage', () => {
 });
 
 describe('planFileLoad — primary', () => {
-  it('replaces the view (and catalogs) for a same-patient batch that does not fuse', () => {
+  it('catalogues a plain import into history without showing it (#241)', () => {
     const catalog = recordingCatalog();
     const outcome = planFileLoad(fileDeps({ previous: result('base'), catalog }));
-    // previous present but the (default) merge doesn't add → replace.
-    expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
+    // A plain import only ingests — the viewport waits for a history pick.
+    expect(outcome).toEqual({ kind: 'imported', cleared: false });
     expect(catalog.adds).toBe(1);
     expect(catalog.clears).toBe(0);
   });
 
-  it('fuses as an overlay when the merge adds a layer', () => {
+  it('never fuses a plain import — it ingests even when a same-frame merge could add', () => {
     const catalog = recordingCatalog();
     const outcome = planFileLoad(
-      fileDeps({ previous: result('base'), merge: (_c, i) => merged(i, true), catalog }),
+      fileDeps({
+        previous: result('base'),
+        merge: () => {
+          throw new Error('a plain import must not merge — it only catalogues');
+        },
+        catalog,
+      }),
     );
-    expect(outcome).toEqual({ kind: 'overlay', result: INCOMING, compare: false });
+    expect(outcome).toEqual({ kind: 'imported', cleared: false });
     expect(catalog.adds).toBe(1);
   });
 
@@ -91,21 +97,21 @@ describe('planFileLoad — primary', () => {
     expect(catalog.clears).toBe(0);
   });
 
-  it('clears the catalog and replaces when a patient switch is confirmed', () => {
+  it('clears the catalog and reports the switch when a patient switch is confirmed', () => {
     const catalog = recordingCatalog();
-    // A switch means the previous view is dropped, so the merge is never consulted.
     const outcome = planFileLoad(
       fileDeps({
         previous: result('base'),
         keepsOnePatient: () => false,
         confirm: () => true,
         merge: () => {
-          throw new Error('merge must not run on a patient switch');
+          throw new Error('merge must not run on an import');
         },
         catalog,
       }),
     );
-    expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
+    // `cleared` tells the viewer to unload the now-stale view of the old patient.
+    expect(outcome).toEqual({ kind: 'imported', cleared: true });
     expect(catalog.clears).toBe(1);
     expect(catalog.adds).toBe(1);
   });
@@ -170,17 +176,25 @@ function seriesDeps(overrides: Partial<SeriesLoadDeps>): SeriesLoadDeps {
 }
 
 describe('planSeriesLoad', () => {
-  it('is a no-op for an already-shown series, without re-parsing', () => {
+  it('is a no-op for an already-shown series under a held modifier, without re-parsing', () => {
     const outcome = planSeriesLoad(
       seriesDeps({
         previous: result('shown'),
         series: { uid: 'shown' } as Series,
+        intent: 'overlay',
         loadSeries: () => {
           throw new Error('must not re-parse an already-shown series');
         },
       }),
     );
     expect(outcome).toEqual({ kind: 'noop', compare: false });
+  });
+
+  it('reloads (replaces) the current base when it is re-picked as primary (#241)', () => {
+    const outcome = planSeriesLoad(
+      seriesDeps({ previous: result('shown'), series: { uid: 'shown' } as Series }),
+    );
+    expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
   });
 
   it('still opens the compare columns (⇧) for an already-shown series', () => {
@@ -194,8 +208,20 @@ describe('planSeriesLoad', () => {
     expect(outcome).toEqual({ kind: 'noop', compare: true });
   });
 
-  it('replaces the view for a fresh series that does not fuse', () => {
+  it('replaces the view for a plain (primary) pick', () => {
     const outcome = planSeriesLoad(seriesDeps({ previous: result('base') }));
+    expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
+  });
+
+  it('replaces (unloads others) on a plain pick even when a same-frame fuse is possible (#241)', () => {
+    const outcome = planSeriesLoad(
+      seriesDeps({
+        previous: result('base'),
+        merge: () => {
+          throw new Error('a plain pick must not fuse — it replaces');
+        },
+      }),
+    );
     expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
   });
 
@@ -213,9 +239,13 @@ describe('planSeriesLoad', () => {
     expect(knownSeen).toEqual([]); // the stub's allStructureSets
   });
 
-  it('fuses a same-frame series as an overlay', () => {
+  it('fuses a same-frame series as an overlay under ⌥', () => {
     const outcome = planSeriesLoad(
-      seriesDeps({ previous: result('base'), merge: (_c, i) => merged(i, true) }),
+      seriesDeps({
+        previous: result('base'),
+        intent: 'overlay',
+        merge: (_c, i) => merged(i, true),
+      }),
     );
     expect(outcome).toEqual({ kind: 'overlay', result: INCOMING, compare: false });
   });

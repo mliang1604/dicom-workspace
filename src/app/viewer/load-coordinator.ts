@@ -21,6 +21,13 @@ export type LoadOutcome =
   | { readonly kind: 'replace'; readonly result: LoadResult }
   /** Keep the base and add `result`'s overlay layer; `compare` also opens the columns. */
   | { readonly kind: 'overlay'; readonly result: LoadResult; readonly compare: boolean }
+  /**
+   * A plain file import: the batch was catalogued into the history but not shown —
+   * the viewport waits for the user to pick a series (#241). `cleared` is true when
+   * a confirmed patient switch emptied the catalog, so the viewer also unloads the
+   * stale view.
+   */
+  | { readonly kind: 'imported'; readonly cleared: boolean }
   /** A held-modifier drop that can't fuse: restore the prior view and flash `message`. */
   | { readonly kind: 'reject'; readonly message: string }
   /** The patient-switch confirm was declined: restore the prior view, do nothing else. */
@@ -38,14 +45,12 @@ export function cantFuseMessage(intent: 'overlay' | 'compare'): string {
   return `Can’t ${action}: drop a series that shares the current scan’s frame of reference.`;
 }
 
-/** How a merged load (already-shown view grown, or not) maps to an outcome for an intent. */
-function outcomeForMerged(merged: MergedLoad, intent: DropIntent): LoadOutcome {
-  if (intent === 'primary') {
-    return merged.added
-      ? { kind: 'overlay', result: merged.result, compare: false }
-      : { kind: 'replace', result: merged.result };
-  }
-  // A held modifier forces the overlay path; a series that can't fuse is a no-op.
+/**
+ * How a held-modifier merged load maps to an outcome: a series that fused becomes
+ * the overlay (⇧ also opening the compare columns), one that couldn't a reject.
+ * Only the ⌥/⇧ paths reach here — a plain (primary) load replaces outright.
+ */
+function outcomeForMerged(merged: MergedLoad, intent: 'overlay' | 'compare'): LoadOutcome {
   if (!merged.added) return { kind: 'reject', message: cantFuseMessage(intent) };
   return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
 }
@@ -73,11 +78,14 @@ export interface FileLoadDeps {
 
 /**
  * Decide how a freshly parsed file batch joins the view, mutating the patient
- * catalog as it goes. A held modifier (⌥/⇧) forces the fusion overlay path,
- * applying only to a same-patient, same-frame series — else a graceful reject. A
- * plain load runs the one-patient guard: a different patient prompts the injected
- * confirm (clearing the catalog on a switch, or cancelling), then fuses a
- * same-frame series of the current patient or replaces the view.
+ * catalog as it goes. A held modifier (⌥/⇧) is an explicit fusion request: it
+ * forces the overlay path against the current view, applying only to a
+ * same-patient, same-frame series — else a graceful reject. A plain load is
+ * ingest-only (#241): it runs the one-patient guard — a different patient prompts
+ * the injected confirm (clearing the catalog on a switch, or cancelling) — then
+ * catalogues the series into the history *without* displaying anything, leaving
+ * the user to pick which series to view. A confirmed switch reports `cleared` so
+ * the viewer also unloads the now-stale view of the previous patient.
  */
 export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
   const { previous, result, intent, confirm, currentPatientId, keepsOnePatient, merge, catalog } =
@@ -91,18 +99,14 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
     return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
   }
 
-  let switched = false;
+  let cleared = false;
   if (!keepsOnePatient(currentPatientId, result.series)) {
     if (!confirm()) return { kind: 'cancel' };
     catalog.clear();
-    switched = true;
+    cleared = true;
   }
   catalog.add(result.series);
-  // A patient switch starts a fresh view; otherwise a same-frame series stacks atop.
-  const merged = previous && !switched ? merge(previous, result) : { result, added: false };
-  return merged.added
-    ? { kind: 'overlay', result: merged.result, compare: false }
-    : { kind: 'replace', result: merged.result };
+  return { kind: 'imported', cleared };
 }
 
 /** Everything the history-panel series-load policy needs. */
@@ -116,17 +120,21 @@ export interface SeriesLoadDeps {
 }
 
 /**
- * Decide how a history-panel series joins the view. An already-shown series is a
- * no-op (⇧ still opens the compare columns); otherwise it's parsed and merged onto
- * the current view, then routed by intent exactly like a file load. Unlike a file
- * load it never touches the catalog or prompts — panel series are already known.
+ * Decide how a history-panel series joins the view. A plain (primary) pick
+ * *replaces* the view, unloading every other image so the viewport shows exactly
+ * the series the user chose (#241) — re-picking the current base simply reloads
+ * it. A held modifier instead fuses: ⌥ overlays and ⇧ overlays-and-compares a
+ * same-frame series, while an already-composited series is a no-op (⇧ still opens
+ * the compare columns). Unlike a file load it never touches the catalog or
+ * prompts — panel series are already known.
  */
 export function planSeriesLoad(deps: SeriesLoadDeps): LoadOutcome {
   const { previous, series, intent, loadSeries, merge } = deps;
-  if (previous && previous.layers.some((layer) => layer.id === series.uid)) {
+  if (intent !== 'primary' && previous?.layers.some((layer) => layer.id === series.uid)) {
     return { kind: 'noop', compare: intent === 'compare' };
   }
   const incoming = loadSeries(series, previous ? previous.allStructureSets : []);
+  if (intent === 'primary') return { kind: 'replace', result: incoming };
   const merged = previous ? merge(previous, incoming) : { result: incoming, added: false };
   return outcomeForMerged(merged, intent);
 }
