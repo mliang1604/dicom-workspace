@@ -203,6 +203,16 @@ export interface RoiLegendEntry {
   readonly visible: boolean;
 }
 
+/** The ROIs of one structure set, grouped under its label in the structures panel. */
+export interface RoiLegendGroup {
+  /** Index of the structure set this group lists. */
+  readonly setIndex: number;
+  /** The set's display label (Structure Set Label, else file name, else a fallback). */
+  readonly label: string;
+  /** The set's listed ROIs, in file order. */
+  readonly entries: RoiLegendEntry[];
+}
+
 /** A linked crosshair drawn over an MPR pane at the shared focus voxel. */
 interface CrosshairOverlay {
   /** Key of the pane it belongs to (see {@link Viewer.paneKey}). */
@@ -1101,7 +1111,7 @@ export class Viewer {
       { value: -1, label: 'All structure sets' },
       ...sets.map((ss, index) => ({
         value: index,
-        label: ss.label || ss.name || `Structure set ${index + 1}`,
+        label: structureSetLabel(ss, index),
       })),
     ];
   });
@@ -1124,6 +1134,18 @@ export class Viewer {
       this.selectedSetIndex(),
     ),
   );
+
+  /**
+   * The listed ROIs grouped by their structure set, each group labelled by the
+   * set, for the structures panel. With one set shown this is a single group; with
+   * "All structure sets" selected the panel renders one labelled group per set.
+   */
+  protected readonly roiGroups = computed<RoiLegendGroup[]>(() =>
+    groupRoiLegend(this.roiLegend(), this.structureSets()),
+  );
+
+  /** Whether to show per-set group headings: only when more than one group is listed. */
+  protected readonly showRoiGroupLabels = computed(() => this.roiGroups().length > 1);
 
   /** Whether every listed ROI is visible: drives the master toggle's checked state. */
   protected readonly allRoisVisible = computed(() => this.roiLegend().every((e) => e.visible));
@@ -3461,6 +3483,39 @@ export function buildRoiLegend(
     }
   });
   return entries;
+}
+
+/** A structure set's display label: its Structure Set Label, else its file name, else a fallback. */
+function structureSetLabel(ss: StructureSet | undefined, index: number): string {
+  return ss?.label || ss?.name || `Structure set ${index + 1}`;
+}
+
+/**
+ * Group {@link buildRoiLegend} rows by their structure set, preserving order, so
+ * the panel can render each set's ROIs under its own label rather than as one
+ * flat list (#259). The rows already arrive set-by-set, so one group is opened per
+ * new {@link RoiLegendEntry.setIndex}. Pure, so it can be unit-tested.
+ */
+export function groupRoiLegend(
+  entries: readonly RoiLegendEntry[],
+  structureSets: readonly StructureSet[],
+): RoiLegendGroup[] {
+  const groups: RoiLegendGroup[] = [];
+  const byIndex = new Map<number, RoiLegendGroup>();
+  for (const entry of entries) {
+    let group = byIndex.get(entry.setIndex);
+    if (!group) {
+      group = {
+        setIndex: entry.setIndex,
+        label: structureSetLabel(structureSets[entry.setIndex], entry.setIndex),
+        entries: [],
+      };
+      byIndex.set(entry.setIndex, group);
+      groups.push(group);
+    }
+    group.entries.push(entry);
+  }
+  return groups;
 }
 
 /**

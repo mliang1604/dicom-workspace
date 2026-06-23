@@ -1,6 +1,7 @@
 import {
   allRoiKeys,
   buildRoiLegend,
+  groupRoiLegend,
   dropHeadlineText,
   dropIntentOf,
   filterRawTags,
@@ -312,6 +313,75 @@ describe('buildRoiLegend', () => {
 
     expect(legend).toHaveLength(1);
     expect(legend[0]).toMatchObject({ key: '1:1', name: 'Liver' });
+  });
+});
+
+describe('groupRoiLegend', () => {
+  const oneContour: Contour[] = [{ geometricType: 'CLOSED_PLANAR', points: [[0, 0, 0]] }];
+
+  const roi = (over: Partial<Roi>): Roi => ({
+    number: 1,
+    name: 'Heart',
+    color: [255, 0, 0],
+    interpretedType: 'ORGAN',
+    contours: oneContour,
+    ...over,
+  });
+
+  const set = (rois: Roi[], over: Partial<StructureSet> = {}): StructureSet => ({
+    name: 'ss.dcm',
+    label: 'Plan',
+    frameOfReferenceUid: 'for-1',
+    referencedSeriesUids: [],
+    rois,
+    ...over,
+  });
+
+  const noOverrides = new Map<string, string>();
+  const noOpacities = new Map<string, number>();
+
+  it('groups the legend rows by structure set, labelled by the set, in order', () => {
+    const sets = [
+      set([roi({ number: 1 })], { label: 'Plan A' }),
+      set([roi({ number: 1, name: 'Liver' }), roi({ number: 2, name: 'Lung' })], {
+        label: 'Plan B',
+      }),
+    ];
+    const legend = buildRoiLegend(sets, new Set(), noOverrides, noOpacities, -1);
+
+    const groups = groupRoiLegend(legend, sets);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({ setIndex: 0, label: 'Plan A' });
+    expect(groups[0].entries.map((e) => e.key)).toEqual(['0:1']);
+    expect(groups[1]).toMatchObject({ setIndex: 1, label: 'Plan B' });
+    expect(groups[1].entries.map((e) => e.key)).toEqual(['1:1', '1:2']);
+  });
+
+  it('falls back to the file name, then a numbered label, when the set label is blank', () => {
+    const sets = [
+      set([roi({})], { label: null, name: 'rt.dcm' }),
+      set([roi({})], { label: null, name: '' }),
+    ];
+    const legend = buildRoiLegend(sets, new Set(), noOverrides, noOpacities, -1);
+
+    const groups = groupRoiLegend(legend, sets);
+
+    expect(groups.map((g) => g.label)).toEqual(['rt.dcm', 'Structure set 2']);
+  });
+
+  it('yields a single group when only one set has drawable ROIs', () => {
+    const sets = [set([roi({})], { label: 'Only' })];
+    const legend = buildRoiLegend(sets, new Set(), noOverrides, noOpacities, -1);
+
+    const groups = groupRoiLegend(legend, sets);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].label).toBe('Only');
+  });
+
+  it('is empty when the legend has no rows', () => {
+    expect(groupRoiLegend([], [])).toEqual([]);
   });
 });
 
