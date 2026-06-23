@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { syntheticCtSeries } from './fixtures/synthetic-dicom';
 import { syntheticRtStruct } from './fixtures/synthetic-rtstruct';
+import { importAndLoad } from './fixtures/load';
 
 const DISCLAIMER_KEY = 'dicom-workspace.disclaimer-acknowledged';
 
@@ -27,10 +28,10 @@ test('RTSTRUCT loads, lists ROIs, and the tools pane fits without scrolling', as
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/');
 
-  await page
-    .locator('input[type="file"][multiple]:not([webkitdirectory])')
-    .first()
-    .setInputFiles([...syntheticCtSeries(12, 32), syntheticRtStruct(12)]);
+  // Import the CT + RTSTRUCT, then pick the CT from history. The RTSTRUCT carries
+  // no pixel data, so it isn't loadable itself — picking the CT it annotates must
+  // re-associate its contours (retained across the ingest-only import, #241).
+  await importAndLoad(page, [...syntheticCtSeries(12, 32), syntheticRtStruct(12)]);
 
   // The structure set associated and its ROIs are listed.
   await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
@@ -92,10 +93,7 @@ test('builds ROI surface meshes for the 3D pane', async ({ page }) => {
     return;
   }
 
-  await page
-    .locator('input[type="file"][multiple]:not([webkitdirectory])')
-    .first()
-    .setInputFiles([...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
+  await importAndLoad(page, [...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
   await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
 
   // Cycle to the 3D-only layout (L: 3-pane -> 4-pane -> 3D-only).
@@ -131,10 +129,7 @@ test('middle-drag pans the 3D view', async ({ page }) => {
     return;
   }
 
-  await page
-    .locator('input[type="file"][multiple]:not([webkitdirectory])')
-    .first()
-    .setInputFiles([...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
+  await importAndLoad(page, [...syntheticCtSeries(24, 48), syntheticRtStruct(24)]);
   await expect(page.getByText('All structures')).toBeVisible({ timeout: 30_000 });
 
   // Cycle the layout to 3D-only (robust to the number of layouts in the cycle).

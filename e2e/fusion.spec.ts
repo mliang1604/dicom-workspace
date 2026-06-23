@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { syntheticCtSeries } from './fixtures/synthetic-dicom';
 import { syntheticRtDose } from './fixtures/synthetic-rtdose';
+import { importAndLoad, fuseSeriesByDrag } from './fixtures/load';
 
 const DISCLAIMER_KEY = 'dicom-workspace.disclaimer-acknowledged';
 
@@ -30,12 +31,13 @@ test('a same-frame dose loads as a fusion overlay; Compare shows both layers', a
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/');
 
-  await page
-    .locator('input[type="file"][multiple]:not([webkitdirectory])')
-    .first()
-    .setInputFiles([...syntheticCtSeries(12, 32), syntheticRtDose(6, 12)]);
+  // Import the CT + dose, load the CT as the base, then ⌥-drag the dose chip to
+  // fuse it as an overlay. A plain chip click would replace (#241); the held-Alt
+  // drop is the explicit fusion request that the old combined auto-load implied.
+  await importAndLoad(page, [...syntheticCtSeries(12, 32), syntheticRtDose(6, 12)]);
+  await fuseSeriesByDrag(page, 'RTDOSE');
 
-  // The dose is promoted to a fusion overlay, so the in-pane blend bar appears —
+  // The dose is fused as an overlay, so the in-pane blend bar appears —
   // which only happens once the overlay uploads and composites without error.
   const blendBar = page.locator('.blend-bar');
   await expect(blendBar).toBeVisible({ timeout: 30_000 });

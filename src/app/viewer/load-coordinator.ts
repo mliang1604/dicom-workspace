@@ -58,6 +58,7 @@ function outcomeForMerged(merged: MergedLoad, intent: 'overlay' | 'compare'): Lo
 /** The minimal patient-catalog surface the file-load policy mutates. */
 export interface CatalogOps {
   readonly add: (series: readonly Series[]) => void;
+  readonly addStructureSets: (sets: LoadResult['allStructureSets']) => void;
   readonly clear: () => void;
 }
 
@@ -96,6 +97,7 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
     const merged = previous && samePatient ? merge(previous, result) : { result, added: false };
     if (!merged.added) return { kind: 'reject', message: cantFuseMessage(intent) };
     catalog.add(result.series);
+    catalog.addStructureSets(result.allStructureSets);
     return { kind: 'overlay', result: merged.result, compare: intent === 'compare' };
   }
 
@@ -106,6 +108,10 @@ export function planFileLoad(deps: FileLoadDeps): LoadOutcome {
     cleared = true;
   }
   catalog.add(result.series);
+  // Retain any RTSTRUCTs from this batch so a later history pick of the image
+  // they annotate still shows their contours — the ingest-only import (#241)
+  // would otherwise drop them with the parsed batch.
+  catalog.addStructureSets(result.allStructureSets);
   return { kind: 'imported', cleared };
 }
 
@@ -114,6 +120,12 @@ export interface SeriesLoadDeps {
   readonly previous: LoadResult | null;
   readonly series: Series;
   readonly intent: DropIntent;
+  /**
+   * Structure sets retained across this session's imports, so picking the image
+   * an RTSTRUCT annotates re-associates its contours even when the parsed batch
+   * was catalogued ingest-only (#241) and nothing is currently displayed.
+   */
+  readonly knownStructureSets: LoadResult['allStructureSets'];
   /** Parse the series into a registry; may throw (the caller handles it). */
   readonly loadSeries: (series: Series, known: LoadResult['allStructureSets']) => LoadResult;
   readonly merge: (current: LoadResult, incoming: LoadResult) => MergedLoad;
@@ -129,11 +141,13 @@ export interface SeriesLoadDeps {
  * prompts — panel series are already known.
  */
 export function planSeriesLoad(deps: SeriesLoadDeps): LoadOutcome {
-  const { previous, series, intent, loadSeries, merge } = deps;
+  const { previous, series, intent, knownStructureSets, loadSeries, merge } = deps;
   if (intent !== 'primary' && previous?.layers.some((layer) => layer.id === series.uid)) {
     return { kind: 'noop', compare: intent === 'compare' };
   }
-  const incoming = loadSeries(series, previous ? previous.allStructureSets : []);
+  // The session's retained structure sets (superset of any single displayed
+  // load's) so a primary pick re-associates an RTSTRUCT by frame of reference.
+  const incoming = loadSeries(series, knownStructureSets);
   if (intent === 'primary') return { kind: 'replace', result: incoming };
   const merged = previous ? merge(previous, incoming) : { result: incoming, added: false };
   return outcomeForMerged(merged, intent);
@@ -168,6 +182,7 @@ export class LoadCoordinator {
       merge: (current, incoming) => this.loader.merge(current, incoming),
       catalog: {
         add: (series) => this.catalog.add(series),
+        addStructureSets: (sets) => this.catalog.addStructureSets(sets),
         clear: () => this.catalog.clear(),
       },
     });
@@ -179,6 +194,7 @@ export class LoadCoordinator {
       previous,
       series,
       intent,
+      knownStructureSets: this.catalog.structureSets(),
       loadSeries: (s, known) => this.loader.loadSeries(s, known),
       merge: (current, incoming) => this.loader.merge(current, incoming),
     });

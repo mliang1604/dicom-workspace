@@ -1,6 +1,18 @@
-import { PatientCatalog } from './patient-catalog';
-import type { Slice } from '../dicom/types';
+import { PatientCatalog, mergeStructureSets } from './patient-catalog';
+import type { Slice, StructureSet } from '../dicom/types';
 import type { Series } from '../dicom/series';
+
+/** A minimal structure set carrying just the fields the retention dedup reads. */
+function structureSet(name: string, overrides: Partial<StructureSet> = {}): StructureSet {
+  return {
+    name,
+    label: null,
+    frameOfReferenceUid: 'for-1',
+    referencedSeriesUids: [],
+    rois: [],
+    ...overrides,
+  };
+}
 
 /** A minimal series carrying just the catalog-grouping fields under test. */
 function series(uid: string, overrides: Partial<Series> = {}): Series {
@@ -111,5 +123,50 @@ describe('PatientCatalog', () => {
     expect(catalog.patients().size).toBe(0);
     expect(catalog.currentPatientId()).toBeNull();
     expect(catalog.currentPatient()).toBeNull();
+  });
+
+  it('retains structure sets across imports so a later pick can re-associate them (#241)', () => {
+    const catalog = new PatientCatalog();
+    catalog.addStructureSets([structureSet('rt-a')]);
+    catalog.addStructureSets([structureSet('rt-b')]);
+    expect(catalog.structureSets().map((s) => s.name)).toEqual(['rt-a', 'rt-b']);
+  });
+
+  it('dedups a re-imported structure set rather than stacking it', () => {
+    const catalog = new PatientCatalog();
+    catalog.addStructureSets([structureSet('rt-a')]);
+    catalog.addStructureSets([structureSet('rt-a')]); // same file re-imported
+    expect(catalog.structureSets()).toHaveLength(1);
+  });
+
+  it('ignores an empty structure-set batch', () => {
+    const catalog = new PatientCatalog();
+    catalog.addStructureSets([structureSet('rt-a')]);
+    catalog.addStructureSets([]);
+    expect(catalog.structureSets()).toHaveLength(1);
+  });
+
+  it('clear() drops retained structure sets too (patient switch)', () => {
+    const catalog = new PatientCatalog();
+    catalog.add([series('a')]);
+    catalog.addStructureSets([structureSet('rt-a')]);
+    catalog.clear();
+    expect(catalog.structureSets()).toEqual([]);
+  });
+});
+
+describe('mergeStructureSets', () => {
+  it('appends new sets and skips duplicates by source/frame/referenced series', () => {
+    const a = structureSet('a', { frameOfReferenceUid: 'for-1' });
+    const b = structureSet('b', { frameOfReferenceUid: 'for-2' });
+    const aAgain = structureSet('a', { frameOfReferenceUid: 'for-1' });
+    const merged = mergeStructureSets([a], [aAgain, b]);
+    expect(merged.map((s) => s.name)).toEqual(['a', 'b']);
+  });
+
+  it('treats same-name sets with different frames of reference as distinct', () => {
+    const a1 = structureSet('a', { frameOfReferenceUid: 'for-1' });
+    const a2 = structureSet('a', { frameOfReferenceUid: 'for-2' });
+    expect(mergeStructureSets([a1], [a2])).toHaveLength(2);
   });
 });

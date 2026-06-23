@@ -24,13 +24,18 @@ const INCOMING = result('incoming');
 interface RecordingCatalog extends CatalogOps {
   adds: number;
   clears: number;
+  structureSetAdds: number;
 }
 function recordingCatalog(): RecordingCatalog {
   return {
     adds: 0,
     clears: 0,
+    structureSetAdds: 0,
     add() {
       this.adds += 1;
+    },
+    addStructureSets() {
+      this.structureSetAdds += 1;
     },
     clear() {
       this.clears += 1;
@@ -70,6 +75,8 @@ describe('planFileLoad — primary', () => {
     expect(outcome).toEqual({ kind: 'imported', cleared: false });
     expect(catalog.adds).toBe(1);
     expect(catalog.clears).toBe(0);
+    // The batch's RTSTRUCTs are retained so a later pick can re-associate them (#241).
+    expect(catalog.structureSetAdds).toBe(1);
   });
 
   it('never fuses a plain import — it ingests even when a same-frame merge could add', () => {
@@ -169,6 +176,7 @@ function seriesDeps(overrides: Partial<SeriesLoadDeps>): SeriesLoadDeps {
     previous: null,
     series: { uid: 'incoming' } as Series,
     intent: 'primary',
+    knownStructureSets: [],
     loadSeries: () => INCOMING,
     merge: (_c, incoming) => ({ result: incoming, added: false }),
     ...overrides,
@@ -225,18 +233,23 @@ describe('planSeriesLoad', () => {
     expect(outcome).toEqual({ kind: 'replace', result: INCOMING });
   });
 
-  it('passes the known structure sets to the parser', () => {
+  it('passes the retained structure sets to the parser even with nothing displayed (#241)', () => {
+    // The regression fix: an RTSTRUCT imported ingest-only is retained on the
+    // catalog and threaded in here, so a primary pick re-associates it by frame
+    // of reference even though `previous` is null (nothing was on screen).
+    const retained = [{ name: 'rtstruct' }] as unknown as SeriesLoadDeps['knownStructureSets'];
     let knownSeen: unknown = 'unset';
     planSeriesLoad(
       seriesDeps({
-        previous: result('base'),
+        previous: null,
+        knownStructureSets: retained,
         loadSeries: (_s, known) => {
           knownSeen = known;
           return INCOMING;
         },
       }),
     );
-    expect(knownSeen).toEqual([]); // the stub's allStructureSets
+    expect(knownSeen).toBe(retained);
   });
 
   it('fuses a same-frame series as an overlay under ⌥', () => {

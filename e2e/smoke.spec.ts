@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { syntheticCtSeries } from './fixtures/synthetic-dicom';
+import { importFiles, pickSeries } from './fixtures/load';
 
 const DISCLAIMER_KEY = 'dicom-workspace.disclaimer-acknowledged';
 
@@ -59,17 +60,20 @@ test.describe('DICOM Workspace smoke', () => {
 
     const webgpu = await hasWebGpu(page);
 
-    // Feed the synthetic CT series into the hidden multi-file input.
-    const filesInput = page.locator('input[type="file"][multiple]:not([webkitdirectory])').first();
-    await filesInput.setInputFiles(syntheticCtSeries(12, 32));
+    // Import the synthetic CT series. Since #241 an import is ingest-only: it
+    // catalogues into the history panel without displaying anything.
+    await importFiles(page, syntheticCtSeries(12, 32));
 
     const status = page.locator('div.status');
     const layout = page.getByRole('button', { name: /layout/i });
 
     if (webgpu) {
-      // The layout control is gated on isReady() — enabled only once the GPU is
-      // up, the shader pipeline built, and a volume assembled. A broken render
-      // path (shader/device/pipeline failure) leaves it disabled and fails here.
+      // Pick the CT from the history to bring the viewer up (the explicit load
+      // step that replaced the old auto-load on import). pickSeries retries until
+      // the layout control (gated on isReady()) enables — i.e. the GPU is up, the
+      // shader pipeline built, and a volume assembled. A broken render path
+      // (shader/device/pipeline failure) leaves it disabled and fails there.
+      await pickSeries(page, 'CT');
       await expect(layout).toBeEnabled({ timeout: 30_000 });
       await expect(status).not.toHaveClass(/error/);
 

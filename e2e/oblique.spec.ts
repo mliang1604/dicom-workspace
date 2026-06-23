@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { syntheticCtSeries } from './fixtures/synthetic-dicom';
+import { importAndLoad } from './fixtures/load';
 
 const DISCLAIMER_KEY = 'dicom-workspace.disclaimer-acknowledged';
 
@@ -33,10 +34,7 @@ test('oblique tilt knob can be grabbed, reset, and grabbed again', async ({ page
     return;
   }
 
-  await page
-    .locator('input[type="file"][multiple]:not([webkitdirectory])')
-    .first()
-    .setInputFiles(syntheticCtSeries(10, 32));
+  await importAndLoad(page, syntheticCtSeries(10, 32));
 
   const layout = page.getByRole('button', { name: /layout/i });
   await expect(layout).toBeEnabled({ timeout: 30_000 });
