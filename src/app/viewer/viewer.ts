@@ -24,14 +24,12 @@ import {
   type Vec2,
 } from '../../render/layout';
 import {
-  clampPan,
   defaultSlabThicknessMm,
   ensureSurfaceSortScratch,
   isDvr,
   oneToOneZoom,
   packSurfaceFrame,
   ProjectionMode,
-  rezoomPan,
   SliceRenderer,
   type PaneView,
   type SurfaceFrame,
@@ -44,7 +42,6 @@ import {
   linkedSliceIndex,
   NO_OBLIQUE,
   planeExtentMm,
-  sliceCountFor,
   slicePlaneCorners,
   volumeBounds,
   type ObliqueRotation,
@@ -70,18 +67,11 @@ import {
   roiBounds,
   type RoiShape,
 } from '../../render/measure';
-import {
-  windowLevelDrag,
-  windowLevelSensitivity,
-  windowPresets,
-  type WindowLevel,
-  type WindowPreset,
-} from '../../render/window-level';
+import { windowPresets, type WindowLevel, type WindowPreset } from '../../render/window-level';
 import {
   cameraBasis,
   clipPlaneGizmoGeometry,
   projectToPane,
-  rezoomCameraPan,
   viewBasis,
   type ClipPlaneGizmoGeometry,
 } from '../../render/camera';
@@ -120,7 +110,7 @@ import {
 } from '../../dicom/types';
 import { COLORMAPS } from '../../render/colormap';
 import { clamp } from '../../dicom/math';
-import { add, length, scale } from '../../dicom/vec3';
+import { add, scale } from '../../dicom/vec3';
 import {
   flattenSurfaceMeshes,
   loftRoiMesh,
@@ -143,6 +133,7 @@ import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coord
 import { readDropped } from './drop-files';
 import { pickCaptureTarget } from './capture';
 import { CaptureController, type ScreenshotTarget } from './capture-controller';
+import { InteractionController, type Drag } from './interaction-controller';
 import { RangeFill } from './range-fill';
 import { HistoryPanel } from './history-panel/history-panel';
 import { SERIES_DND_MIME } from './history-panel/series-chip';
@@ -158,7 +149,7 @@ type LoadState =
   | { readonly status: 'error'; readonly message: string };
 
 /** A pane's placement on screen, in CSS pixels, plus what it shows. */
-type PanePlacement =
+export type PanePlacement =
   | {
       readonly kind: 'mpr';
       readonly orientation: Orientation;
@@ -306,56 +297,6 @@ interface ObliqueGizmo {
   readonly active: boolean;
 }
 
-/**
- * An in-progress drag: panning an MPR pane, orbiting the 3D pane, or adjusting
- * the shared window/level. The window/level drag remembers the window it began
- * from and the pointer's start, so the move maps total displacement (not a
- * per-event delta) onto the new window — see {@link Viewer.dragWindow}.
- */
-type Drag =
-  | {
-      readonly kind: 'pan';
-      readonly orientation: Orientation;
-      /** Compare-group the panned pane belongs to (0 outside Compare). */
-      readonly group: number;
-      readonly lastX: number;
-      readonly lastY: number;
-    }
-  | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
-  | { readonly kind: 'cameraPan'; readonly lastX: number; readonly lastY: number }
-  | {
-      readonly kind: 'clipPlane';
-      /** Cut-plane offset (mm) when the drag began. */
-      readonly startOffset: number;
-      /** Pointer position when the drag began, in client pixels. */
-      readonly startX: number;
-      readonly startY: number;
-      /** Screen-space drag axis: CSS pixels the handle moves per mm of offset. */
-      readonly axisX: number;
-      readonly axisY: number;
-      /** Largest |offset| (mm) that keeps the plane within the volume. */
-      readonly maxOffset: number;
-    }
-  | {
-      readonly kind: 'windowLevel';
-      /** The overlay layer's id whose window this drag edits, or null for the base. */
-      readonly layerId: string | null;
-      readonly startCenter: number;
-      readonly startWidth: number;
-      readonly startX: number;
-      readonly startY: number;
-    }
-  | {
-      readonly kind: 'oblique';
-      /** Which MPR pane's plane is being tilted. */
-      readonly orientation: Orientation;
-      /** Pointer position and tilt angles when the drag began. */
-      readonly startX: number;
-      readonly startY: number;
-      readonly startTiltU: number;
-      readonly startTiltV: number;
-    };
-
 const NO_PAN: Vec2 = { x: 0, y: 0 };
 const NO_PANS: PerOrientationPan = [NO_PAN, NO_PAN, NO_PAN];
 
@@ -378,17 +319,11 @@ const MODE_TAGS: Readonly<Record<ProjectionMode, string>> = {
 /** Order the main (top-left) pane cycles through when swapping. */
 const ORIENTATION_ORDER = [Orientation.Axial, Orientation.Coronal, Orientation.Sagittal] as const;
 
-const ZOOM_STEP = 1.1;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 
 /** Frames-per-second options offered in the cine speed selector, in display order. */
 const CINE_FPS_OPTIONS = [5, 10, 15, 20, 30] as const;
-
-/** Radians of orbit per pixel dragged over the 3D pane. */
-const ORBIT_SPEED = 0.01;
-/** Cap the elevation just shy of the poles to avoid a degenerate up vector. */
-const MAX_ELEVATION = 1.45;
 
 /**
  * Only warn about interpolation when the widest gap spans more than this
@@ -434,6 +369,7 @@ const NOTICE_MS = 3600;
     CompareStore,
     LoadCoordinator,
     CaptureController,
+    InteractionController,
   ],
   templateUrl: './viewer.html',
   styleUrl: './viewer.css',
@@ -457,6 +393,8 @@ export class Viewer {
   private readonly loadCoordinator = inject(LoadCoordinator);
   /** Owns the screenshot / rotation-capture export domain; wired in the constructor. */
   private readonly capture = inject(CaptureController);
+  /** Owns the canvas pointer/drag/wheel state machine; wired in the constructor. */
+  private readonly interaction = inject(InteractionController);
   private readonly recentStore = inject(RecentStore);
   private readonly preferencesStore = inject(PreferencesStore);
   /** Fusion / layers override state and logic; provided per-component (see providers). */
@@ -597,8 +535,12 @@ export class Viewer {
     const points = this.transferFunction().controlPoints;
     return index !== null && index > 0 && index < points.length - 1 && points.length > 2;
   });
-  /** The in-progress drag (pan or orbit), or null when no button is held. */
-  private readonly drag = signal<Drag | null>(null);
+  /**
+   * The in-progress drag (pan / orbit / window-level / gizmo), or null when no
+   * button is held. Owned by the {@link interaction} controller, which runs the
+   * pointer/wheel state machine; the in-pane gizmo handlers here share it.
+   */
+  private readonly drag = this.interaction.drag;
   /**
    * True briefly after a wheel-zoom or window/level change so the MIP renders at
    * reduced quality; cleared by a {@link MIP_SETTLE_MS} timeout for the final
@@ -1655,6 +1597,66 @@ export class Viewer {
       naming: () => this.seriesList().find((s) => s.uid === this.selectedSeriesUid()) ?? null,
       now: () => new Date(),
       download: downloadBlob,
+    });
+
+    // Wire the interaction controller to the panes / per-orientation view tuples
+    // and the 3D camera through lazy callbacks, the same way: it owns the pointer/
+    // wheel state machine without reaching into the component's signals directly.
+    this.interaction.init({
+      isReady: () => this.isReady(),
+      panes: () => this.panes(),
+      canvas: () => this.canvasRef().nativeElement,
+      placementAt: (event) => this.placementAtEvent(event),
+      paneKey: (pane) => this.paneKey(pane),
+      volume: () => this.volume(),
+      groupVolume: (group) => this.groupVolume(group),
+      groupIsIndependent: (group) => this.groupIsIndependent(group),
+      paneZoom: (group, orientation) => this.paneZoom(group, orientation),
+      panePan: (group, orientation) => this.panePan(group, orientation),
+      masterSliceIndex: (orientation) => this.sliceIndices()[orientation],
+      groupSliceIndex: (group, orientation) => this.paneSliceIndex(group, orientation),
+      setMasterPan: (orientation, pan) =>
+        this.pans.update((pans) => withValue(pans, orientation, pan)),
+      setMasterZoom: (orientation, zoom) =>
+        this.zooms.update((zooms) => withValue(zooms, orientation, zoom)),
+      setMasterSlice: (orientation, index) =>
+        this.sliceIndices.update((indices) => withValue(indices, orientation, index)),
+      setGroupPan: (group, orientation, pan) => {
+        const nav = this.groupNav()[group];
+        if (nav) this.updateGroupNav(group, { pans: withValue(nav.pans, orientation, pan) });
+      },
+      setGroupZoomPan: (group, orientation, zoom, pan) => {
+        const nav = this.groupNav()[group];
+        if (nav)
+          this.updateGroupNav(group, {
+            zooms: withValue(nav.zooms, orientation, zoom),
+            pans: withValue(nav.pans, orientation, pan),
+          });
+      },
+      setGroupSlice: (group, orientation, index) => {
+        const nav = this.groupNav()[group];
+        if (nav)
+          this.updateGroupNav(group, {
+            sliceIndices: withValue(nav.sliceIndices, orientation, index),
+          });
+      },
+      clampZoom: (zoom) => clamp(zoom, MIN_ZOOM, MAX_ZOOM),
+      layers: () => this.layers(),
+      isCompare: () => this.isCompare(),
+      selectedOverlay: () => this.selectedOverlay(),
+      layerWindow: (layer) => this.layerWindow(layer),
+      setLayerWindow: (layer, next) => this.setLayerWindow(layer, next),
+      camera3d: this.camera3d,
+      renderer: () => this.renderer(),
+      stopCine: () => this.cine.stop(),
+      markMipSettling: () => this.markMipSettling(),
+      setCursor: (point) => this.cursor.set(point),
+      setHoveredKey: (key) => this.hoveredKey.set(key),
+      setActiveCompareGroup: (group) => this.activeCompareGroup.set(group),
+      setFocus: (placement, event) => this.setFocus(placement, event),
+      setFocusFromMip: (placement, event) => this.setFocusFromMip(placement, event),
+      activeTool: () => this.activeTool(),
+      placeMeasurePoint: (placement, event) => this.placeMeasurePoint(placement, event),
     });
 
     afterNextRender(() => void this.initGpu());
@@ -2737,354 +2739,34 @@ export class Viewer {
     (entry.kind === 'folder' ? folderInput : filesInput).click();
   }
 
-  /** Begin a click-drag over the pane under the pointer. */
+  /** Begin a click-drag over the pane under the pointer (delegated to the controller). */
   protected onPointerDown(event: PointerEvent): void {
-    if (!this.isReady()) return;
-    const placement = this.placementAtEvent(event);
-    if (!placement) return;
-
-    // Right-button drag adjusts window/level over any pane — the standard PACS
-    // gesture, picked because it never clashes with the left-button pan/orbit or
-    // the Ctrl+wheel zoom. Horizontal moves the centre, vertical the width (see
-    // dragWindow). It targets the pane's own column: the overlay layer over a
-    // Compare overlay column, the base elsewhere. The context menu is suppressed below.
-    if (event.button === 2) {
-      event.preventDefault();
-      this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
-      const layer = this.wlTargetForPlacement(placement);
-      const start = this.layerWindow(layer);
-      this.drag.set({
-        kind: 'windowLevel',
-        layerId: layer && layer.role !== 'base' ? layer.id : null,
-        startCenter: start.center,
-        startWidth: start.width,
-        startX: event.clientX,
-        startY: event.clientY,
-      });
-      return;
-    }
-
-    // Pan gesture — middle-button drag, or Alt+left-drag for trackpads. Over the
-    // 3D pane it slides the orthographic camera (panX/panY), so you can recentre
-    // after a cursor-anchored zoom without losing the orbit; over an MPR pane it
-    // pans that view like a left-drag.
-    if (event.button === 1 || (event.button === 0 && event.altKey)) {
-      event.preventDefault();
-      this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
-      this.drag.set(
-        placement.kind === 'mip'
-          ? { kind: 'cameraPan', lastX: event.clientX, lastY: event.clientY }
-          : {
-              kind: 'pan',
-              orientation: placement.orientation,
-              group: placement.group,
-              lastX: event.clientX,
-              lastY: event.clientY,
-            },
-      );
-      return;
-    }
-
-    if (event.button !== 0) return;
-    event.preventDefault();
-
-    // Shift+left-click sets the shared focus voxel and navigates every pane to it,
-    // instead of starting a pan/orbit — a modifier that never clashes with the
-    // plain left-drag or the right-drag W/L. Over an MPR pane it probes the slice;
-    // over the 3D pane it ray-casts the projection to the location it came from.
-    if (event.shiftKey) {
-      if (placement.kind === 'mpr') this.setFocus(placement, event);
-      else this.setFocusFromMip(placement, event);
-      return;
-    }
-
-    // With a measurement tool active, a left-click on an MPR pane places the next
-    // point instead of starting a pan; the 3D pane keeps its orbit gesture.
-    if (this.activeTool() !== 'none' && placement.kind === 'mpr') {
-      this.placeMeasurePoint(placement, event);
-      return;
-    }
-
-    // Capture so the drag keeps tracking even if the pointer leaves the canvas.
-    this.canvasRef().nativeElement.setPointerCapture(event.pointerId);
-    // The 3D pane orbits; the MPR panes pan.
-    this.drag.set(
-      placement.kind === 'mip'
-        ? { kind: 'orbit', lastX: event.clientX, lastY: event.clientY }
-        : {
-            kind: 'pan',
-            orientation: placement.orientation,
-            group: placement.group,
-            lastX: event.clientX,
-            lastY: event.clientY,
-          },
-    );
+    this.interaction.onPointerDown(event);
   }
 
   /** Suppress the browser context menu so right-button W/L drags work. */
   protected onContextMenu(event: Event): void {
-    if (this.isReady()) event.preventDefault();
+    this.interaction.onContextMenu(event);
   }
 
   protected onPointerMove(event: PointerEvent): void {
-    const drag = this.drag();
-    if (drag?.kind === 'pan') this.dragPan(event, drag);
-    else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
-    else if (drag?.kind === 'cameraPan') this.dragCameraPan(event, drag);
-    else if (drag?.kind === 'windowLevel') this.dragWindow(event, drag);
-
-    const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
-    this.cursor.set({ x, y });
-    const hovered = placementAt(this.panes(), x, y);
-    this.hoveredKey.set(hovered ? this.paneKey(hovered) : null);
-    // Remember the last MPR column hovered so the toolbar window/level controls
-    // keep targeting it once the pointer moves off the panes onto the toolbar.
-    if (hovered?.kind === 'mpr') this.activeCompareGroup.set(hovered.group);
+    this.interaction.onPointerMove(event);
   }
 
   protected onPointerUp(event: PointerEvent): void {
-    if (!this.drag()) return;
-    const canvas = this.canvasRef().nativeElement;
-    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    this.drag.set(null);
+    this.interaction.onPointerUp(event);
   }
 
   protected onPointerLeave(event: PointerEvent): void {
-    // Moving the cursor onto an in-pane overlay handle (the oblique tilt knob, a
-    // measurement handle) makes the canvas fire pointerleave even though the
-    // pointer hasn't really left the panes. Clearing the hovered pane here would
-    // unmount the at-rest oblique knob the instant it's hovered — leaving nothing
-    // under the press, so the knob can't be grabbed. Keep the hover in that case.
-    const related = event.relatedTarget as Element | null;
-    if (related?.closest?.('.oblique-knob, .measure-handle')) return;
-    this.cursor.set(null);
-    this.hoveredKey.set(null);
-  }
-
-  /** Accumulate a pointer move into the 3D camera's orbit angles. */
-  private dragOrbit(event: PointerEvent, drag: Extract<Drag, { kind: 'orbit' }>): void {
-    const dx = event.clientX - drag.lastX;
-    const dy = event.clientY - drag.lastY;
-    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
-    this.camera3d.update((cam) => ({
-      ...cam,
-      azimuth: cam.azimuth + dx * ORBIT_SPEED,
-      elevation: clamp(cam.elevation - dy * ORBIT_SPEED, -MAX_ELEVATION, MAX_ELEVATION),
-    }));
-  }
-
-  /**
-   * Slide the orthographic 3D camera by a pointer move (panX/panY in patient mm).
-   * Maps screen pixels to mm via the image-plane half-extents so the volume
-   * tracks the cursor 1:1, letting you recentre after a cursor-anchored zoom.
-   */
-  private dragCameraPan(event: PointerEvent, drag: Extract<Drag, { kind: 'cameraPan' }>): void {
-    const dx = event.clientX - drag.lastX;
-    const dy = event.clientY - drag.lastY;
-    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
-
-    const volume = this.volume();
-    const mip = this.panes().find((pane) => pane.kind === 'mip');
-    if (!volume || !mip || mip.rect.width < 1 || mip.rect.height < 1) return;
-    const basis = cameraBasis(volume, this.camera3d(), mip.rect.width, mip.rect.height);
-    const mmPerPxX = (2 * length(basis.axisU)) / mip.rect.width;
-    const mmPerPxY = (2 * length(basis.axisV)) / mip.rect.height;
-    this.camera3d.update((cam) => ({
-      ...cam,
-      panX: cam.panX - dx * mmPerPxX,
-      panY: cam.panY + dy * mmPerPxY,
-    }));
-  }
-
-  /** Accumulate a pointer move into the dragged pane's pan, clamped to bounds. */
-  private dragPan(event: PointerEvent, drag: Extract<Drag, { kind: 'pan' }>): void {
-    this.drag.set({ ...drag, lastX: event.clientX, lastY: event.clientY });
-
-    const { group, orientation } = drag;
-    const placement = this.panes().find(
-      (pane) => pane.kind === 'mpr' && pane.group === group && pane.orientation === orientation,
-    );
-    const independent = this.groupIsIndependent(group);
-    const volume = independent ? this.groupVolume(group) : this.volume();
-    if (!placement || !volume || placement.rect.width < 1 || placement.rect.height < 1) return;
-
-    const dx = (event.clientX - drag.lastX) / placement.rect.width;
-    const dy = (event.clientY - drag.lastY) / placement.rect.height;
-    const zoom = this.paneZoom(group, orientation);
-    const current = this.panePan(group, orientation);
-    const moved = clampPan(volume, orientation, placement.rect.width, placement.rect.height, zoom, {
-      x: current.x + dx,
-      y: current.y + dy,
-    });
-
-    if (independent) {
-      const nav = this.groupNav()[group];
-      if (!nav) return;
-      this.updateGroupNav(group, { pans: withValue(nav.pans, orientation, moved) });
-    } else {
-      this.pans.update((pans) => withValue(pans, orientation, moved));
-    }
-  }
-
-  /**
-   * Map a window/level drag onto the shared window: horizontal displacement
-   * shifts the centre, vertical the width, both measured from where the drag
-   * began so the window tracks total movement rather than accumulating jitter.
-   */
-  /**
-   * The layer a window/level gesture over a pane targets: the overlay layer for a
-   * Compare overlay column (group ≥ 1), the base otherwise — so right-dragging the
-   * right column windows only that column. Mirrors {@link activeWlLayer}, but keyed
-   * to a specific pane rather than the hovered one.
-   */
-  private wlTargetForPlacement(placement: PanePlacement): Layer | null {
-    const base = baseLayer(this.layers()) ?? null;
-    if (placement.kind !== 'mpr' || !this.isCompare()) return base;
-    const overlay = this.selectedOverlay();
-    return placement.group >= 1 && overlay ? overlay : base;
-  }
-
-  private dragWindow(event: PointerEvent, drag: Extract<Drag, { kind: 'windowLevel' }>): void {
-    const layer = drag.layerId ? (this.layers().find((l) => l.id === drag.layerId) ?? null) : null;
-    const volume = layer?.volume ?? this.volume();
-    if (!volume) return;
-    const next = windowLevelDrag(
-      { center: drag.startCenter, width: drag.startWidth },
-      event.clientX - drag.startX,
-      event.clientY - drag.startY,
-      windowLevelSensitivity(volume.min, volume.max),
-    );
-    this.setLayerWindow(layer, next);
-    this.markMipSettling();
+    this.interaction.onPointerLeave(event);
   }
 
   /**
    * Wheel over an MPR pane scrolls its slices (Ctrl+wheel zooms it); wheel over
-   * the 3D pane zooms the orbit camera.
+   * the 3D pane zooms the orbit camera. Delegated to the interaction controller.
    */
   protected onWheel(event: WheelEvent): void {
-    if (!this.isReady()) return;
-    const placement = this.placementAtEvent(event);
-    if (!placement) return;
-
-    event.preventDefault();
-    if (placement.kind === 'mip') {
-      const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-      this.zoomCamera(event.deltaY, placement.rect, {
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
-      });
-    } else if (event.ctrlKey) {
-      const bounds = this.canvasRef().nativeElement.getBoundingClientRect();
-      this.zoomPane(placement, event.deltaY, {
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
-      });
-    } else {
-      this.scrollSlice(placement, event.deltaY);
-    }
-  }
-
-  /**
-   * Wheel over the 3D pane magnifies (scroll up) or shrinks the MIP, anchoring
-   * the zoom on the cursor: the structure under the pointer stays roughly fixed,
-   * matching the MPR panes' Ctrl+wheel zoom. The orbit camera's `zoom` changes and
-   * its in-plane pan shifts to hold the cursor's world point in place.
-   */
-  private zoomCamera(deltaY: number, rect: PaneRect, cursor: Vec2): void {
-    if (deltaY === 0) return;
-    const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    const volume = this.volume();
-    if (!volume || rect.width < 1 || rect.height < 1) return;
-    const from = this.camera3d();
-    const to = clamp(from.zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    if (to === from.zoom) return;
-
-    // Cursor → centred device coords with +y up, matching the raycaster and pick.
-    const ndcX = ((cursor.x - rect.x) / rect.width) * 2 - 1;
-    const ndcY = 1 - ((cursor.y - rect.y) / rect.height) * 2;
-    const { panX, panY } = rezoomCameraPan(volume, from, rect.width, rect.height, to, ndcX, ndcY);
-    this.camera3d.set({ ...from, zoom: to, panX, panY });
-    this.markMipSettling();
-  }
-
-  private scrollSlice(placement: Extract<PanePlacement, { kind: 'mpr' }>, deltaY: number): void {
-    const renderer = this.renderer();
-    const step = Math.sign(deltaY);
-    if (!renderer || step === 0) return;
-    this.cine.stop(); // a manual scroll takes over from cine playback
-
-    const { group, orientation } = placement;
-    // Unlinked non-base group: step its own index against its own grid.
-    if (this.groupIsIndependent(group)) {
-      const volume = this.groupVolume(group);
-      const nav = this.groupNav()[group];
-      if (!volume || !nav) return;
-      const max = sliceCountFor(volume, orientation) - 1;
-      const next = clamp(nav.sliceIndices[orientation] + step, 0, max);
-      if (next !== nav.sliceIndices[orientation]) {
-        this.updateGroupNav(group, {
-          sliceIndices: withValue(nav.sliceIndices, orientation, next),
-        });
-      }
-      return;
-    }
-
-    // Linked (or group 0): step the master index; linked groups re-derive their
-    // own slice from the shared patient plane, so they follow to the same level.
-    const max = renderer.sliceCount(orientation) - 1;
-    this.sliceIndices.update((indices) => {
-      const next = clamp(indices[orientation] + step, 0, max);
-      return next === indices[orientation] ? indices : withValue(indices, orientation, next);
-    });
-  }
-
-  private zoomPane(
-    placement: Extract<PanePlacement, { kind: 'mpr' }>,
-    deltaY: number,
-    cursor: Vec2,
-  ): void {
-    if (deltaY === 0) return;
-    const { group, orientation } = placement;
-    const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP; // scroll up zooms in
-    const from = this.paneZoom(group, orientation);
-    const to = clamp(from * factor, MIN_ZOOM, MAX_ZOOM);
-    if (to === from) return;
-
-    const independent = this.groupIsIndependent(group);
-    const volume = independent ? this.groupVolume(group) : this.volume();
-    if (!volume || placement.rect.width < 1 || placement.rect.height < 1) return;
-    // Pivot the zoom on the cursor, not the image centre: holding the plane point
-    // under the cursor fixed keeps the spot being inspected in place. The anchor
-    // is the cursor in screen-uv (pane-fraction) units. Then re-clamp, since the
-    // pan bound scales with zoom.
-    const anchor: Vec2 = {
-      x: (cursor.x - placement.rect.x) / placement.rect.width,
-      y: (cursor.y - placement.rect.y) / placement.rect.height,
-    };
-    const anchored = rezoomPan(this.panePan(group, orientation), from, to, anchor);
-    const pan = clampPan(
-      volume,
-      orientation,
-      placement.rect.width,
-      placement.rect.height,
-      to,
-      anchored,
-    );
-
-    if (independent) {
-      const nav = this.groupNav()[group];
-      if (!nav) return;
-      this.updateGroupNav(group, {
-        zooms: withValue(nav.zooms, orientation, to),
-        pans: withValue(nav.pans, orientation, pan),
-      });
-    } else {
-      this.zooms.update((zooms) => withValue(zooms, orientation, to));
-      this.pans.update((pans) => withValue(pans, orientation, pan));
-    }
+    this.interaction.onWheel(event);
   }
 
   protected onWindowCenterInput(event: Event): void {

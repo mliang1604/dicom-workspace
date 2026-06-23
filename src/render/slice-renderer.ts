@@ -1281,6 +1281,40 @@ export function rezoomPan(
 }
 
 /**
+ * Cursor-anchored pan for a wheel zoom over an MPR pane. Turns the cursor
+ * (canvas-relative CSS pixels) into the pane's screen-uv anchor, re-zooms the pan
+ * about it so the plane point under the cursor stays put across the zoom change,
+ * then re-clamps — the pan bound grows with zoom. Folds the {@link rezoomPan} and
+ * {@link clampPan} geometry a cursor-anchored zoom composes behind one tested call.
+ */
+export function cursorZoomPan(
+  volume: Volume,
+  orientation: Orientation,
+  rect: PaneRect,
+  fromZoom: number,
+  toZoom: number,
+  pan: Vec2,
+  cursor: Vec2,
+): Vec2 {
+  const anchor: Vec2 = {
+    x: (cursor.x - rect.x) / rect.width,
+    y: (cursor.y - rect.y) / rect.height,
+  };
+  const anchored = rezoomPan(pan, fromZoom, toZoom, anchor);
+  return clampPan(volume, orientation, rect.width, rect.height, toZoom, anchored);
+}
+
+/**
+ * Next slice index after one wheel notch: step by the sign of `deltaY` (scroll
+ * down advances) and clamp into `[0, max]`. The same index arithmetic the
+ * linked-master and independent-group scroll paths share — they differ only in
+ * which grid's current index and `max` they feed in.
+ */
+export function steppedSliceIndex(current: number, deltaY: number, max: number): number {
+  return Math.min(max, Math.max(0, current + Math.sign(deltaY)));
+}
+
+/**
  * Map a patient-space direction into texture space with the linear part of the
  * column-major `patientToTex` affine (w = 0), matching the shader's
  * `(patientToTex * vec4(forward, 0)).xyz`. Used to orient the cut-away planes
