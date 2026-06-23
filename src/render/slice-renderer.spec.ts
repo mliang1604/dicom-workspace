@@ -4,6 +4,7 @@ import { patientToTexMatrix } from './reslice';
 import type { CameraBasis } from './camera';
 import {
   clampPan,
+  cursorZoomPan,
   defaultSlabThicknessMm,
   ensureSurfaceSortScratch,
   isDvr,
@@ -15,6 +16,7 @@ import {
   projectionModeCode,
   projectionWindow,
   rezoomPan,
+  steppedSliceIndex,
   type SliceParams,
 } from './slice-renderer';
 
@@ -360,6 +362,71 @@ describe('rezoomPan', () => {
     const pan = { x: 0.1, y: -0.2 };
     const next = rezoomPan(pan, 1, 2, anchor);
     expect(planeAt(anchor, next, 2)).toEqual(planeAt(anchor, pan, 1));
+  });
+});
+
+describe('cursorZoomPan', () => {
+  const volume = makeVolume([4, 4, 4]); // square plane (1 mm voxels)
+  const rect = { x: 0, y: 0, width: 100, height: 100 };
+
+  it('reduces to scaling the pan by the zoom ratio for a centred cursor', () => {
+    // A cursor at the pane centre anchors on (0.5, 0.5), so the result matches
+    // rezoomPan's default (within the clamp bounds).
+    const centre = { x: 50, y: 50 };
+    expect(
+      cursorZoomPan(volume, Orientation.Axial, rect, 1, 2, { x: 0.1, y: -0.1 }, centre),
+    ).toEqual(rezoomPan({ x: 0.1, y: -0.1 }, 1, 2));
+  });
+
+  it('holds the plane point under an off-centre cursor fixed across the zoom', () => {
+    // With aspectScale 1, screen-uv `a` maps to plane point `(a - 0.5 - pan)/zoom + 0.5`.
+    const planeAt = (a: Vec2, pan: Vec2, zoom: number): Vec2 => ({
+      x: (a.x - 0.5 - pan.x) / zoom + 0.5,
+      y: (a.y - 0.5 - pan.y) / zoom + 0.5,
+    });
+    const cursor = { x: 100, y: 0 }; // top-right corner → anchor (1, 0)
+    const anchor = { x: 1, y: 0 };
+    const pan = { x: 0.1, y: -0.2 };
+    const next = cursorZoomPan(volume, Orientation.Axial, rect, 1, 2, pan, cursor);
+    expect(planeAt(anchor, next, 2)).toEqual(planeAt(anchor, pan, 1));
+  });
+
+  it('re-clamps the anchored pan to the (zoom-scaled) bound', () => {
+    // Zooming out to 1x about a corner would push the pan past the half-pane bound;
+    // the result is clamped rather than left out of range.
+    const cursor = { x: 100, y: 100 };
+    const pan = { x: 0.9, y: 0.9 };
+    const result = cursorZoomPan(volume, Orientation.Axial, rect, 4, 1, pan, cursor);
+    expect(result).toEqual(clampPan(volume, Orientation.Axial, 100, 100, 1, result));
+    expect(Math.abs(result.x)).toBeLessThanOrEqual(0.5);
+  });
+
+  it('honours a non-zero pane origin when locating the anchor', () => {
+    const offset = { x: 200, y: 200, width: 100, height: 100 };
+    const cursor = { x: 250, y: 250 }; // centre of the offset pane
+    expect(
+      cursorZoomPan(volume, Orientation.Axial, offset, 1, 2, { x: 0.1, y: 0 }, cursor),
+    ).toEqual(rezoomPan({ x: 0.1, y: 0 }, 1, 2));
+  });
+});
+
+describe('steppedSliceIndex', () => {
+  it('advances by one when scrolling down (positive deltaY)', () => {
+    expect(steppedSliceIndex(5, 120, 10)).toBe(6);
+  });
+
+  it('retreats by one when scrolling up (negative deltaY)', () => {
+    expect(steppedSliceIndex(5, -120, 10)).toBe(4);
+  });
+
+  it('clamps at the grid ends rather than stepping past them', () => {
+    expect(steppedSliceIndex(10, 1, 10)).toBe(10);
+    expect(steppedSliceIndex(0, -1, 10)).toBe(0);
+  });
+
+  it('takes the sign of deltaY, not its magnitude', () => {
+    expect(steppedSliceIndex(5, 999, 10)).toBe(6);
+    expect(steppedSliceIndex(5, -0.5, 10)).toBe(4);
   });
 });
 
