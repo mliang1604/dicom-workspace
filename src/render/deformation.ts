@@ -1,6 +1,13 @@
 import { floatsToHalf } from '../dicom/half';
 import { invert, multiply, toColumnMajor, transformPoint } from '../dicom/mat4';
-import type { DeformationGrid, Mat4, Vec3, Volume, VolumeGeometry } from '../dicom/types';
+import type {
+  DeformableRegistration,
+  DeformationGrid,
+  Mat4,
+  Vec3,
+  Volume,
+  VolumeGeometry,
+} from '../dicom/types';
 import { cross } from '../dicom/vec3';
 import { resolveGeometry } from './reslice';
 
@@ -187,4 +194,76 @@ function buildIndexToPatient(grid: DeformationGrid): Mat4 {
     iStep[2], jStep[2], kStep[2], origin[2],
     0, 0, 0, 1,
   ];
+}
+
+/**
+ * A diagnostic snapshot of how a deformable overlay maps at the base volume's
+ * centre — for tracing a deformable fusion that shows nothing because the overlay
+ * sampling lands out of bounds. Runs the same pipeline as the shader on the CPU:
+ * base(fixed)-patient → preMatrix → field displacement → postMatrix → overlay tex.
+ *
+ * The tells: `fieldCoversCentre` false means the base centre falls outside the
+ * grid, so the displacement is 0 and the overlay is then read at fixed-frame
+ * coordinates through the moving grid — which `overlaySampledInBounds` false
+ * confirms is off the moving volume, i.e. invisible. Pure; values are rounded for
+ * readability. Returns null when the base lacks geometry.
+ */
+export function describeDeformationCoverage(
+  base: Volume,
+  overlay: Volume,
+  reg: DeformableRegistration,
+): Record<string, unknown> {
+  const g = resolveGeometry(base);
+  const [nx, ny, nz] = base.dims;
+  const centre: Vec3 = [
+    g.origin[0] +
+      ((nx - 1) / 2) * g.iStep[0] +
+      ((ny - 1) / 2) * g.jStep[0] +
+      ((nz - 1) / 2) * g.kStep[0],
+    g.origin[1] +
+      ((nx - 1) / 2) * g.iStep[1] +
+      ((ny - 1) / 2) * g.jStep[1] +
+      ((nz - 1) / 2) * g.kStep[1],
+    g.origin[2] +
+      ((nx - 1) / 2) * g.iStep[2] +
+      ((ny - 1) / 2) * g.jStep[2] +
+      ((nz - 1) / 2) * g.kStep[2],
+  ];
+  const p1 = transformPoint(reg.preMatrix, centre);
+  const toField = patientToTexRowMajor(gridGeometry(reg.grid), reg.grid.dims);
+  const fuv = toField ? transformPoint(toField, p1) : null;
+  const disp = sampleDisplacement(reg.grid, p1);
+  const pMoving = transformPoint(reg.postMatrix, [
+    p1[0] + disp[0],
+    p1[1] + disp[1],
+    p1[2] + disp[2],
+  ]);
+  const toOverlay = patientToTexRowMajor(resolveGeometry(overlay), overlay.dims);
+  const ocoord = toOverlay ? transformPoint(toOverlay, pMoving) : null;
+
+  let maxVectorMm = 0;
+  for (let i = 0; i < reg.grid.vectors.length; i++) {
+    const a = Math.abs(reg.grid.vectors[i]);
+    if (a > maxVectorMm) maxVectorMm = a;
+  }
+
+  const round = (v: Vec3 | null): number[] | null =>
+    v ? v.map((c) => Math.round(c * 100) / 100) : null;
+  const inUnit = (v: Vec3 | null): boolean => v !== null && v.every((c) => c >= 0 && c <= 1);
+  const translation = (m: Mat4): number[] => round([m[3], m[7], m[11]]) ?? [];
+
+  return {
+    gridDims: reg.grid.dims,
+    gridSpacingMm: reg.grid.spacing,
+    gridOrigin: round(reg.grid.origin),
+    maxVectorMm: Math.round(maxVectorMm * 100) / 100,
+    preTranslationMm: translation(reg.preMatrix),
+    postTranslationMm: translation(reg.postMatrix),
+    baseCentrePatient: round(centre),
+    fieldTexCoord: round(fuv),
+    fieldCoversCentre: inUnit(fuv),
+    dispAtCentreMm: round(disp),
+    overlayTexCoord: round(ocoord),
+    overlaySampledInBounds: inUnit(ocoord),
+  };
 }

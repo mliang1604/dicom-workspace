@@ -8,7 +8,12 @@ import {
   type Vec3,
   type Volume,
 } from '../dicom/types';
-import { deformationFieldHalf, deformationUniforms } from './deformation';
+import {
+  deformationFieldHalf,
+  deformationUniforms,
+  describeDeformationCoverage,
+} from './deformation';
+import { trace } from '../diag/trace';
 import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
 import {
   colormap,
@@ -842,6 +847,14 @@ export class SliceRenderer {
     this.overlayDeformation = deformation ?? null;
     this.deformTexture?.destroy();
     this.deformTexture = deformation ? this.createDeformTexture(deformation.grid) : null;
+    // One-shot diagnostic: how the deformable overlay maps at the base centre, to
+    // trace a fusion that shows nothing (the overlay sampling landing out of bounds).
+    if (deformation && this.volume) {
+      trace('render')?.(
+        'deformable coverage',
+        describeDeformationCoverage(this.volume, volume, deformation),
+      );
+    }
     // Colormap display bakes the named ramp into the overlay LUT; grayscale leaves
     // the flag off and the shader uses the windowed value directly.
     this.overlayColormap = display?.kind === 'colormap';

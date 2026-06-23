@@ -1,9 +1,15 @@
 import { floatsToHalf } from '../dicom/half';
 import { transformPoint } from '../dicom/mat4';
-import { IDENTITY_MAT4, type DeformationGrid, type Volume } from '../dicom/types';
+import {
+  IDENTITY_MAT4,
+  type DeformableRegistration,
+  type DeformationGrid,
+  type Volume,
+} from '../dicom/types';
 import {
   deformationFieldHalf,
   deformationUniforms,
+  describeDeformationCoverage,
   gridGeometry,
   patientToTexRowMajor,
   sampleDisplacement,
@@ -108,5 +114,41 @@ describe('deformationUniforms', () => {
     expect(
       deformationUniforms(IDENTITY_MAT4, makeVolume(), IDENTITY_MAT4, IDENTITY_MAT4, badGrid),
     ).toBeNull();
+  });
+});
+
+describe('describeDeformationCoverage', () => {
+  /** A uniform `+5mm x` field over a 2×2×2 grid spanning [0,10]³. */
+  const uniformField = (origin: [number, number, number] = [0, 0, 0]): DeformableRegistration => ({
+    kind: 'deformable',
+    name: 'reg',
+    sourceFrame: 'moving',
+    targetFrame: 'fixed',
+    preMatrix: IDENTITY_MAT4,
+    postMatrix: IDENTITY_MAT4,
+    grid: grid({
+      dims: [2, 2, 2],
+      origin,
+      vectors: Float32Array.from({ length: 24 }, (_, i) => (i % 3 === 0 ? 5 : 0)),
+    }),
+  });
+
+  it('reports the field covering the base centre with an in-bounds overlay sample', () => {
+    const d = describeDeformationCoverage(makeVolume(), makeVolume(), uniformField());
+    expect(d['fieldCoversCentre']).toBe(true);
+    expect(d['dispAtCentreMm']).toEqual([5, 0, 0]);
+    expect(d['overlaySampledInBounds']).toBe(true);
+    // base centre [5,5,5] + disp [5,0,0] = [10,5,5] → overlay tex [0.75, 0.5, 0.5].
+    expect(d['overlayTexCoord']).toEqual([0.75, 0.5, 0.5]);
+  });
+
+  it('flags zero displacement when the grid does not cover the base centre', () => {
+    const d = describeDeformationCoverage(
+      makeVolume(),
+      makeVolume(),
+      uniformField([1000, 1000, 1000]),
+    );
+    expect(d['fieldCoversCentre']).toBe(false);
+    expect(d['dispAtCentreMm']).toEqual([0, 0, 0]);
   });
 });
