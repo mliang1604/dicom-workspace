@@ -1,9 +1,7 @@
 import * as dicomParser from 'dicom-parser';
-import { decodeRleFrame } from './rle';
 import { decodeWasmFrame, isWasmTransferSyntax } from './wasm-codecs';
 import {
   asRgb,
-  buildPaletteLut,
   colorFrameToLuma,
   constrainFrame,
   isYbr,
@@ -15,48 +13,34 @@ import {
 import { extractMetadata } from './metadata';
 import { add, cross, normalize, scale } from './vec3';
 import type { Slice } from './types';
-
-/** Transfer syntaxes whose PixelData we can read directly (uncompressed, little-endian). */
-const UNCOMPRESSED_LE = new Set([
-  '1.2.840.10008.1.2', // Implicit VR Little Endian
-  '1.2.840.10008.1.2.1', // Explicit VR Little Endian
-]);
-
-/**
- * Decodes one encapsulated frame's bytes into raw samples (before the modality
- * LUT). Same shape as {@link readRawPixels}.
- */
-type FrameCodec = (
-  frame: Uint8Array,
-  count: number,
-  bitsAllocated: number,
-  pixelRepresentation: number,
-) => Int16Array | Uint16Array | Uint8Array;
-
-/**
- * Pure-JS frame codecs by transfer syntax UID. Add an entry here to support a
- * further compressed syntax that can be decoded without a third-party library.
- */
-const FRAME_CODECS: Record<string, FrameCodec> = {
-  '1.2.840.10008.1.2.5': decodeRleFrame, // RLE Lossless
-};
+import {
+  encapsulatedFrame,
+  FRAME_CODECS,
+  readRawPixels,
+  reinterpretSamples,
+  rescale,
+  UNCOMPRESSED_LE,
+  type FrameCodec,
+  type FramePixels,
+} from './pixel-data';
+import {
+  firstItem,
+  intOrNull,
+  num,
+  readFirstFloat,
+  readFloats,
+  readGroupValue,
+  readPadding,
+  readPair,
+  readPalette,
+  readTriple,
+  type FunctionalGroups,
+} from './dicom-tags';
 
 /** SOP Class UID identifying an RT Dose Storage object. */
 const RTDOSE_SOP_CLASS = '1.2.840.10008.5.1.4.1.1.481.2';
 
 export class UnsupportedDicomError extends Error {}
-
-/** Read a DICOM tag of value-representation DS/IS as a number, with a default. */
-function num(dataSet: dicomParser.DataSet, tag: string, fallback: number): number {
-  const v = dataSet.floatString(tag);
-  return v === undefined || Number.isNaN(v) ? fallback : v;
-}
-
-/** Read a DICOM IS tag as an integer, or null when absent/unparseable. */
-function intOrNull(dataSet: dicomParser.DataSet, tag: string): number | null {
-  const v = dataSet.intString(tag);
-  return v === undefined || Number.isNaN(v) ? null : v;
-}
 
 /**
  * The fields shared by every frame in a file: image geometry that is fixed by
@@ -110,13 +94,6 @@ interface FileContext {
   /** Byte offset of frame 0's first sample within {@link buffer} (uncompressed only). */
   readonly pixelOffset: number;
 }
-
-/**
- * One frame's decoded pixel values, ready for the modality LUT: stored integer
- * samples for grayscale, or a per-pixel luminance {@link Float32Array} for
- * palette/colour frames (already reduced to a single channel at decode time).
- */
-type FramePixels = StoredFrame | Float32Array;
 
 /** What {@link setupFile} resolves from a file: geometry context + frame count. */
 interface FileSetup {
@@ -500,55 +477,6 @@ function parseMultiframe(ctx: FileContext, frames: number, raw: FramePixels[]): 
   return slices;
 }
 
-/** The three places a multiframe value may live, in lookup priority order. */
-interface FunctionalGroups {
-  /** This frame's Per-Frame Functional Groups item, if present. */
-  readonly fg: dicomParser.DataSet | null;
-  /** The single Shared Functional Groups item, if present. */
-  readonly shared: dicomParser.DataSet | null;
-  /** The top-level data set, where the value tag may sit directly. */
-  readonly top: dicomParser.DataSet;
-}
-
-/**
- * Resolve a functional-group value: read it from the per-frame group's nested
- * sequence item, then the shared group's, then directly from the top-level data
- * set, returning the first non-null result.
- */
-function readGroupValue<T>(
-  groups: FunctionalGroups,
-  seqTag: string,
-  read: (ds: dicomParser.DataSet) => T | null,
-): T | null {
-  for (const source of [
-    firstItem(groups.fg, seqTag),
-    firstItem(groups.shared, seqTag),
-    groups.top,
-  ]) {
-    if (!source) continue;
-    const v = read(source);
-    if (v !== null) return v;
-  }
-  return null;
-}
-
-/** First item's nested data set of a sequence element, or null. */
-function firstItem(
-  dataSet: dicomParser.DataSet | null,
-  seqTag: string,
-): dicomParser.DataSet | null {
-  return dataSet?.elements[seqTag]?.items?.[0]?.dataSet ?? null;
-}
-
-/** Apply the modality LUT (raw * slope + intercept) into real units. */
-function rescale(raw: FramePixels, rescaleSlope: number, rescaleIntercept: number): Float32Array {
-  const pixels = new Float32Array(raw.length);
-  for (let i = 0; i < raw.length; i++) {
-    pixels[i] = raw[i] * rescaleSlope + rescaleIntercept;
-  }
-  return pixels;
-}
-
 /**
  * Reduce one frame's decoded samples to the single-channel pixels the volume
  * stores: stored grayscale values (BitsStored/sign/padding applied) for `mono`,
@@ -605,143 +533,4 @@ async function readFrameSamplesAsync(
   }
   const raw = reinterpretSamples(decoded.bytes, ctx.bitsAllocated, ctx.pixelRepresentation);
   return convertFrame(ctx, raw, count);
-}
-
-/** Interpret wasm-decoded bytes as 8- or 16-bit samples per the DICOM header. */
-function reinterpretSamples(
-  bytes: Uint8Array,
-  bitsAllocated: number,
-  pixelRepresentation: number,
-): StoredFrame {
-  if (bitsAllocated <= 8) return bytes;
-  const count = bytes.length >> 1;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
-  if (pixelRepresentation === 1) {
-    const out = new Int16Array(count);
-    for (let i = 0; i < count; i++) out[i] = view.getInt16(i * 2, true);
-    return out;
-  }
-  const out = new Uint16Array(count);
-  for (let i = 0; i < count; i++) out[i] = view.getUint16(i * 2, true);
-  return out;
-}
-
-/**
- * Extract one frame's compressed bytes from an encapsulated PixelData element:
- * via the Basic Offset Table when present, otherwise treating each fragment as
- * one frame (the usual RLE layout).
- */
-function encapsulatedFrame(
-  dataSet: dicomParser.DataSet,
-  pixelElement: dicomParser.Element,
-  frameIndex: number,
-): Uint8Array {
-  const bot = pixelElement.basicOffsetTable;
-  if (bot && bot.length > 0) {
-    return dicomParser.readEncapsulatedImageFrame(dataSet, pixelElement, frameIndex);
-  }
-  return dicomParser.readEncapsulatedPixelDataFromFragments(dataSet, pixelElement, frameIndex);
-}
-
-function readRawPixels(
-  buffer: ArrayBuffer,
-  offset: number,
-  count: number,
-  bitsAllocated: number,
-  pixelRepresentation: number,
-): Int16Array | Uint16Array | Uint8Array {
-  if (bitsAllocated <= 8) {
-    return new Uint8Array(buffer, offset, count);
-  }
-  // 16-bit: byte offset may be odd, so copy into an aligned buffer.
-  const view = new DataView(buffer, offset, count * 2);
-  if (pixelRepresentation === 1) {
-    const out = new Int16Array(count);
-    for (let i = 0; i < count; i++) out[i] = view.getInt16(i * 2, true);
-    return out;
-  }
-  const out = new Uint16Array(count);
-  for (let i = 0; i < count; i++) out[i] = view.getUint16(i * 2, true);
-  return out;
-}
-
-function readFloats(dataSet: dicomParser.DataSet, tag: string, n: number): number[] | null {
-  const el = dataSet.elements[tag];
-  if (!el || el.length === 0) return null;
-  const out: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const v = dataSet.floatString(tag, i);
-    if (v === undefined || Number.isNaN(v)) return null;
-    out.push(v);
-  }
-  return out;
-}
-
-function readPair(
-  dataSet: dicomParser.DataSet,
-  tag: string,
-  fallback: [number, number],
-): [number, number] {
-  const f = readFloats(dataSet, tag, 2);
-  return f ? [f[0], f[1]] : fallback;
-}
-
-function readTriple(dataSet: dicomParser.DataSet, tag: string): [number, number, number] | null {
-  const f = readFloats(dataSet, tag, 3);
-  return f ? [f[0], f[1], f[2]] : null;
-}
-
-function readFirstFloat(dataSet: dicomParser.DataSet, tag: string): number | null {
-  const el = dataSet.elements[tag];
-  if (!el || el.length === 0) return null;
-  const v = dataSet.floatString(tag, 0);
-  return v === undefined || Number.isNaN(v) ? null : v;
-}
-
-/**
- * PixelPaddingValue (0028,0120), read in the pixel's representation (US or SS),
- * or null when absent — the stored value marking out-of-FOV background pixels.
- */
-function readPadding(dataSet: dicomParser.DataSet, pixelRepresentation: number): number | null {
-  const el = dataSet.elements['x00280120'];
-  if (!el || el.length === 0) return null;
-  const v = pixelRepresentation === 1 ? dataSet.int16('x00280120') : dataSet.uint16('x00280120');
-  return v === undefined ? null : v;
-}
-
-/** Assemble the R/G/B Palette Color LUTs of a PALETTE COLOR image, or null. */
-function readPalette(dataSet: dicomParser.DataSet): PaletteLut | null {
-  const descriptor = readPaletteDescriptor(dataSet, 'x00281101');
-  if (!descriptor) return null;
-  const r = readLutData(dataSet, 'x00281201');
-  const g = readLutData(dataSet, 'x00281202');
-  const b = readLutData(dataSet, 'x00281203');
-  if (!r || !g || !b) return null;
-  return buildPaletteLut(descriptor, r, g, b);
-}
-
-/** Palette Color LUT Descriptor: [numberOfEntries, firstValueMapped, bitsPerEntry]. */
-function readPaletteDescriptor(
-  dataSet: dicomParser.DataSet,
-  tag: string,
-): [number, number, number] | null {
-  const el = dataSet.elements[tag];
-  if (!el || el.length < 6) return null;
-  const entries = dataSet.uint16(tag, 0);
-  const first = dataSet.uint16(tag, 1);
-  const bits = dataSet.uint16(tag, 2);
-  if (entries === undefined || first === undefined || bits === undefined) return null;
-  return [entries, first, bits];
-}
-
-/** Read a Palette Color LUT Data element (0028,120x) as little-endian 16-bit words. */
-function readLutData(dataSet: dicomParser.DataSet, tag: string): Uint16Array | null {
-  const el = dataSet.elements[tag];
-  if (!el || el.length === 0) return null;
-  const n = el.length >> 1;
-  const bytes = dataSet.byteArray;
-  const view = new DataView(bytes.buffer, bytes.byteOffset + el.dataOffset, n * 2);
-  const out = new Uint16Array(n);
-  for (let i = 0; i < n; i++) out[i] = view.getUint16(i * 2, true);
-  return out;
 }

@@ -1,7 +1,5 @@
 import type { GpuContext } from './device';
-import { floatsToHalf } from '../dicom/half';
-import { Orientation, type LayerDisplay, type Vec3, type Volume } from '../dicom/types';
-import { cameraBasis, type CameraBasis, type OrbitCamera } from './camera';
+import { Orientation, type LayerDisplay, type Volume } from '../dicom/types';
 import {
   colormap,
   colormapLut,
@@ -11,34 +9,13 @@ import {
 } from './colormap';
 import type { PaneRect, Vec2 } from './layout';
 import {
-  clipPlaneTex,
-  clipTRange,
+  isOblique,
   overlayPlaneToTexMatrix,
   patientToTexMatrix,
-  planeExtentMm,
-  planePixelDims,
   planeToTexMatrix,
-  slabTRange,
   sliceCountFor,
-  isOblique,
-  viewClipHalfSpaces,
-  volumeBounds,
-  type HalfSpace,
-  type ObliqueRotation,
-  type PatientPlane,
 } from './reslice';
-import { RAYCAST_SHADER } from './raycast-shader';
-import { SLICE_SHADER } from './slice-shader';
-import { SURFACE_SHADER } from './surface-shader';
 import { SURFACE_VERTEX_FLOATS } from './surface';
-import {
-  DEFAULT_DVR_LIGHTING,
-  dvrLightingParams,
-  lightToPatient,
-  lightViewDirection,
-  type DvrLighting,
-} from './dvr';
-import { dot, normalize } from '../dicom/vec3';
 import {
   TF_LUT_SIZE,
   TransferFunctionPreset,
@@ -46,256 +23,72 @@ import {
   transferFunctionLut,
   type TransferFunction,
 } from './transfer-function';
+import {
+  createMipPipeline,
+  createSlicePipeline,
+  createSurfacePipeline,
+  createVolumeSampler,
+} from './slice-pipelines';
+import { SURFACE_CAMERA_SIZE, type SurfaceFrame } from './surface-frame';
+import {
+  MIP_PARAMS_SIZE,
+  PARAMS_SIZE,
+  packMipParams,
+  packSliceParams,
+  type SliceParams,
+} from './slice-params';
+import { aspectScale, clampRect } from './pan-zoom';
+import {
+  createVolumeTexture,
+  encodeFrame,
+  mipBindGroup,
+  sliceBindGroup,
+  uploadResizingBuffer,
+  writeLut1d,
+  type PaneDraw,
+  type SurfacePass,
+} from './slice-resources';
+import { isDvr, ProjectionMode } from './projection';
+import type { MipPaneView, MprPaneView, PaneView } from './pane-view';
 
-/**
- * How the 3D pane turns the volume into a picture. The first three reduce each
- * ray to a single windowed sample (a projection); {@link Dvr} composites a lit,
- * coloured volume through a transfer function instead. The numeric values are the
- * codes the raycast shader switches on, kept in sync via {@link projectionModeCode}.
- */
-export enum ProjectionMode {
-  /** Maximum Intensity Projection — the brightest sample (default). */
-  Max = 0,
-  /** Minimum Intensity Projection — the darkest sample. */
-  Min = 1,
-  /** Average (mean) of the samples along the ray. */
-  Mean = 2,
-  /** Direct volume rendering — front-to-back transfer-function compositing. */
-  Dvr = 3,
-}
+// Public surface kept stable as this module was split into focused siblings;
+// callers continue to import these geometry/packing helpers from './slice-renderer'.
+export {
+  defaultSlabThicknessMm,
+  isDvr,
+  projectionModeCode,
+  projectionWindow,
+  ProjectionMode,
+  type DisplayWindow,
+} from './projection';
+export type { MipPaneView, MprPaneView, PaneView } from './pane-view';
+export {
+  ensureSurfaceSortScratch,
+  packSurfaceFrame,
+  type SurfaceFrame,
+  type SurfaceSortScratch,
+} from './surface-frame';
+export { packSliceParams, type SliceParams } from './slice-params';
+export {
+  aspectScale,
+  clampPan,
+  cursorZoomPan,
+  mipStepScale,
+  oneToOneZoom,
+  rezoomPan,
+  steppedSliceIndex,
+} from './pan-zoom';
 
-/** Whether a 3D mode is direct volume rendering (vs. a single-value projection). */
-export function isDvr(mode: ProjectionMode): boolean {
-  return mode === ProjectionMode.Dvr;
-}
-
-/** Shader code for a 3D mode; an exhaustive map kept beside the WGSL. */
-export function projectionModeCode(mode: ProjectionMode): number {
-  switch (mode) {
-    case ProjectionMode.Max:
-      return 0;
-    case ProjectionMode.Min:
-      return 1;
-    case ProjectionMode.Mean:
-      return 2;
-    case ProjectionMode.Dvr:
-      return 3;
-    default: {
-      const exhaustive: never = mode;
-      return exhaustive;
-    }
-  }
-}
-
-/** A display window expressed as a DICOM centre/width pair. */
-export interface DisplayWindow {
-  readonly center: number;
-  readonly width: number;
-}
-
-/**
- * Effective window/level for the 3D projection pane, chosen by projection mode.
- *
- * MIP (Max) latches onto the brightest sample at every angle, so it keeps the
- * shared MPR window and looks exactly as it does today. MinIP (Min) and Average
- * (Mean) instead track the volume's air-filled margins, whose contribution to
- * the per-ray min/mean slides with the orbit angle; reusing the bright MPR
- * window clamps them to black at some angles. Fitting the window to the volume's
- * full data range keeps those projections visible from every direction.
- */
-export function projectionWindow(
-  mode: ProjectionMode,
-  volume: Volume,
-  sharedCenter: number,
-  sharedWidth: number,
-): DisplayWindow {
-  switch (mode) {
-    // MIP keeps the shared MPR window; DVR ignores the window entirely (it maps
-    // samples through the transfer function), so the shared one is a harmless default.
-    case ProjectionMode.Max:
-    case ProjectionMode.Dvr:
-      return { center: sharedCenter, width: sharedWidth };
-    case ProjectionMode.Min:
-    case ProjectionMode.Mean:
-      return {
-        center: (volume.min + volume.max) / 2,
-        width: Math.max(1, volume.max - volume.min),
-      };
-    default: {
-      const exhaustive: never = mode;
-      return exhaustive;
-    }
-  }
-}
-
-/**
- * Default slab thickness (mm) for a projection mode, given the volume's full
- * depth (`fullDepthMm`, the slab thickness at which the whole volume projects).
- *
- * MIP keeps the full-volume default so it is unchanged. MinIP and Average are
- * used with a thinner slab so the air margins around the anatomy stay out of the
- * min/mean; a moderate band of ~⅓ of the depth (capped to keep it moderate, and
- * clamped into the volume) is a sensible starting point the user can adjust.
- */
-export function defaultSlabThicknessMm(mode: ProjectionMode, fullDepthMm: number): number {
-  switch (mode) {
-    // MIP and DVR render the whole volume by default; the cut-away toggle, not a
-    // thin slab, is how DVR reveals the interior.
-    case ProjectionMode.Max:
-    case ProjectionMode.Dvr:
-      return fullDepthMm;
-    case ProjectionMode.Min:
-    case ProjectionMode.Mean:
-      return Math.min(fullDepthMm, Math.max(1, Math.min(fullDepthMm / 3, 50)));
-    default: {
-      const exhaustive: never = mode;
-      return exhaustive;
-    }
-  }
-}
-
-/** One MPR pane: an orientation/slice of the volume drawn into a viewport rect. */
-export interface MprPaneView {
-  readonly kind: 'mpr';
-  readonly orientation: Orientation;
-  /** Index of the slice along the orientation's axis. */
-  readonly sliceIndex: number;
-  readonly windowCenter: number;
-  readonly windowWidth: number;
-  /** Magnification factor; 1 fits the slice to the pane, >1 zooms in. */
-  readonly zoom: number;
-  /** Pan offset in screen-uv (pane-fraction) units; defaults to no shift. */
-  readonly pan?: Vec2;
-  /**
-   * Oblique tilt of the slice plane off its anatomical default. Omitted (or
-   * {@link NO_OBLIQUE}) keeps the orthogonal plane; a non-zero tilt reslices the
-   * pane along an arbitrary oblique/double-oblique plane.
-   */
-  readonly rotation?: ObliqueRotation;
-  /** Mirror the in-plane horizontal axis (e.g. flip the sagittal view L/R). */
-  readonly flipX?: boolean;
-  /** Invert the windowed grayscale (white ⇄ black); omitted/false renders normally. */
-  readonly invert?: boolean;
-  /**
-   * Which volume this pane draws: 0 (default) = the base; ≥ 1 = the overlay layer
-   * drawn standalone (the Compare layout's second column). Out of the loaded set
-   * it falls back to the base.
-   */
-  readonly group?: number;
-  /**
-   * Composite the fusion overlay over this pane (the default). False in Compare,
-   * where each column shows a single layer with no blend.
-   */
-  readonly composite?: boolean;
-  /** Destination rectangle in device pixels, origin top-left. */
-  readonly rect: PaneRect;
-}
-
-/** The 3D MIP pane: an orbit camera projecting the volume into a viewport rect. */
-export interface MipPaneView {
-  readonly kind: 'mip';
-  readonly windowCenter: number;
-  readonly windowWidth: number;
-  /** Orbit camera state (azimuth/elevation/zoom). */
-  readonly camera: OrbitCamera;
-  /**
-   * Which projection to accumulate along each ray. Omitted defaults to
-   * {@link ProjectionMode.Max} (MIP), reproducing the historical behaviour.
-   */
-  readonly projectionMode?: ProjectionMode;
-  /**
-   * Thickness (mm) of the projected slab, centred on the volume along the view
-   * direction. Omitted or ≥ the volume's full depth projects the whole volume.
-   */
-  readonly slabThicknessMm?: number;
-  /**
-   * Transfer function for {@link ProjectionMode.Dvr}; ignored by the projection
-   * modes. A preset's table (see {@link transferFunction}) or a live-edited copy
-   * of one. Omitted defaults to the {@link TransferFunctionPreset.CtBone} preset.
-   */
-  readonly transferFunction?: TransferFunction;
-  /**
-   * Lighting/shading for {@link ProjectionMode.Dvr}; ignored by the projection
-   * modes. Omitted defaults to {@link DEFAULT_DVR_LIGHTING} (a plain headlight).
-   */
-  readonly lighting?: DvrLighting;
-  /**
-   * Clip the 3D pane to the current MPR slice planes for a cut-away view. Needs
-   * {@link sliceIndices}; applies to every mode (projection and DVR alike).
-   */
-  readonly clipToPlanes?: boolean;
-  /**
-   * Current axial/coronal/sagittal slice indices (in {@link Orientation} order),
-   * used to place the cut-away planes when {@link clipToPlanes} is set.
-   */
-  readonly sliceIndices?: readonly [number, number, number];
-  /**
-   * An arbitrary handle-driven cut-plane (patient space) clipping every ray to
-   * the side its normal points into, independent of {@link clipToPlanes}. Omitted
-   * leaves the free cut-plane off.
-   */
-  readonly cutPlane?: PatientPlane;
-  /**
-   * Render at a reduced level of detail (fewer march samples) for a smoother
-   * frame while the view is being manipulated. Omitted/false renders the
-   * full-quality image, identical to the settled output.
-   */
-  readonly interactive?: boolean;
-  /**
-   * Invert the windowed grayscale of the projection (MIP/MinIP/Average), matching
-   * the MPR panes' display inversion. Ignored by DVR, which maps colour through
-   * the transfer function. Omitted/false renders normally.
-   */
-  readonly invert?: boolean;
-  /** Destination rectangle in device pixels, origin top-left. */
-  readonly rect: PaneRect;
-}
-
-/** A pane to draw: an MPR slice or the 3D MIP, discriminated by `kind`. */
-export type PaneView = MprPaneView | MipPaneView;
-
-// bytes: planeToTex mat4x4 (64) + scale.xy + pan.xy + windowCenter,windowWidth,
-// slicePos,flipX (32) + invert + 12 bytes pad — overlayCheckerboard, checkerSize,
-// colormapBase (16) = 112; then the fusion-overlay block at byte 112 (16-aligned
-// for its mat4x4): overlayToTex mat4x4 (64) + overlayWindowCenter,
-// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80. Total 192.
-const PARAMS_SIZE = 192;
-/** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
-const OVERLAY_FLOATS = 28;
+/** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. Six
+ * covers the Compare layout (two columns × axial/coronal/sagittal). */
+const MAX_MPR_PANES = 6;
+const ORIGIN: Vec2 = { x: 0, y: 0 };
 /**
  * Default fusion checkerboard density, as the number of cells spanning the image
  * (at zoom 1). The cell's pixel size is derived per-pane from the pane width, so
  * the pattern stays the same coarseness regardless of how large the image draws.
  */
 export const DEFAULT_CHECKER_CELLS = 20;
-// bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
-// tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
-const MIP_PARAMS_SIZE = 256;
-const BYTES_PER_HALF = 2;
-/** Surface camera uniform bytes: eye, axisU+uu, axisV+vv, light (4 × vec4). */
-const SURFACE_CAMERA_SIZE = 64;
-/** Floats in the packed surface camera uniform ({@link SURFACE_CAMERA_SIZE} / 4). */
-const SURFACE_CAMERA_FLOATS = SURFACE_CAMERA_SIZE / 4;
-/** MPR panes drawn with the slice pipeline; the 3D MIP uses its own slot. Six
- * covers the Compare layout (two columns × axial/coronal/sagittal). */
-const MAX_MPR_PANES = 6;
-const ORIGIN: Vec2 = { x: 0, y: 0 };
-/** Float offset of the per-frame params that follow the 4×4 reslice matrix. */
-const MATRIX_FLOATS = 16;
-/**
- * Fraction of the full MIP sample budget used while the 3D view is actively
- * manipulated (orbit/zoom/window-level). Halving the samples roughly halves the
- * march cost; the settled frame renders at full quality.
- */
-const MIP_INTERACTIVE_LOD = 0.5;
-/** A no-op half-space: a zero normal the shader ignores (its clip flag is off too). */
-const NO_HALF_SPACE: HalfSpace = { normal: [0, 0, 0], offset: 0 };
-/** A no-op cut-away: zero-normal planes the shader ignores (clip flag off too). */
-const NO_CLIP: readonly [HalfSpace, HalfSpace, HalfSpace] = [
-  NO_HALF_SPACE,
-  NO_HALF_SPACE,
-  NO_HALF_SPACE,
-];
 
 interface PaneSlot {
   readonly buffer: GPUBuffer;
@@ -307,112 +100,6 @@ interface PaneSlot {
  * orthogonal slices of it (up to {@link MAX_PANES}) into separate viewports of
  * one canvas, with GPU-side windowing and per-pane aspect correction.
  */
-/** Per-frame data for the ROI surface pass: depth-sorted indices + packed camera. */
-export interface SurfaceFrame {
-  /** Triangle vertex indices, back-to-front (painter's order). */
-  readonly indices: Uint32Array;
-  /** Packed camera uniform: eye, _, axisU, uu, axisV, vv, light, _ (16 floats). */
-  readonly camera: Float32Array;
-}
-
-/**
- * Reusable scratch for {@link packSurfaceFrame}, grown as the triangle count
- * rises so a steady orbit allocates nothing per frame. `depth`/`order` size with
- * the triangle count; `index` holds three vertex indices per triangle; `camera`
- * is the packed uniform reused each frame. Owned by the caller (the component)
- * and threaded back in so the geometry stays a pure function.
- */
-export interface SurfaceSortScratch {
-  depth: Float32Array;
-  order: Uint32Array;
-  index: Uint32Array;
-  readonly camera: Float32Array;
-  cap: number;
-}
-
-/**
- * Grow (and reuse) the per-frame surface depth-sort scratch so it holds at least
- * `n` triangles. Doubles past growth (and floors at 4096) to amortise reallocs
- * across an orbit. Pass the previous scratch back in to reuse it; a fresh
- * `camera` buffer is allocated only on the first call.
- */
-export function ensureSurfaceSortScratch(
-  prev: SurfaceSortScratch | null,
-  n: number,
-): SurfaceSortScratch {
-  if (prev && prev.cap >= n) return prev;
-  const cap = Math.max(n, (prev?.cap ?? 0) * 2, 4096);
-  return {
-    depth: new Float32Array(cap),
-    order: new Uint32Array(cap),
-    index: new Uint32Array(cap * 3),
-    camera: prev?.camera ?? new Float32Array(SURFACE_CAMERA_FLOATS),
-    cap,
-  };
-}
-
-/**
- * Build the per-frame {@link SurfaceFrame} for the ROI surface pass: depth-sort
- * the `n` triangles back-to-front (painter's order) against the camera and pack
- * the camera uniform to the byte layout `surface-shader.ts` expects (eye, axisU +
- * |axisU|², axisV + |axisV|², light, each on a vec4 boundary). The sort key is
- * each centroid's signed depth along `forward`; the resolved order expands to
- * three consecutive vertex indices per triangle. Pure given the scratch — the GPU
- * upload of the result is the renderer's job ({@link SliceRenderer.renderPanes}).
- *
- * @param centroids Triangle centroids (3 floats each), parallel to triangle order.
- * @param n         Number of triangles to draw.
- * @param basis     Camera basis (eye / image-plane axes / forward) for this frame.
- * @param light     View-forward direction the head-light shade uses.
- * @param scratch   Reusable buffers sized for `n` (see {@link ensureSurfaceSortScratch}).
- */
-export function packSurfaceFrame(
-  centroids: Float32Array,
-  n: number,
-  basis: CameraBasis,
-  light: Vec3,
-  scratch: SurfaceSortScratch,
-): SurfaceFrame {
-  const { depth, order, index, camera } = scratch;
-
-  const ex = basis.eye[0];
-  const ey = basis.eye[1];
-  const ez = basis.eye[2];
-  const fx = basis.forward[0];
-  const fy = basis.forward[1];
-  const fz = basis.forward[2];
-  for (let i = 0; i < n; i++) {
-    const c = i * 3;
-    depth[i] =
-      (centroids[c] - ex) * fx + (centroids[c + 1] - ey) * fy + (centroids[c + 2] - ez) * fz;
-    order[i] = i;
-  }
-  const ord = order.subarray(0, n);
-  ord.sort((a, b) => depth[b] - depth[a]); // far first (painter's order)
-  for (let k = 0; k < n; k++) {
-    const t = ord[k];
-    index[k * 3] = t * 3;
-    index[k * 3 + 1] = t * 3 + 1;
-    index[k * 3 + 2] = t * 3 + 2;
-  }
-
-  camera[0] = ex;
-  camera[1] = ey;
-  camera[2] = ez;
-  camera[4] = basis.axisU[0];
-  camera[5] = basis.axisU[1];
-  camera[6] = basis.axisU[2];
-  camera[7] = dot(basis.axisU, basis.axisU);
-  camera[8] = basis.axisV[0];
-  camera[9] = basis.axisV[1];
-  camera[10] = basis.axisV[2];
-  camera[11] = dot(basis.axisV, basis.axisV);
-  camera[12] = light[0];
-  camera[13] = light[1];
-  camera[14] = light[2];
-  return { indices: index.subarray(0, n * 3), camera };
-}
-
 export class SliceRenderer {
   private readonly device: GPUDevice;
   private readonly gpu: GpuContext;
@@ -425,11 +112,9 @@ export class SliceRenderer {
   private readonly surfaceBindGroup: GPUBindGroup;
   /** ROI surface vertices (pos3 + normal3 + rgba4); rebuilt when structures change. */
   private surfaceVertexBuffer: GPUBuffer | null = null;
-  private surfaceVertexBytes = 0;
   private surfaceVertexCount = 0;
   /** Depth-sorted triangle indices for the surface pass; reuploaded each frame. */
   private surfaceIndexBuffer: GPUBuffer | null = null;
-  private surfaceIndexBytes = 0;
   private readonly sampler: GPUSampler;
   private readonly slots: readonly PaneSlot[];
   private readonly mipSlot: PaneSlot;
@@ -468,54 +153,9 @@ export class SliceRenderer {
     this.gpu = gpu;
     this.device = gpu.device;
 
-    const module = this.device.createShaderModule({ code: SLICE_SHADER });
-    this.pipeline = this.device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: gpu.format }] },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const mipModule = this.device.createShaderModule({ code: RAYCAST_SHADER });
-    this.mipPipeline = this.device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: mipModule, entryPoint: 'vs' },
-      fragment: { module: mipModule, entryPoint: 'fs', targets: [{ format: gpu.format }] },
-      primitive: { topology: 'triangle-list' },
-    });
-
-    const surfaceModule = this.device.createShaderModule({ code: SURFACE_SHADER });
-    this.surfacePipeline = this.device.createRenderPipeline({
-      layout: 'auto',
-      vertex: {
-        module: surfaceModule,
-        entryPoint: 'vs',
-        buffers: [
-          {
-            arrayStride: SURFACE_VERTEX_FLOATS * 4,
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: 'float32x3' }, // position
-              { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
-              { shaderLocation: 2, offset: 24, format: 'float32x4' }, // rgba
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module: surfaceModule,
-        entryPoint: 'fs',
-        targets: [
-          {
-            format: gpu.format,
-            blend: {
-              color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-            },
-          },
-        ],
-      },
-      primitive: { topology: 'triangle-list', cullMode: 'none' }, // translucent, double-sided
-    });
+    this.pipeline = createSlicePipeline(this.device, gpu.format);
+    this.mipPipeline = createMipPipeline(this.device, gpu.format);
+    this.surfacePipeline = createSurfacePipeline(this.device, gpu.format);
     this.surfaceCameraBuffer = this.device.createBuffer({
       size: SURFACE_CAMERA_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -525,13 +165,7 @@ export class SliceRenderer {
       entries: [{ binding: 0, resource: { buffer: this.surfaceCameraBuffer } }],
     });
 
-    this.sampler = this.device.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
-      addressModeU: 'clamp-to-edge',
-      addressModeV: 'clamp-to-edge',
-      addressModeW: 'clamp-to-edge',
-    });
+    this.sampler = createVolumeSampler(this.device);
 
     this.slots = Array.from({ length: MAX_MPR_PANES }, () => ({
       buffer: this.device.createBuffer({
@@ -572,24 +206,18 @@ export class SliceRenderer {
 
   /** Bake a colormap into the overlay's 1-D LUT texture. */
   private uploadOverlayLut(map: Colormap): void {
-    this.device.queue.writeTexture(
-      { texture: this.overlayLut },
-      floatsToHalf(colormapLut(map, COLORMAP_LUT_SIZE)),
-      { bytesPerRow: COLORMAP_LUT_SIZE * 4 * BYTES_PER_HALF, rowsPerImage: 1 },
-      { width: COLORMAP_LUT_SIZE },
+    writeLut1d(
+      this.device,
+      this.overlayLut,
+      colormapLut(map, COLORMAP_LUT_SIZE),
+      COLORMAP_LUT_SIZE,
     );
   }
 
   /** Bake a transfer function into the 1-D LUT texture, once per change. */
   private uploadTransferFunction(tf: TransferFunction): void {
     if (tf === this.tfBaked) return;
-    const lut = transferFunctionLut(tf, TF_LUT_SIZE);
-    this.device.queue.writeTexture(
-      { texture: this.tfTexture },
-      floatsToHalf(lut),
-      { bytesPerRow: TF_LUT_SIZE * 4 * BYTES_PER_HALF, rowsPerImage: 1 },
-      { width: TF_LUT_SIZE },
-    );
+    writeLut1d(this.device, this.tfTexture, transferFunctionLut(tf, TF_LUT_SIZE), TF_LUT_SIZE);
     this.tfBaked = tf;
   }
 
@@ -597,30 +225,6 @@ export class SliceRenderer {
   sliceCount(orientation: Orientation): number {
     if (!this.volume) return 0;
     return sliceCountFor(this.volume, orientation);
-  }
-
-  /** Upload a {@link Volume} to a fresh `r16float` 3D texture, with a size guard. */
-  private createVolumeTexture(volume: Volume, label: string): GPUTexture {
-    const [width, height, depth] = volume.dims;
-    const limit = this.device.limits.maxTextureDimension3D;
-    if (width > limit || height > limit || depth > limit) {
-      throw new Error(
-        `${label} ${width}×${height}×${depth} exceeds this GPU's 3D texture limit of ${limit}.`,
-      );
-    }
-    const texture = this.device.createTexture({
-      dimension: '3d',
-      size: { width, height, depthOrArrayLayers: depth },
-      format: 'r16float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    this.device.queue.writeTexture(
-      { texture },
-      floatsToHalf(volume.data),
-      { bytesPerRow: width * BYTES_PER_HALF, rowsPerImage: height },
-      { width, height, depthOrArrayLayers: depth },
-    );
-    return texture;
   }
 
   /**
@@ -633,16 +237,14 @@ export class SliceRenderer {
     const baseView = this.texture.createView();
     const overlayView = this.overlayTexture?.createView() ?? baseView;
     const lutView = this.overlayLut.createView({ dimension: '1d' });
+    const layout = this.pipeline.getBindGroupLayout(0);
     for (const slot of this.slots) {
-      slot.bindGroup = this.device.createBindGroup({
-        layout: this.pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: baseView },
-          { binding: 1, resource: this.sampler },
-          { binding: 2, resource: { buffer: slot.buffer } },
-          { binding: 3, resource: overlayView },
-          { binding: 4, resource: lutView },
-        ],
+      slot.bindGroup = sliceBindGroup(this.device, layout, {
+        sampler: this.sampler,
+        base: baseView,
+        overlay: overlayView,
+        lut: lutView,
+        buffer: slot.buffer,
       });
     }
   }
@@ -689,20 +291,17 @@ export class SliceRenderer {
   /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
   setVolume(volume: Volume): void {
     this.texture?.destroy();
-    this.texture = this.createVolumeTexture(volume, 'Volume');
+    this.texture = createVolumeTexture(this.device, volume, 'Volume');
     // A fresh base load drops any previous fusion overlay; the viewer re-adds one
     // through setOverlay when the new load carries an overlay layer.
     this.clearOverlay();
     this.rebuildMprBindGroups();
 
-    this.mipSlot.bindGroup = this.device.createBindGroup({
-      layout: this.mipPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: this.texture.createView() },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: { buffer: this.mipSlot.buffer } },
-        { binding: 3, resource: this.tfTexture.createView({ dimension: '1d' }) },
-      ],
+    this.mipSlot.bindGroup = mipBindGroup(this.device, this.mipPipeline.getBindGroupLayout(0), {
+      sampler: this.sampler,
+      volume: this.texture.createView(),
+      buffer: this.mipSlot.buffer,
+      tf: this.tfTexture.createView({ dimension: '1d' }),
     });
 
     this.volume = volume;
@@ -745,7 +344,7 @@ export class SliceRenderer {
       return;
     }
     this.overlayTexture?.destroy();
-    this.overlayTexture = this.createVolumeTexture(volume, 'Overlay');
+    this.overlayTexture = createVolumeTexture(this.device, volume, 'Overlay');
     this.overlayVolume = volume;
     this.overlayOpacity = opacity;
     // Colormap display bakes the named ramp into the overlay LUT; grayscale leaves
@@ -797,16 +396,12 @@ export class SliceRenderer {
   setSurfaceMesh(vertices: Float32Array): void {
     this.surfaceVertexCount = Math.floor(vertices.length / SURFACE_VERTEX_FLOATS);
     if (this.surfaceVertexCount === 0) return;
-    const bytes = vertices.byteLength;
-    if (!this.surfaceVertexBuffer || this.surfaceVertexBytes < bytes) {
-      this.surfaceVertexBuffer?.destroy();
-      this.surfaceVertexBytes = bytes;
-      this.surfaceVertexBuffer = this.device.createBuffer({
-        size: bytes,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      });
-    }
-    this.device.queue.writeBuffer(this.surfaceVertexBuffer, 0, vertices);
+    this.surfaceVertexBuffer = uploadResizingBuffer(
+      this.device,
+      this.surfaceVertexBuffer,
+      vertices,
+      GPUBufferUsage.VERTEX,
+    );
   }
 
   /** Draw the given panes (MPR slices and/or the 3D MIP), then the ROI surfaces. */
@@ -815,11 +410,7 @@ export class SliceRenderer {
     if (!volume) return;
 
     const canvas = this.gpu.canvas;
-    const draws: {
-      readonly rect: PaneRect;
-      readonly bindGroup: GPUBindGroup;
-      readonly pipeline: GPURenderPipeline;
-    }[] = [];
+    const draws: PaneDraw[] = [];
     let mipRect: PaneRect | null = null;
     let mprIndex = 0;
     for (const pane of panes) {
@@ -855,38 +446,20 @@ export class SliceRenderer {
     }
 
     const drawSurface = this.prepareSurface(mipRect, surface);
+    // Translucent ROI surfaces draw last, blended over the volume in the 3D pane.
+    const surfacePass: SurfacePass | null =
+      drawSurface && mipRect && this.surfaceVertexBuffer && this.surfaceIndexBuffer
+        ? {
+            rect: mipRect,
+            pipeline: this.surfacePipeline,
+            bindGroup: this.surfaceBindGroup,
+            vertexBuffer: this.surfaceVertexBuffer,
+            indexBuffer: this.surfaceIndexBuffer,
+            indexCount: drawSurface,
+          }
+        : null;
 
-    const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.gpu.context.getCurrentTexture().createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    });
-    for (const draw of draws) {
-      const { x, y, width, height } = draw.rect;
-      pass.setPipeline(draw.pipeline);
-      pass.setViewport(x, y, width, height, 0, 1);
-      pass.setScissorRect(x, y, width, height);
-      pass.setBindGroup(0, draw.bindGroup);
-      pass.draw(3);
-    }
-    // Translucent ROI surfaces, last, blended over the volume in the 3D pane.
-    if (drawSurface && mipRect && this.surfaceVertexBuffer && this.surfaceIndexBuffer) {
-      pass.setPipeline(this.surfacePipeline);
-      pass.setViewport(mipRect.x, mipRect.y, mipRect.width, mipRect.height, 0, 1);
-      pass.setScissorRect(mipRect.x, mipRect.y, mipRect.width, mipRect.height);
-      pass.setBindGroup(0, this.surfaceBindGroup);
-      pass.setVertexBuffer(0, this.surfaceVertexBuffer);
-      pass.setIndexBuffer(this.surfaceIndexBuffer, 'uint32');
-      pass.drawIndexed(drawSurface);
-    }
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
+    encodeFrame(this.device, this.gpu.context.getCurrentTexture().createView(), draws, surfacePass);
   }
 
   /**
@@ -899,16 +472,12 @@ export class SliceRenderer {
     const { indices, camera } = surface;
     if (indices.length === 0) return 0;
     this.device.queue.writeBuffer(this.surfaceCameraBuffer, 0, camera);
-    const bytes = indices.byteLength;
-    if (!this.surfaceIndexBuffer || this.surfaceIndexBytes < bytes) {
-      this.surfaceIndexBuffer?.destroy();
-      this.surfaceIndexBytes = bytes;
-      this.surfaceIndexBuffer = this.device.createBuffer({
-        size: bytes,
-        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-      });
-    }
-    this.device.queue.writeBuffer(this.surfaceIndexBuffer, 0, indices);
+    this.surfaceIndexBuffer = uploadResizingBuffer(
+      this.device,
+      this.surfaceIndexBuffer,
+      indices,
+      GPUBufferUsage.INDEX,
+    );
     return indices.length;
   }
 
@@ -919,81 +488,15 @@ export class SliceRenderer {
     rect: PaneRect,
     volume: Volume,
   ): void {
-    const basis: CameraBasis = cameraBasis(volume, view.camera, rect.width, rect.height);
-    // Reduce the sample budget while the view is being manipulated, then restore
-    // it for the settled frame. The cap and the per-t scale move together so the
-    // whole image coarsens uniformly; at full quality (lod 1) the output equals
-    // a one-sample-per-voxel march.
-    const lod = view.interactive ? MIP_INTERACTIVE_LOD : 1;
-    const maxSteps = Math.max(1, Math.ceil(this.mipSteps * lod));
-    const stepScale = mipStepScale(this.patientToTex, basis.forward, volume.dims) * lod;
-
-    // Thick-slab clip planes (perpendicular to the shared orthographic view) as a
-    // t-range along the ray; full thickness yields ±∞, leaving the march unclipped.
-    const thickness = view.slabThicknessMm ?? Infinity;
-    const [slabLo, slabHi] = slabTRange(volumeBounds(volume), basis.eye, basis.forward, thickness);
+    // DVR keeps the transfer-function LUT current; the rest of the packing is
+    // pure (see {@link packMipParams}) and shared with the layout unit tests.
     const mode = view.projectionMode ?? ProjectionMode.Max;
-    // MIP/DVR keep the shared MPR window (DVR ignores it); MinIP/Average auto-fit
-    // to the data range so they stay visible as the air fraction per ray slides.
-    const window = projectionWindow(mode, volume, view.windowCenter, view.windowWidth);
-
-    // DVR: keep the LUT current and pass the transfer function's intensity domain.
-    const tf = view.transferFunction ?? transferFunction(TransferFunctionPreset.CtBone);
-    if (isDvr(mode)) this.uploadTransferFunction(tf);
-    const [tfLo, tfHi] = tf.domain;
-
-    // DVR lighting: rotate the view-frame light into texture space (so the shader
-    // can dot it against the texture-space gradient) and pack the material weights.
-    const lighting = view.lighting ?? DEFAULT_DVR_LIGHTING;
-    const lightPatient = lightToPatient(
-      lightViewDirection(lighting),
-      normalize(basis.axisU),
-      normalize(basis.axisV),
-      basis.forward,
-    );
-    const lightTex = normalize(texDirection(this.patientToTex, lightPatient));
-    const light = dvrLightingParams(lightTex, lighting);
-
-    // Cut-away: the three MPR slice planes as texture-space half-spaces oriented
-    // to keep the far side of the shared view ray (rd = patientToTex·forward).
-    const clipOn = !!view.clipToPlanes && !!view.sliceIndices;
-    const clip =
-      clipOn && view.sliceIndices
-        ? viewClipHalfSpaces(
-            volume,
-            view.sliceIndices,
-            texDirection(this.patientToTex, basis.forward),
-          )
-        : NO_CLIP;
-
-    // Arbitrary handle-driven cut-plane (patient space) as a texture-space
-    // half-space; independent of the MPR cut-away above.
-    const freeClipOn = !!view.cutPlane;
-    const clipFree = view.cutPlane ? clipPlaneTex(volume, view.cutPlane) : NO_HALF_SPACE;
-
-    const floats = new Float32Array(MIP_PARAMS_SIZE / 4);
-    floats.set(this.patientToTex, 0); // patientToTex, floats 0..15
-    floats.set(basis.eye, 16);
-    floats[19] = maxSteps;
-    floats.set(basis.axisU, 20);
-    floats[23] = window.center;
-    floats.set(basis.axisV, 24);
-    floats[27] = window.width;
-    floats.set(basis.forward, 28);
-    floats[31] = stepScale;
-    floats[32] = projectionModeCode(mode);
-    floats[33] = slabLo;
-    floats[34] = slabHi;
-    floats[35] = clipOn ? 1 : 0;
-    floats[36] = tfLo;
-    floats[37] = tfHi;
-    floats[38] = freeClipOn ? 1 : 0; // arbitrary cut-plane enabled
-    floats[39] = view.invert ? 1 : 0; // invert grayscale projections (ignored by DVR)
-    packHalfSpace(floats, 40, clip[0]); // axial cut-plane
-    packHalfSpace(floats, 44, clip[1]); // coronal cut-plane
-    packHalfSpace(floats, 48, clip[2]); // sagittal cut-plane
-    floats.set(light, 52); // light dir + enabled (52..55), material weights (56..59)
-    packHalfSpace(floats, 60, clipFree); // arbitrary handle-driven cut-plane
+    if (isDvr(mode)) {
+      this.uploadTransferFunction(
+        view.transferFunction ?? transferFunction(TransferFunctionPreset.CtBone),
+      );
+    }
+    const floats = packMipParams(this.patientToTex, this.mipSteps, view, rect, volume);
     this.device.queue.writeBuffer(buffer, 0, floats);
   }
 
@@ -1006,15 +509,12 @@ export class SliceRenderer {
   private overlayAsBaseBindGroup(slot: PaneSlot): GPUBindGroup | null {
     if (!this.overlayTexture) return null;
     const view = this.overlayTexture.createView();
-    return this.device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: view },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: { buffer: slot.buffer } },
-        { binding: 3, resource: view }, // overlay binding unused (composite off)
-        { binding: 4, resource: this.overlayLut.createView({ dimension: '1d' }) },
-      ],
+    return sliceBindGroup(this.device, this.pipeline.getBindGroupLayout(0), {
+      sampler: this.sampler,
+      base: view,
+      overlay: view, // overlay binding unused (composite off)
+      lut: this.overlayLut.createView({ dimension: '1d' }),
+      buffer: slot.buffer,
     });
   }
 
@@ -1078,274 +578,4 @@ export class SliceRenderer {
     });
     this.device.queue.writeBuffer(buffer, 0, params);
   }
-}
-
-/** The base reslice + screen fit + window for one MPR pane (see {@link packSliceParams}). */
-export interface SliceParams {
-  readonly matrix: Float32Array | readonly number[];
-  readonly scaleX: number;
-  readonly scaleY: number;
-  readonly pan: Vec2;
-  readonly windowCenter: number;
-  readonly windowWidth: number;
-  readonly slicePos: number;
-  readonly flipX: boolean;
-  readonly invert: boolean;
-  /**
-   * Map the windowed BASE value through the overlay colormap LUT (binding 4)
-   * instead of drawing it grayscale — the standalone Compare overlay column,
-   * where the overlay layer is bound as the base and shown in its colormap.
-   * Independent of {@link overlay} (which composites a second layer).
-   */
-  readonly colormapBase: boolean;
-  /** The fusion overlay block, or null when no overlay is composited. */
-  readonly overlay: {
-    readonly matrix: Float32Array | readonly number[];
-    readonly windowCenter: number;
-    readonly windowWidth: number;
-    readonly opacity: number;
-    /** Map the windowed overlay value through the colormap LUT (vs. grayscale). */
-    readonly colormap: boolean;
-    /** Composite as a checkerboard (alternating cells) vs. a uniform blend. */
-    readonly checkerboard: boolean;
-    /** Checkerboard cell size in framebuffer pixels. */
-    readonly checkerSize: number;
-  } | null;
-}
-
-/**
- * Pack one MPR pane's uniform to the exact byte layout the WGSL `Params` struct
- * expects (see slice-shader.ts): the base reslice matrix + screen fit + window
- * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
- * matrix (28..43), overlay window centre/width and opacity (44..46), and the
- * colormap flag (47, u32). The colormap-the-base flag (27, u32) sits in the
- * pre-overlay pad. With no overlay the opacity stays 0, so the shader
- * leaves the base untouched. Pure and exported so the layout can be unit-tested
- * without a GPU — the shader and this packing must stay in lockstep.
- */
-export function packSliceParams(p: SliceParams): ArrayBuffer {
-  const params = new ArrayBuffer(PARAMS_SIZE);
-  const floats = new Float32Array(params);
-  const uints = new Uint32Array(params);
-  floats.set(p.matrix as ArrayLike<number>, 0); // planeToTex, floats 0..15
-  floats[MATRIX_FLOATS + 0] = p.scaleX;
-  floats[MATRIX_FLOATS + 1] = p.scaleY;
-  floats[MATRIX_FLOATS + 2] = p.pan.x;
-  floats[MATRIX_FLOATS + 3] = p.pan.y;
-  floats[MATRIX_FLOATS + 4] = p.windowCenter;
-  floats[MATRIX_FLOATS + 5] = p.windowWidth;
-  floats[MATRIX_FLOATS + 6] = p.slicePos;
-  uints[MATRIX_FLOATS + 7] = p.flipX ? 1 : 0;
-  uints[MATRIX_FLOATS + 8] = p.invert ? 1 : 0;
-  // Colormap-the-base flag (float 27): the standalone Compare overlay column.
-  // Set independently of the overlay block, which the compare column leaves null.
-  uints[MATRIX_FLOATS + 11] = p.colormapBase ? 1 : 0;
-  if (p.overlay) {
-    // Checkerboard flag + cell size fill the mat4-alignment pad (floats 25, 26).
-    uints[MATRIX_FLOATS + 9] = p.overlay.checkerboard ? 1 : 0; // float 25 (u32)
-    floats[MATRIX_FLOATS + 10] = p.overlay.checkerSize; // float 26
-    floats.set(p.overlay.matrix as ArrayLike<number>, OVERLAY_FLOATS); // overlayToTex, 28..43
-    floats[OVERLAY_FLOATS + 16] = p.overlay.windowCenter; // float 44
-    floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45
-    floats[OVERLAY_FLOATS + 18] = p.overlay.opacity; // float 46
-    uints[OVERLAY_FLOATS + 19] = p.overlay.colormap ? 1 : 0; // float 47 (u32)
-  }
-  return params;
-}
-
-/**
- * Letterbox scale that fits the plane into a viewport without distortion.
- * Exported so the CPU-side cursor probe can reproduce the exact same fit the
- * shader uses when mapping a pixel back to a voxel.
- */
-export function aspectScale(
-  volume: Volume,
-  orientation: Orientation,
-  viewWidth: number,
-  viewHeight: number,
-): [number, number] {
-  const [planeW, planeH] = planeExtentMm(volume, orientation);
-  const planeAspect = planeW / planeH;
-  const viewAspect = viewWidth / viewHeight;
-  if (viewAspect > planeAspect) {
-    return [viewAspect / planeAspect, 1];
-  }
-  return [1, planeAspect / viewAspect];
-}
-
-/**
- * Magnification that renders an orientation's slice at its native resolution —
- * one resampled output voxel per device pixel. {@link aspectScale}'s letterbox
- * fit is `zoom = 1` (the slice scaled to just fit the pane); this returns the
- * extra zoom on top of that fit which makes the finer-sampled in-plane axis
- * exactly one voxel per pixel. The coarser axis is then upsampled, so no acquired
- * detail is dropped (for the common square-pixel slice both axes coincide).
- *
- * `viewWidth`/`viewHeight` are the pane's size in the same device-pixel units
- * {@link aspectScale} sees. Returns 1 if the plane has no extent. Apply
- * {@link clampPan} afterwards, since the pan bound grows with zoom.
- */
-export function oneToOneZoom(
-  volume: Volume,
-  orientation: Orientation,
-  viewWidth: number,
-  viewHeight: number,
-): number {
-  const [planeW, planeH] = planeExtentMm(volume, orientation);
-  const [nU, nV] = planePixelDims(volume, orientation);
-  // Device pixels per mm at the letterbox fit (zoom = 1): the plane just fits.
-  const fitPxPerMm = Math.min(viewWidth / planeW, viewHeight / planeH);
-  // Device pixels per mm at native scale: the finer in-plane sampling sets it,
-  // so every voxel covers at least one pixel.
-  const nativePxPerMm = Math.max(nU / planeW, nV / planeH);
-  const zoom = nativePxPerMm / fitPxPerMm;
-  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
-}
-
-/**
- * Voxels crossed per unit of ray parameter `t` for the MIP's shared orthographic
- * direction. Multiplying this by a ray's `tExit − tEntry` span gives ≈ one sample
- * per voxel along that ray's real path, so the shader can size its march to the
- * actual traversal instead of the worst-case full diagonal.
- *
- * `forward` is the patient-space ray direction; `patientToTex` is the column-major
- * affine from {@link patientToTexMatrix}. Its linear part maps the direction into
- * texture space (matching `(patientToTex * vec4(forward, 0)).xyz` in the shader),
- * and scaling each texture component by `dims` converts the step to voxel units.
- * The direction is shared by every fragment (orthographic), so this is computed
- * once per frame on the CPU and passed as a uniform.
- */
-export function mipStepScale(
-  patientToTex: Float32Array,
-  forward: Vec3,
-  dims: readonly [number, number, number],
-): number {
-  const [fx, fy, fz] = forward;
-  const m = patientToTex;
-  // Column-major mat4x4 · vec4(forward, 0): texture component c = m[c] + m[4+c] + m[8+c].
-  const rx = m[0] * fx + m[4] * fy + m[8] * fz;
-  const ry = m[1] * fx + m[5] * fy + m[9] * fz;
-  const rz = m[2] * fx + m[6] * fy + m[10] * fz;
-  return Math.hypot(rx * dims[0], ry * dims[1], rz * dims[2]);
-}
-
-/**
- * Constrain a pane's pan offset (screen-uv units) so the pane centre always
- * lands on the slice rather than its letterbox margin. The bound grows with
- * zoom, so a magnified pane can be panned proportionally further to reach its
- * edges. Mirrors the pan applied in `slice-shader.ts` and undone in `probe.ts`.
- */
-export function clampPan(
-  volume: Volume,
-  orientation: Orientation,
-  viewWidth: number,
-  viewHeight: number,
-  zoom: number,
-  pan: Vec2,
-): Vec2 {
-  const z = zoom > 0 ? zoom : 1;
-  const [scaleX, scaleY] = aspectScale(volume, orientation, viewWidth, viewHeight);
-  // Pane centre stays on the plane while |pan * (aspectScale / zoom)| <= 0.5.
-  const maxX = (0.5 * z) / scaleX;
-  const maxY = (0.5 * z) / scaleY;
-  return {
-    x: Math.min(maxX, Math.max(-maxX, pan.x)),
-    y: Math.min(maxY, Math.max(-maxY, pan.y)),
-  };
-}
-
-/**
- * Rescale a pan offset so a zoom change pivots about a fixed screen point
- * instead of the image centre. The shader maps a screen-uv point `uv` to the
- * plane point `(uv - 0.5 - pan) * (aspectScale / zoom) + 0.5`; holding the plane
- * point under `anchor` fixed across a zoom change from `fromZoom` to `toZoom`
- * gives `pan' = (anchor - 0.5) * (1 - ratio) + pan * ratio`, with `ratio =
- * toZoom / fromZoom`. `anchor` is in screen-uv (pane-fraction) units and
- * defaults to the pane centre (0.5, 0.5), which reduces to scaling the pan by
- * the zoom ratio. Apply {@link clampPan} afterwards, since the bound grows with
- * zoom.
- */
-export function rezoomPan(
-  pan: Vec2,
-  fromZoom: number,
-  toZoom: number,
-  anchor: Vec2 = { x: 0.5, y: 0.5 },
-): Vec2 {
-  const from = fromZoom > 0 ? fromZoom : 1;
-  const to = toZoom > 0 ? toZoom : 1;
-  const ratio = to / from;
-  return {
-    x: (anchor.x - 0.5) * (1 - ratio) + pan.x * ratio,
-    y: (anchor.y - 0.5) * (1 - ratio) + pan.y * ratio,
-  };
-}
-
-/**
- * Cursor-anchored pan for a wheel zoom over an MPR pane. Turns the cursor
- * (canvas-relative CSS pixels) into the pane's screen-uv anchor, re-zooms the pan
- * about it so the plane point under the cursor stays put across the zoom change,
- * then re-clamps — the pan bound grows with zoom. Folds the {@link rezoomPan} and
- * {@link clampPan} geometry a cursor-anchored zoom composes behind one tested call.
- */
-export function cursorZoomPan(
-  volume: Volume,
-  orientation: Orientation,
-  rect: PaneRect,
-  fromZoom: number,
-  toZoom: number,
-  pan: Vec2,
-  cursor: Vec2,
-): Vec2 {
-  const anchor: Vec2 = {
-    x: (cursor.x - rect.x) / rect.width,
-    y: (cursor.y - rect.y) / rect.height,
-  };
-  const anchored = rezoomPan(pan, fromZoom, toZoom, anchor);
-  return clampPan(volume, orientation, rect.width, rect.height, toZoom, anchored);
-}
-
-/**
- * Next slice index after one wheel notch: step by the sign of `deltaY` (scroll
- * down advances) and clamp into `[0, max]`. The same index arithmetic the
- * linked-master and independent-group scroll paths share — they differ only in
- * which grid's current index and `max` they feed in.
- */
-export function steppedSliceIndex(current: number, deltaY: number, max: number): number {
-  return Math.min(max, Math.max(0, current + Math.sign(deltaY)));
-}
-
-/**
- * Map a patient-space direction into texture space with the linear part of the
- * column-major `patientToTex` affine (w = 0), matching the shader's
- * `(patientToTex * vec4(forward, 0)).xyz`. Used to orient the cut-away planes
- * along the same ray direction the shader marches.
- */
-function texDirection(patientToTex: Float32Array, forward: Vec3): Vec3 {
-  const m = patientToTex;
-  const [fx, fy, fz] = forward;
-  return [
-    m[0] * fx + m[4] * fy + m[8] * fz,
-    m[1] * fx + m[5] * fy + m[9] * fz,
-    m[2] * fx + m[6] * fy + m[10] * fz,
-  ];
-}
-
-/** Pack a half-space into four floats at `offset`: normal.xyz then the constant. */
-function packHalfSpace(floats: Float32Array, offset: number, plane: HalfSpace): void {
-  floats[offset + 0] = plane.normal[0];
-  floats[offset + 1] = plane.normal[1];
-  floats[offset + 2] = plane.normal[2];
-  floats[offset + 3] = plane.offset;
-}
-
-/** Keep a rect within the [0, maxW] × [0, maxH] bounds of the canvas. */
-function clampRect(rect: PaneRect, maxWidth: number, maxHeight: number): PaneRect {
-  const x = Math.max(0, Math.min(rect.x, maxWidth));
-  const y = Math.max(0, Math.min(rect.y, maxHeight));
-  return {
-    x,
-    y,
-    width: Math.max(0, Math.min(rect.width, maxWidth - x)),
-    height: Math.max(0, Math.min(rect.height, maxHeight - y)),
-  };
 }
