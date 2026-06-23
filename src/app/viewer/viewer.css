@@ -457,6 +457,22 @@ button.active {
   font-weight: 600;
 }
 
+/* Per-structure-set heading above its ROI rows when several sets are listed (#259). */
+.roi-group-label {
+  margin-top: 4px;
+  overflow: hidden;
+  font-size: 0.78em;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  opacity: 0.7;
+}
+
+.roi-group-label:first-child {
+  margin-top: 0;
+}
+
 .roi-item,
 .layer-item {
   display: flex;

@@ -404,40 +404,45 @@
           </label>
 
           <div class="roi-legend">
-            @for (roi of roiLegend(); track roi.key) {
-              <div class="roi-item">
-                <input
-                  type="checkbox"
-                  [checked]="roi.visible"
-                  (change)="toggleRoi(roi.key)"
-                  [attr.aria-label]="'Show ' + roi.name"
-                />
-                <input
-                  type="color"
-                  class="roi-color"
-                  [value]="roi.colorHex"
-                  (input)="onRoiColor(roi.key, $event)"
-                  [attr.aria-label]="roi.name + ' colour'"
-                  [title]="roi.name + ' colour'"
-                />
-                <span class="roi-name" [title]="roi.name">{{ roi.name }}</span>
-                @if (roi.type) {
-                  <span class="roi-type" [title]="'Interpreted type: ' + roi.type">{{
-                    roi.type
-                  }}</span>
-                }
-                <input
-                  type="range"
-                  class="roi-opacity"
-                  min="0"
-                  max="100"
-                  step="5"
-                  [value]="roi.opacityPercent"
-                  (input)="onRoiOpacity(roi.key, $event)"
-                  [attr.aria-label]="roi.name + ' opacity'"
-                  [title]="roi.name + ' opacity: ' + roi.opacityPercent + '%'"
-                />
-              </div>
+            @for (group of roiGroups(); track group.setIndex) {
+              @if (showRoiGroupLabels()) {
+                <div class="roi-group-label" [title]="group.label">{{ group.label }}</div>
+              }
+              @for (roi of group.entries; track roi.key) {
+                <div class="roi-item">
+                  <input
+                    type="checkbox"
+                    [checked]="roi.visible"
+                    (change)="toggleRoi(roi.key)"
+                    [attr.aria-label]="'Show ' + roi.name"
+                  />
+                  <input
+                    type="color"
+                    class="roi-color"
+                    [value]="roi.colorHex"
+                    (input)="onRoiColor(roi.key, $event)"
+                    [attr.aria-label]="roi.name + ' colour'"
+                    [title]="roi.name + ' colour'"
+                  />
+                  <span class="roi-name" [title]="roi.name">{{ roi.name }}</span>
+                  @if (roi.type) {
+                    <span class="roi-type" [title]="'Interpreted type: ' + roi.type">{{
+                      roi.type
+                    }}</span>
+                  }
+                  <input
+                    type="range"
+                    class="roi-opacity"
+                    min="0"
+                    max="100"
+                    step="5"
+                    [value]="roi.opacityPercent"
+                    (input)="onRoiOpacity(roi.key, $event)"
+                    [attr.aria-label]="roi.name + ' opacity'"
+                    [title]="roi.name + ' opacity: ' + roi.opacityPercent + '%'"
+                  />
+                </div>
+              }
             }
           </div>
         </div>
