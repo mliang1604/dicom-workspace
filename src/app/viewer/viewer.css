@@ -895,7 +895,7 @@ button.active {
 }
 
 .raw-tag-id {
-  flex: 0 0 auto;
+  flex: none;
   color: var(--muted);
 }
 
@@ -904,6 +904,7 @@ button.active {
   color: var(--accent);
 }
 
+.raw-tag-name,
 .raw-tag-value {
   flex: 1;
   word-break: break-word;
