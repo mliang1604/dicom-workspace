@@ -37,6 +37,7 @@ import {
   type SurfaceFrame,
   type SurfaceSortScratch,
 } from '../../render/slice-renderer';
+import { composePaneViews } from '../../render/frame';
 import { TRANSFER_FUNCTION_PRESETS, TransferFunctionPreset } from '../../render/transfer-function';
 import { type DvrLighting } from '../../render/dvr';
 import {
@@ -1836,76 +1837,40 @@ export class Viewer {
   private composePaneViews(): PaneView[] | null {
     const renderer = this.renderer();
     const volume = this.volume();
-    const panes = this.panes();
-    const { dpr } = this.viewport();
-    const indices = this.sliceIndices();
-    const obliques = this.obliques();
-    const camera = this.camera3d();
-    const projectionMode = this.projectionMode();
-    const transferFunction = this.transferFunction();
-    const lighting = this.dvrLighting();
-    const clipToPlanes = this.clipToPlanes();
-    const cutPlane = this.cutPlane();
-    const slabThicknessMm = this.slabThicknessMm();
-    const windowCenter = this.windowCenter();
-    const windowWidth = this.windowWidth();
-    const sagittalFlipped = this.sagittalFlipped();
-    const invert = this.invert();
-    // The MIP renders at reduced quality while it's being orbited, zoomed, or
-    // window/levelled, then at full quality once interaction settles.
-    const mipInteractive = this.drag()?.kind === 'orbit' || this.mipSettling();
     if (!renderer || !volume) return null;
 
-    // In the Compare layout each column draws its own layer standalone (no
-    // fusion compositing); the right column (group ≥ 1) shows the overlay layer
-    // windowed by its own defaults.
-    const compareMode = this.layoutMode() === LayoutMode.Compare;
-    const overlay = this.selectedOverlay();
     // The overlay column windows on its own per-layer window/level (independent of
     // the base column's shared window), falling back to its volume's default.
-    const overlayWindow = overlay ? this.layerWindow(overlay) : null;
-
-    return panes.map((pane) =>
-      pane.kind === 'mip'
-        ? {
-            kind: 'mip',
-            windowCenter,
-            windowWidth,
-            camera,
-            projectionMode,
-            transferFunction,
-            lighting,
-            clipToPlanes,
-            sliceIndices: indices,
-            cutPlane: cutPlane ?? undefined,
-            slabThicknessMm,
-            interactive: mipInteractive,
-            invert,
-            rect: scaleRect(pane.rect, dpr),
-          }
-        : ((): PaneView => {
-            const showOverlay = compareMode && pane.group >= 1 && overlay !== null;
-            return {
-              kind: 'mpr',
-              orientation: pane.orientation,
-              // Resolve the group's slice/zoom/pan: shared (linked) or independent
-              // (unlinked), and patient-plane-matched for non-base Compare groups.
-              sliceIndex: this.paneSliceIndex(pane.group, pane.orientation),
-              windowCenter: showOverlay ? overlayWindow!.center : windowCenter,
-              windowWidth: showOverlay ? overlayWindow!.width : windowWidth,
-              zoom: this.paneZoom(pane.group, pane.orientation),
-              pan: this.panePan(pane.group, pane.orientation),
-              rotation: obliques[pane.orientation],
-              flipX: pane.orientation === Orientation.Sagittal && sagittalFlipped,
-              invert,
-              rect: scaleRect(pane.rect, dpr),
-              // Which layer this pane draws and whether to composite the overlay
-              // over it: group ≥ 1 in Compare draws the overlay layer standalone.
-              group: showOverlay ? pane.group : 0,
-              composite: !compareMode,
-            };
-          })(),
-    );
+    const overlay = this.selectedOverlay();
+    return composePaneViews({
+      panes: this.panes(),
+      dpr: this.viewport().dpr,
+      baseVolume: volume,
+      overlayVolume: overlay?.volume ?? null,
+      sliceIndices: this.sliceIndices(),
+      zooms: this.zooms(),
+      pans: this.pans(),
+      obliques: this.obliques(),
+      windowCenter: this.windowCenter(),
+      windowWidth: this.windowWidth(),
+      overlayWindow: overlay ? this.layerWindow(overlay) : null,
+      compareMode: this.layoutMode() === LayoutMode.Compare,
+      compareLinked: this.compareLinked(),
+      groupNav: this.groupNav(),
+      hasOverlay: overlay !== null,
+      invert: this.invert(),
+      sagittalFlipped: this.sagittalFlipped(),
+      // The MIP renders at reduced quality while it's being orbited, zoomed, or
+      // window/levelled, then at full quality once interaction settles.
+      mipInteractive: this.drag()?.kind === 'orbit' || this.mipSettling(),
+      camera: this.camera3d(),
+      projectionMode: this.projectionMode(),
+      transferFunction: this.transferFunction(),
+      lighting: this.dvrLighting(),
+      clipToPlanes: this.clipToPlanes(),
+      cutPlane: this.cutPlane(),
+      slabThicknessMm: this.slabThicknessMm(),
+    });
   }
 
   /** Submit the latest computed views on the next frame, coalescing rapid updates. */
