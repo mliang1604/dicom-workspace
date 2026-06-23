@@ -221,6 +221,20 @@ describe('extractMetadata', () => {
     expect([...ids]).toEqual([...ids].sort());
 
     const name = rawTags.find((tag) => tag.tag === '(0010,0010)');
-    expect(name).toEqual({ tag: '(0010,0010)', vr: 'PN', value: 'Doe, John Q' });
+    expect(name).toEqual({
+      tag: '(0010,0010)',
+      name: "Patient's Name",
+      vr: 'PN',
+      value: 'Doe, John Q',
+    });
+  });
+
+  it('labels raw tags with their data-dictionary name', () => {
+    const { rawTags } = extractMetadata(sampleDataSet());
+    const byTag = new Map(rawTags.map((tag) => [tag.tag, tag.name]));
+
+    expect(byTag.get('(0008,0060)')).toBe('Modality');
+    expect(byTag.get('(0028,0010)')).toBe('Rows');
+    expect(byTag.get('(0002,0000)')).toBe('Group Length');
   });
 });

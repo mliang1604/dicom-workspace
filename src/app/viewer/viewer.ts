@@ -4078,7 +4078,7 @@ export function loadingText(loaded: number, total: number): string {
 
 /**
  * Narrow the raw-tag list to those matching a case-insensitive query against the
- * tag id, VR, or value. An empty/blank query returns the list unchanged.
+ * tag id, name, VR, or value. An empty/blank query returns the list unchanged.
  * Exported for direct unit testing of the search behaviour.
  */
 export function filterRawTags(tags: readonly RawTag[], query: string): readonly RawTag[] {
@@ -4087,6 +4087,7 @@ export function filterRawTags(tags: readonly RawTag[], query: string): readonly 
   return tags.filter(
     (tag) =>
       tag.tag.toLowerCase().includes(q) ||
+      (tag.name !== null && tag.name.toLowerCase().includes(q)) ||
       (tag.vr !== null && tag.vr.toLowerCase().includes(q)) ||
       tag.value.toLowerCase().includes(q),
   );

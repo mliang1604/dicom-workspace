@@ -1,4 +1,5 @@
 import * as dicomParser from 'dicom-parser';
+import { tagName } from './tag-dictionary';
 
 /**
  * A curated DICOM field for the info panel: a human label and a formatted value.
@@ -24,6 +25,8 @@ export interface CuratedGroup {
 export interface RawTag {
   /** Tag in `(gggg,eeee)` form, e.g. `(0010,0010)`. */
   readonly tag: string;
+  /** Human-readable tag name from the data dictionary, or null when unknown. */
+  readonly name: string | null;
   /** Value Representation, or null for implicit-VR files that carry none. */
   readonly vr: string | null;
   /** Display value, already formatted and truncated. */
@@ -133,6 +136,7 @@ function rawTags(dataSet: dicomParser.DataSet): RawTag[] {
     const element = dataSet.elements[key];
     tags.push({
       tag: formatTagId(element.tag),
+      name: tagName(element.tag),
       vr: element.vr ?? null,
       value: formatRawValue(dataSet, element),
     });
