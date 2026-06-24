@@ -30,6 +30,7 @@ import { LoadController, type LoadState } from './load-controller';
 import { MeasureController, type ToolMode } from './measure-controller';
 import { RenderController } from './render-controller';
 import { RoiController } from './roi-controller';
+import { EditableStructuresStore } from './editable-structures-store';
 import { LayersController } from './layers-controller';
 import { ToolbarController, LAYOUT_MODES } from './toolbar-controller';
 import { StatusController } from './status-controller';
@@ -91,6 +92,7 @@ const MAX_ZOOM = 20;
     MeasureController,
     RenderController,
     RoiController,
+    EditableStructuresStore,
     LayersController,
     ToolbarController,
     StatusController,
