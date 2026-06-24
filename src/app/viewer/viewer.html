@@ -367,6 +367,93 @@
       </div>
     </details>
 
+    <details
+      class="tool-group"
+      role="group"
+      aria-label="Structure editing"
+      title="Paint or erase the active structure into the volume — drag over an MPR pane"
+      open
+    >
+      <summary class="tool-group-label">Edit structures</summary>
+      <div class="tool-group-body brush-panel">
+        <div class="brush-modes">
+          <button
+            type="button"
+            (click)="brushCtl.toggleMode('paint')"
+            [disabled]="!isReady() || !hasMprPane()"
+            [class.active]="brushCtl.mode() === 'paint'"
+            [attr.aria-pressed]="brushCtl.mode() === 'paint'"
+            title="Paint the active structure"
+          >
+            🖌 Paint
+          </button>
+          <button
+            type="button"
+            (click)="brushCtl.toggleMode('erase')"
+            [disabled]="!isReady() || !hasMprPane()"
+            [class.active]="brushCtl.mode() === 'erase'"
+            [attr.aria-pressed]="brushCtl.mode() === 'erase'"
+            title="Erase any structure under the brush"
+          >
+            🧽 Erase
+          </button>
+          <button
+            type="button"
+            (click)="brushCtl.newStructure()"
+            [disabled]="!isReady()"
+            title="Create a new structure and paint it"
+          >
+            ＋ New
+          </button>
+        </div>
+
+        <label class="ctrl brush-roi" title="Which structure the brush paints into">
+          ROI
+          <select
+            [value]="brushCtl.activeRoiId() ?? ''"
+            (change)="brushCtl.onRoiSelect($event)"
+            [disabled]="!isReady() || brushCtl.rois().length === 0"
+            aria-label="Active structure"
+          >
+            @if (brushCtl.rois().length === 0) {
+              <option value="">No structures yet</option>
+            }
+            @for (roi of brushCtl.rois(); track roi.id) {
+              <option [value]="roi.id">{{ roi.name }}</option>
+            }
+          </select>
+        </label>
+
+        <label class="ctrl brush-shape" title="Brush footprint">
+          Shape
+          <select
+            [value]="brushCtl.shape()"
+            (change)="brushCtl.onShapeChange($event)"
+            [disabled]="!isReady()"
+            aria-label="Brush shape"
+          >
+            <option value="sphere">Sphere (3D)</option>
+            <option value="disk">Disk (slice)</option>
+          </select>
+        </label>
+
+        <label class="ctrl brush-size" title="Brush radius in millimetres">
+          Size
+          <input
+            type="range"
+            min="0.5"
+            max="50"
+            step="0.5"
+            [value]="brushCtl.radiusMm()"
+            (input)="brushCtl.onRadiusInput($event)"
+            [disabled]="!isReady()"
+            aria-label="Brush radius (mm)"
+          />
+          <span class="brush-size-readout">{{ brushCtl.radiusMm() }} mm</span>
+        </label>
+      </div>
+    </details>
+
     @if (roiCtl.hasStructures()) {
       <details
         class="tool-group"

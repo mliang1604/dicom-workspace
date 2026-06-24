@@ -167,6 +167,16 @@ export class InteractionController {
       return;
     }
 
+    // With a brush/eraser mode selected, a left-drag over an MPR pane paints the
+    // active ROI into the label volume instead of panning. Capture so the stroke
+    // keeps tracking past the pane edge; the brush controller does the painting.
+    if (d.brushActive() && placement.kind === 'mpr') {
+      d.canvas().setPointerCapture(event.pointerId);
+      this.drag.set({ kind: 'draw', orientation: placement.orientation, group: placement.group });
+      d.beginStroke(placement, event);
+      return;
+    }
+
     // With a measurement tool active, a left-click on an MPR pane places the next
     // point instead of starting a pan; the 3D pane keeps its orbit gesture.
     if (d.activeTool() !== 'none' && placement.kind === 'mpr') {
@@ -200,6 +210,7 @@ export class InteractionController {
     if (!d) return;
     const drag = this.drag();
     if (drag?.kind === 'pan') this.dragPan(event, drag);
+    else if (drag?.kind === 'draw') this.dragDraw(event, drag);
     else if (drag?.kind === 'orbit') this.dragOrbit(event, drag);
     else if (drag?.kind === 'cameraPan') this.dragCameraPan(event, drag);
     else if (drag?.kind === 'zoom') this.dragZoom(event, drag);
@@ -220,9 +231,11 @@ export class InteractionController {
   onPointerUp(event: PointerEvent): void {
     const d = this.deps;
     if (!d || !this.drag()) return;
+    const wasDraw = this.drag()?.kind === 'draw';
     const canvas = d.canvas();
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     this.drag.set(null);
+    if (wasDraw) d.endStroke();
   }
 
   onPointerLeave(event: PointerEvent): void {
@@ -274,6 +287,18 @@ export class InteractionController {
       panX: cam.panX - dx * mmPerPxX,
       panY: cam.panY + dy * mmPerPxY,
     }));
+  }
+
+  /** Extend the active brush stroke to the cursor, staying on the pane it began on. */
+  private dragDraw(event: PointerEvent, drag: Extract<Drag, { kind: 'draw' }>): void {
+    const d = this.deps!;
+    const placement = d
+      .panes()
+      .find(
+        (pane): pane is Extract<PanePlacement, { kind: 'mpr' }> =>
+          pane.kind === 'mpr' && pane.group === drag.group && pane.orientation === drag.orientation,
+      );
+    if (placement) d.extendStroke(placement, event);
   }
 
   /** Accumulate a pointer move into the dragged pane's pan, clamped to bounds. */

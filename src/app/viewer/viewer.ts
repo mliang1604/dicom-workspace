@@ -31,6 +31,7 @@ import { MeasureController, type ToolMode } from './measure-controller';
 import { RenderController } from './render-controller';
 import { RoiController } from './roi-controller';
 import { EditableStructuresStore } from './editable-structures-store';
+import { BrushController } from './brush-controller';
 import { LayersController } from './layers-controller';
 import { ToolbarController, LAYOUT_MODES } from './toolbar-controller';
 import { StatusController } from './status-controller';
@@ -93,6 +94,7 @@ const MAX_ZOOM = 20;
     RenderController,
     RoiController,
     EditableStructuresStore,
+    BrushController,
     LayersController,
     ToolbarController,
     StatusController,
@@ -127,6 +129,8 @@ export class Viewer {
   private readonly render = inject(RenderController);
   /** Owns the RTSTRUCT structures domain (ROI state, legend, contours, surfaces); wired in the constructor. */
   protected readonly roiCtl = inject(RoiController);
+  /** Owns the brush/eraser structures-editing gesture and its settings; wired in the constructor. */
+  protected readonly brushCtl = inject(BrushController);
   /** Owns the layer registry / fusion / Compare domain (volume, window/level, blend); wired in the constructor. */
   protected readonly layersCtl = inject(LayersController);
   /** Owns the toolbar / keyboard view actions (layout, fit, reset, cine, capture); wired in the constructor. */
@@ -378,6 +382,10 @@ export class Viewer {
       setFocusFromMip: (placement, event) => this.measureCtl.setFocusFromMip(placement, event),
       activeTool: () => this.activeTool(),
       placeMeasurePoint: (placement, event) => this.measureCtl.placeMeasurePoint(placement, event),
+      brushActive: () => this.brushCtl.isActive(),
+      beginStroke: (placement, event) => this.brushCtl.beginStroke(placement, event),
+      extendStroke: (placement, event) => this.brushCtl.extendStroke(placement, event),
+      endStroke: () => this.brushCtl.endStroke(),
     });
 
     // Wire the 3D-pane editing controller: it owns the TF / clip-plane / oblique /
@@ -443,6 +451,20 @@ export class Viewer {
       clipToPlanes: () => this.view3d.clipToPlanes(),
       cutPlane: () => this.view3d.cutPlane(),
       transferFunction: () => this.view3d.transferFunction(),
+    });
+
+    // Wire the brush/eraser controller: it turns a left-drag over an MPR pane into
+    // label voxels via the shared probe inverse and writes them to the editable
+    // structures store, reading the same view tuples the probe does.
+    this.brushCtl.init({
+      volume: () => this.layersCtl.volume(),
+      isReady: () => this.isReady(),
+      canvasBounds: () => this.canvasRef().nativeElement.getBoundingClientRect(),
+      zooms: this.zooms,
+      pans: this.pans,
+      obliques: this.obliques,
+      sliceIndices: this.sliceIndices,
+      sagittalFlipped: () => this.sagittalFlipped(),
     });
 
     // Wire the render controller: it owns the WebGPU lifecycle, the resize sync and
