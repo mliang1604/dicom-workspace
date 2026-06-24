@@ -16,6 +16,7 @@ import { CompareStore } from './compare-store';
 import { LayersController } from './layers-controller';
 import { MeasurementStore } from './measurement-store';
 import { RoiController } from './roi-controller';
+import { EditableStructuresStore } from './editable-structures-store';
 import { LoadCoordinator, type DropIntent, type LoadOutcome } from './load-coordinator';
 import {
   confirmPatientSwitch,
@@ -99,6 +100,7 @@ export class LoadController {
   private readonly preferencesStore = inject(PreferencesStore);
   private readonly layersCtl = inject(LayersController);
   private readonly roiCtl = inject(RoiController);
+  private readonly editableStructures = inject(EditableStructuresStore);
   private readonly compareStore = inject(CompareStore);
   private readonly cam = inject(Camera3dStore);
   private readonly cine = inject(CineStore);
@@ -407,6 +409,8 @@ export class LoadController {
     this.measure.endDrag();
     // ROI state (visibility / colours / opacity / set selection) resets per load.
     this.roiCtl.resetForLoad(result.structureSets);
+    // Authored structures: a fresh empty label grid aligned to the new volume.
+    this.editableStructures.resetForLoad(volume);
     // A fresh base load drops any layers-panel edits (overlays load at their defaults).
     this.layersCtl.reset();
     d.activeCompareGroup.set(0); // window/level controls target the base column
