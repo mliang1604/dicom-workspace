@@ -407,6 +407,52 @@
           </button>
         </div>
 
+        <div
+          class="brush-set"
+          role="group"
+          aria-label="Active structure set"
+          title="New structures and strokes go into the active authored set, never into an imported (read-only) one"
+        >
+          <label class="ctrl brush-set-select" title="Which authored set new structures go into">
+            Set
+            <select
+              [value]="brushCtl.activeSetId() ?? ''"
+              (change)="brushCtl.onSetSelect($event)"
+              [disabled]="!isReady() || brushCtl.sets().length === 0"
+              aria-label="Active structure set"
+            >
+              @if (brushCtl.sets().length === 0) {
+                <option value="">No set yet</option>
+              }
+              @for (set of brushCtl.sets(); track set.id) {
+                <option [value]="set.id">{{ set.label }}</option>
+              }
+            </select>
+          </label>
+          <button
+            type="button"
+            class="brush-set-new"
+            (click)="brushCtl.newSet()"
+            [disabled]="!isReady()"
+            title="Create a new, empty authored set and make it active"
+          >
+            ＋ Set
+          </button>
+        </div>
+
+        @if (brushCtl.activeSetId() !== null) {
+          <label class="ctrl brush-set-name" title="Rename the active authored set">
+            Name
+            <input
+              type="text"
+              [value]="brushCtl.activeSetLabel()"
+              (input)="brushCtl.onSetRename($event)"
+              [disabled]="!isReady()"
+              aria-label="Active set name"
+            />
+          </label>
+        }
+
         <label class="ctrl brush-roi" title="Which structure the brush paints into">
           ROI
           <select

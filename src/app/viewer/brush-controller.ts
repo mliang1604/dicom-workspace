@@ -64,8 +64,17 @@ export class BrushController {
   /** The ROI id the brush paints into; null when none is chosen yet. */
   readonly activeRoiId = signal<number | null>(null);
 
-  /** The authored structures, for the toolbar's active-ROI selector. */
-  readonly rois = this.store.rois;
+  /** The active set's authored structures, for the toolbar's active-ROI selector. */
+  readonly rois = this.store.activeRois;
+
+  /** The authored structure sets, for the toolbar's active-set selector. */
+  readonly sets = this.store.sets;
+
+  /** The active authored set's id, for the active-set selector; null when none. */
+  readonly activeSetId = this.store.activeSetId;
+
+  /** The active set's label, for the rename field; '' when no set is active yet. */
+  readonly activeSetLabel = computed(() => this.store.activeSet()?.label ?? '');
 
   /** The voxel the last stroke sample landed on, so a drag can interpolate from it. */
   private lastVoxel: VoxelIndex | null = null;
@@ -103,11 +112,42 @@ export class BrushController {
     this.lastVoxel = null;
   }
 
-  /** Create a fresh structure, select it, and switch to painting it. */
+  /** Create a fresh structure in the active set, select it, and switch to painting it. */
   newStructure(): void {
     const roi = this.store.createRoi();
     this.activeRoiId.set(roi.id);
     this.mode.set('paint');
+  }
+
+  /**
+   * Create a fresh, empty authored set and make it the brush's target: new
+   * structures and strokes now land here, never in any imported set (#274). Clears
+   * the active ROI so the next paint authors into the new set.
+   */
+  newSet(): void {
+    this.store.createSet();
+    this.activeRoiId.set(null);
+  }
+
+  /**
+   * Switch which authored set the brush targets, from the toolbar selector. The
+   * active ROI is reset to the new set's first structure (or none) so strokes stay
+   * scoped to the active set.
+   */
+  onSetSelect(event: Event): void {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const id = Number(event.target.value);
+    if (!Number.isFinite(id)) return;
+    this.store.setActiveSet(id);
+    const rois = this.store.activeRois();
+    this.activeRoiId.set(rois.length > 0 ? rois[0].id : null);
+  }
+
+  /** Rename the active authored set from the toolbar field. */
+  onSetRename(event: Event): void {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const id = this.store.activeSetId();
+    if (id !== null) this.store.renameSet(id, event.target.value);
   }
 
   /** Select which structure the brush paints into, from the toolbar selector. */

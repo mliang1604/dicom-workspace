@@ -36,6 +36,19 @@ function pointer(x: number, y: number): PointerEvent {
   return { clientX: x, clientY: y, pointerId: 1 } as unknown as PointerEvent;
 }
 
+/** A change/input event whose target is a real DOM control with the given value. */
+function controlEvent(tag: 'select' | 'input', value: string): Event {
+  const el = document.createElement(tag);
+  if (el instanceof HTMLSelectElement) {
+    // A <select> only takes a value that matches one of its options.
+    const option = document.createElement('option');
+    option.value = value;
+    el.append(option);
+  }
+  el.value = value;
+  return { target: el } as unknown as Event;
+}
+
 const AXIAL_MID: Extract<PanePlacement, { kind: 'mpr' }> = {
   kind: 'mpr',
   orientation: Orientation.Axial,
@@ -118,6 +131,43 @@ describe('BrushController', () => {
     brush.endStroke();
 
     expect(label.data[idx]).toBe(0);
+  });
+
+  it('targets the active authored set: new structures land there only', () => {
+    const { brush, store } = setup();
+    brush.newStructure(); // auto-creates set 1 and a structure in it
+    const set1 = store.sets()[0].id;
+    expect(brush.activeSetId()).toBe(set1);
+    expect(store.activeRois()).toHaveLength(1);
+
+    brush.newSet(); // a fresh set becomes the brush target, no active ROI yet
+    const set2 = store.sets()[1].id;
+    expect(brush.activeSetId()).toBe(set2);
+    expect(brush.activeRoiId()).toBeNull();
+
+    brush.newStructure(); // the new structure lands in set 2, not set 1
+    expect(store.sets()[0].rois).toHaveLength(1);
+    expect(store.sets()[1].rois).toHaveLength(1);
+  });
+
+  it('re-scopes the active ROI when switching the active set', () => {
+    const { brush, store } = setup();
+    const a = store.createRoi('A'); // set 1
+    store.createSet();
+    store.createRoi('B'); // set 2
+    const set1 = store.sets()[0].id;
+
+    brush.onSetSelect(controlEvent('select', String(set1)));
+    expect(brush.activeSetId()).toBe(set1);
+    expect(brush.activeRoiId()).toBe(a.id); // first ROI of the now-active set
+  });
+
+  it('renames the active set from the field', () => {
+    const { brush, store } = setup();
+    brush.newSet();
+    brush.onSetRename(controlEvent('input', 'Liver'));
+    expect(store.activeSet()?.label).toBe('Liver');
+    expect(brush.activeSetLabel()).toBe('Liver');
   });
 
   it('fills the gap when a stroke drags across several voxels at once', () => {
