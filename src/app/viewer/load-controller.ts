@@ -410,7 +410,9 @@ export class LoadController {
     // ROI state (visibility / colours / opacity / set selection) resets per load.
     this.roiCtl.resetForLoad(result.structureSets);
     // Authored structures: a fresh empty label grid aligned to the new volume.
-    this.editableStructures.resetForLoad(volume);
+    // Flag whether the series ships imported sets so the first authored set is
+    // labelled to read as new rather than mutating any import (#274).
+    this.editableStructures.resetForLoad(volume, result.structureSets.length > 0);
     // A fresh base load drops any layers-panel edits (overlays load at their defaults).
     this.layersCtl.reset();
     d.activeCompareGroup.set(0); // window/level controls target the base column

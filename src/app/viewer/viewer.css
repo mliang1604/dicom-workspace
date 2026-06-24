@@ -419,6 +419,38 @@ button.active {
   paint-order: stroke;
 }
 
+/* Edit-structures panel: the active authored set's selector, new-set and rename. */
+.brush-set {
+  display: flex;
+  width: 100%;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.brush-set-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.brush-set-select select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.brush-set-new {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.brush-set-name {
+  width: 100%;
+}
+
+.brush-set-name input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* Structures panel: per-ROI colour, type, visibility and opacity controls. */
 .roi-panel,
 .layer-panel {

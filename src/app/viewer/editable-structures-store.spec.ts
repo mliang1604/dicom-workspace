@@ -60,6 +60,84 @@ describe('EditableStructuresStore registry', () => {
   });
 });
 
+describe('EditableStructuresStore authored sets', () => {
+  it('lazily creates an active set on the first authoring action', () => {
+    const s = store();
+    expect(s.sets()).toEqual([]);
+    expect(s.activeSet()).toBeNull();
+    expect(s.activeSetId()).toBeNull();
+
+    const roi = s.createRoi();
+    expect(s.sets()).toHaveLength(1);
+    expect(s.activeSetId()).toBe(s.sets()[0].id);
+    expect(s.activeSet()?.rois).toEqual([roi]);
+    expect(s.activeRois()).toEqual([roi]);
+  });
+
+  it('labels the auto-created set "Structures" with no imports, "New ROIs" with', () => {
+    const plain = store();
+    plain.createRoi();
+    expect(plain.sets()[0].label).toBe('Structures');
+
+    const withImport = new EditableStructuresStore();
+    withImport.resetForLoad(makeVolume(), true);
+    withImport.createRoi();
+    expect(withImport.sets()[0].label).toBe('New ROIs');
+  });
+
+  it('routes new ROIs into the active set, numbering further sets', () => {
+    const s = store();
+    const a = s.createRoi('A'); // auto-creates set 1
+    const set2 = s.createSet();
+    expect(set2.label).toBe('Structures 2');
+    expect(s.activeSetId()).toBe(set2.id);
+
+    const b = s.createRoi('B'); // lands in the now-active set 2
+    expect(s.sets()[0].rois.map((r) => r.name)).toEqual(['A']);
+    expect(s.sets()[1].rois.map((r) => r.name)).toEqual(['B']);
+    expect(s.activeRois()).toEqual([b]);
+    // ids stay globally unique across sets that share the one label grid.
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it('switches the active set and renames sets without touching others', () => {
+    const s = store();
+    s.createRoi(); // set 1
+    const first = s.sets()[0].id;
+    const second = s.createSet().id;
+
+    s.setActiveSet(first);
+    expect(s.activeSetId()).toBe(first);
+    s.renameSet(first, 'Heart set');
+    expect(s.sets().find((x) => x.id === first)?.label).toBe('Heart set');
+    expect(s.sets().find((x) => x.id === second)?.label).toBe('Structures 2');
+
+    s.setActiveSet(999); // unknown id is ignored
+    expect(s.activeSetId()).toBe(first);
+  });
+
+  it('flattens rois across every set for the mask LUT', () => {
+    const s = store();
+    s.createRoi('A');
+    s.createSet();
+    s.createRoi('B');
+    expect(s.rois().map((r) => r.name)).toEqual(['A', 'B']);
+    expect(s.hasStructures()).toBe(true);
+  });
+
+  it('deletes an ROI from whichever set owns it, leaving the empty set', () => {
+    const s = store();
+    const a = s.createRoi('A');
+    s.createSet();
+    const b = s.createRoi('B');
+
+    s.deleteRoi(a.id);
+    expect(s.sets()).toHaveLength(2);
+    expect(s.sets()[0].rois).toEqual([]);
+    expect(s.rois()).toEqual([b]);
+  });
+});
+
 describe('EditableStructuresStore voxel mutation', () => {
   it('paints occupancy and bumps the version', () => {
     const s = store();
@@ -205,6 +283,9 @@ describe('EditableStructuresStore resetForLoad', () => {
 
     s.resetForLoad(makeVolume());
     expect(s.rois()).toEqual([]);
+    expect(s.sets()).toEqual([]);
+    expect(s.activeSet()).toBeNull();
+    expect(s.activeSetId()).toBeNull();
     expect(s.version()).toBe(0);
     expect(s.labelVolume()!.dims).toEqual([4, 3, 2]);
     expect(Array.from(s.labelVolume()!.data).every((v) => v === 0)).toBe(true);
