@@ -54,6 +54,7 @@ describe('packSliceParams', () => {
     invert: false,
     colormapBase: false,
     overlay: null,
+    mask: null,
   };
 
   it('packs the base block at the layout the WGSL Params struct expects', () => {
@@ -72,11 +73,29 @@ describe('packSliceParams', () => {
     expect(uints[24]).toBe(0); // invert
   });
 
-  it('is 192 bytes and leaves overlay opacity 0 when there is no overlay', () => {
+  it('is 272 bytes and leaves overlay and mask opacity 0 when there is neither', () => {
     const buffer = packSliceParams(base);
-    expect(buffer.byteLength).toBe(192);
+    expect(buffer.byteLength).toBe(272);
     // Overlay opacity lives at float 46; zero means the shader skips the overlay.
     expect(new Float32Array(buffer)[46]).toBe(0);
+    // Mask opacity lives at float 64; zero means the shader skips the mask.
+    expect(new Float32Array(buffer)[64]).toBe(0);
+  });
+
+  it('packs the label-mask block at byte 192 (float 48) without disturbing the base', () => {
+    const maskMatrix = Array.from({ length: 16 }, (_, i) => 200 + i);
+    const buffer = packSliceParams({
+      ...base,
+      mask: { matrix: maskMatrix, opacity: 0.7, lutSize: 256 },
+    });
+    const floats = new Float32Array(buffer);
+
+    expect(Array.from(floats.slice(48, 64))).toEqual(maskMatrix); // maskToTex
+    expect(floats[64]).toBeCloseTo(0.7); // maskOpacity
+    expect(floats[65]).toBe(256); // maskLutSize
+    // The base and overlay fields are untouched by the mask block.
+    expect(floats[20]).toBe(40); // windowCenter
+    expect(floats[46]).toBe(0); // overlayOpacity
   });
 
   it('packs the overlay block at byte 112 (float 28) without disturbing the base', () => {

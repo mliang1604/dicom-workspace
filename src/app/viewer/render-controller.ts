@@ -27,9 +27,11 @@ import { composePaneViews } from '../../render/frame';
 import { LayoutMode } from '../../render/layout';
 import { roiKeyOf, setIsShown } from '../../render/roi-overlay';
 import { type Volume } from '../../dicom/types';
+import { maskColorLut, MASK_LUT_SIZE } from '../../render/mask';
 import { LayersController } from './layers-controller';
 import { View3dController } from './view3d-controller';
 import { RoiController } from './roi-controller';
+import { EditableStructuresStore } from './editable-structures-store';
 import { type Drag } from './interaction-controller';
 import { type PanePlacement } from './pane-placement';
 import { parseHexColor } from './viewer-format';
@@ -41,6 +43,13 @@ import {
 
 /** Base opacity of an ROI's translucent 3D surface, before its per-ROI opacity. */
 const SURFACE_ALPHA = 0.4;
+
+/**
+ * Composite opacity of the authored label mask over the MPR slices — translucent
+ * so the anatomy stays visible while painting. A single mask-wide opacity for now;
+ * per-ROI opacity controls are a later refinement.
+ */
+const MASK_OPACITY = 0.5;
 
 /**
  * How long after the last wheel-zoom or window/level change the 3D MIP keeps
@@ -95,6 +104,7 @@ export class RenderController {
   private readonly layersCtl = inject(LayersController);
   private readonly view3d = inject(View3dController);
   private readonly roiCtl = inject(RoiController);
+  private readonly editableStructures = inject(EditableStructuresStore);
   private readonly injector = inject(Injector);
   private deps: RenderInit | null = null;
 
@@ -157,6 +167,18 @@ export class RenderController {
       const overlay = this.layersCtl.selectedOverlay();
       const opacity = overlay ? overlay.opacity : 0;
       if (renderer) renderer.setOverlay(overlay?.volume ?? null, opacity, overlay?.display);
+      this.scheduleFrame();
+    }, opts);
+    // Upload / re-upload / clear the authored label mask. Reads the store's
+    // version (bumped on every paint/erase/delete) so the texture re-uploads when
+    // voxels change, and the ROI colours so the LUT tracks recolours — but NOT the
+    // window/level or 3D-camera signals, which don't affect the mask.
+    effect(() => {
+      const renderer = d.renderer();
+      const label = this.editableStructures.labelVolume();
+      const version = this.editableStructures.version();
+      const lut = maskColorLut(this.editableStructures.rois(), MASK_LUT_SIZE);
+      if (renderer) renderer.setMask(label, lut, version, label ? MASK_OPACITY : 0);
       this.scheduleFrame();
     }, opts);
     // Checkerboard vs. uniform-blend compositing + cell size (per-frame uniforms).

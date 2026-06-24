@@ -35,6 +35,15 @@ struct Params {
   overlayWindowWidth : f32,
   overlayOpacity : f32,
   overlayColormap : u32,    // non-zero: map the windowed overlay through overlayLut
+  // Label mask: an authored-segmentation volume aligned to the BASE grid (same
+  // dims/spacing/geometry), so maskToTex equals the base reslice affine. Sampled
+  // NEAREST (ids must not be interpolated) and coloured per-ROI through maskLut;
+  // a SEPARATE binding from the fusion overlay so the label colouring never fights
+  // the overlay's windowing/colormap path. id 0 = background (transparent);
+  // maskOpacity 0 disables the layer. mat4x4 alignment lands this block at byte 192.
+  maskToTex : mat4x4<f32>,
+  maskOpacity : f32,
+  maskLutSize : f32,        // texel count of maskLut, to map an id to its LUT coord
 };
 
 @group(0) @binding(0) var volTex : texture_3d<f32>;
@@ -42,6 +51,9 @@ struct Params {
 @group(0) @binding(2) var<uniform> P : Params;
 @group(0) @binding(3) var overlayTex : texture_3d<f32>;
 @group(0) @binding(4) var overlayLut : texture_1d<f32>; // RGBA colormap ramp
+@group(0) @binding(5) var maskTex : texture_3d<f32>;    // label ids (r16float)
+@group(0) @binding(6) var maskSamp : sampler;           // nearest, for label ids
+@group(0) @binding(7) var maskLut : texture_1d<f32>;    // id -> RGBA display colour
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -129,6 +141,23 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
         amount = oalpha * cell;
       }
       rgb = mix(rgb, orgb, amount);
+    }
+  }
+
+  // Label mask: an authored segmentation aligned to the base grid, drawn ON TOP of
+  // any fusion overlay. Sample NEAREST so ids aren't blended into nonexistent
+  // values, then colour the id through maskLut (a per-ROI ramp; texel 0 is the
+  // transparent background). id 0 → background, so nothing is drawn there.
+  if (P.maskOpacity > 0.0) {
+    let mcoord = (P.maskToTex * vec4<f32>(u, plane.y, P.slicePos, 1.0)).xyz;
+    if (all(mcoord >= vec3<f32>(0.0)) && all(mcoord <= vec3<f32>(1.0))) {
+      let id = textureSampleLevel(maskTex, maskSamp, mcoord, 0.0).r;
+      if (id >= 0.5) { // ≥ 0.5 rounds to id ≥ 1; below it is background
+        // Index the LUT at the id's texel centre ((id + 0.5) / size), nearest-
+        // sampled so neighbouring ids never bleed into one another.
+        let lut = textureSampleLevel(maskLut, maskSamp, (id + 0.5) / P.maskLutSize, 0.0);
+        rgb = mix(rgb, lut.rgb, P.maskOpacity * lut.a);
+      }
     }
   }
   return vec4<f32>(rgb, 1.0);

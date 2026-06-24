@@ -19,10 +19,14 @@ import { mipStepScale } from './pan-zoom';
 // slicePos,flipX (32) + invert + 12 bytes pad — overlayCheckerboard, checkerSize,
 // colormapBase (16) = 112; then the fusion-overlay block at byte 112 (16-aligned
 // for its mat4x4): overlayToTex mat4x4 (64) + overlayWindowCenter,
-// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 80. Total 192.
-export const PARAMS_SIZE = 192;
+// overlayWindowWidth,overlayOpacity,overlayColormap (16) = 192; then the label-mask
+// block at byte 192 (16-aligned): maskToTex mat4x4 (64) + maskOpacity,maskLutSize
+// (8) + 8 bytes pad = 80. Total 272.
+export const PARAMS_SIZE = 272;
 /** Float offset of the overlay block (overlayToTex mat4 then window/opacity). */
 const OVERLAY_FLOATS = 28;
+/** Float offset of the label-mask block (maskToTex mat4 then opacity/LUT size). */
+const MASK_FLOATS = 48;
 // bytes: patientToTex mat4x4 (64) + eyeSteps, axisU, axisV, forward, modeSlab,
 // tfDomain, clipA, clipC, clipS, light, material, clipFree (12 × vec4 = 192).
 export const MIP_PARAMS_SIZE = 256;
@@ -74,6 +78,20 @@ export interface SliceParams {
     /** Checkerboard cell size in framebuffer pixels. */
     readonly checkerSize: number;
   } | null;
+  /**
+   * The label-mask block, or null when no authored mask is composited. A distinct
+   * slot from {@link overlay}: the mask is sampled nearest and coloured per-ROI
+   * through its own LUT (binding 7), not windowed or colour-mapped like a fusion
+   * overlay. Its matrix is the BASE reslice affine (the label grid shares the base
+   * geometry), so it samples the same plane the base does.
+   */
+  readonly mask: {
+    readonly matrix: Float32Array | readonly number[];
+    /** Composite opacity of the coloured mask over what's below, 0 = hidden. */
+    readonly opacity: number;
+    /** Texel count of the id→colour LUT, to map an id to its LUT coordinate. */
+    readonly lutSize: number;
+  } | null;
 }
 
 /**
@@ -82,9 +100,11 @@ export interface SliceParams {
  * (floats 0..24), then the fusion-overlay block at float 28 (byte 112) — overlay
  * matrix (28..43), overlay window centre/width and opacity (44..46), and the
  * colormap flag (47, u32). The colormap-the-base flag (27, u32) sits in the
- * pre-overlay pad. With no overlay the opacity stays 0, so the shader
- * leaves the base untouched. Pure and exported so the layout can be unit-tested
- * without a GPU — the shader and this packing must stay in lockstep.
+ * pre-overlay pad. Finally the label-mask block at float 48 (byte 192) — mask
+ * matrix (48..63), opacity and LUT size (64..65). With no overlay/mask the
+ * respective opacity stays 0, so the shader leaves the base untouched. Pure and
+ * exported so the layout can be unit-tested without a GPU — the shader and this
+ * packing must stay in lockstep.
  */
 export function packSliceParams(p: SliceParams): ArrayBuffer {
   const params = new ArrayBuffer(PARAMS_SIZE);
@@ -112,6 +132,11 @@ export function packSliceParams(p: SliceParams): ArrayBuffer {
     floats[OVERLAY_FLOATS + 17] = p.overlay.windowWidth; // float 45
     floats[OVERLAY_FLOATS + 18] = p.overlay.opacity; // float 46
     uints[OVERLAY_FLOATS + 19] = p.overlay.colormap ? 1 : 0; // float 47 (u32)
+  }
+  if (p.mask) {
+    floats.set(p.mask.matrix as ArrayLike<number>, MASK_FLOATS); // maskToTex, 48..63
+    floats[MASK_FLOATS + 16] = p.mask.opacity; // float 64
+    floats[MASK_FLOATS + 17] = p.mask.lutSize; // float 65
   }
   return params;
 }
