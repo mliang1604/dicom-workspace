@@ -31,7 +31,7 @@ import {
   createVolumeSampler,
 } from './slice-pipelines';
 import { MASK_LUT_SIZE } from './mask';
-import type { LabelVolume } from '../dicom/label-volume';
+import { clearDirty, type LabelVolume } from '../dicom/label-volume';
 import { SURFACE_CAMERA_SIZE, type SurfaceFrame } from './surface-frame';
 import {
   MIP_PARAMS_SIZE,
@@ -49,6 +49,7 @@ import {
   sliceBindGroup,
   uploadResizingBuffer,
   writeLabelTexture,
+  writeLabelTextureRegion,
   writeLut1d,
   type PaneDraw,
   type SurfacePass,
@@ -359,15 +360,23 @@ export class SliceRenderer {
     writeLut1d(this.device, this.maskLut, lut, MASK_LUT_SIZE);
     if (label !== this.maskLabel) {
       // A fresh label grid: (re)allocate the texture and rebind the panes to it.
+      // createLabelTexture writes the whole grid, so the dirty box is now flushed.
       this.maskTexture?.destroy();
       this.maskTexture = createLabelTexture(this.device, label);
       this.maskLabel = label;
       this.maskVersion = version;
+      clearDirty(label);
       this.rebuildMprBindGroups();
     } else if (version !== this.maskVersion && this.maskTexture) {
-      // Same grid, painted since the last upload: rewrite the voxels in place (no
-      // reallocation, no bind-group churn).
-      writeLabelTexture(this.device, this.maskTexture, label);
+      // Same grid, painted since the last upload: rewrite only the dirty sub-box in
+      // place (no reallocation, no bind-group churn). A brush stamp touches a tiny
+      // corner, so this avoids re-encoding/uploading the whole ~78 MB grid per paint
+      // event — the fix for laggy painting. Fall back to a full write if the box was
+      // somehow lost.
+      const box = label.dirty;
+      if (box) writeLabelTextureRegion(this.device, this.maskTexture, label, box);
+      else writeLabelTexture(this.device, this.maskTexture, label);
+      clearDirty(label);
       this.maskVersion = version;
     }
   }

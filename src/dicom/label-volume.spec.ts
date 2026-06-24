@@ -1,9 +1,11 @@
 import {
+  clearDirty,
   clearLabelId,
   createLabelVolume,
   eraseLabels,
   labelIndex,
   labelVoxelAtPatient,
+  markAllDirty,
   paintLabels,
 } from './label-volume';
 import { patientToVoxel } from './volume';
@@ -126,5 +128,49 @@ describe('clearLabelId', () => {
     expect(clearLabelId(label, 5)).toBe(3);
     expect(label.data[0]).toBe(0);
     expect(label.data[3]).toBe(8); // a different id is untouched
+  });
+});
+
+describe('dirty tracking', () => {
+  it('starts clean', () => {
+    expect(createLabelVolume(makeVolume(OBLIQUE)).dirty).toBeNull();
+  });
+
+  it('paint grows the box to the tight inclusive bounds of the touched voxels', () => {
+    const label = createLabelVolume(makeVolume(OBLIQUE));
+    paintLabels(label, 1, [labelIndex(label.dims, 1, 0, 0), labelIndex(label.dims, 2, 1, 1)]);
+    expect(label.dirty).toEqual({ minX: 1, minY: 0, minZ: 0, maxX: 2, maxY: 1, maxZ: 1 });
+  });
+
+  it('erase extends the existing box; out-of-range writes do not', () => {
+    const label = createLabelVolume(makeVolume(OBLIQUE));
+    paintLabels(label, 1, [labelIndex(label.dims, 1, 1, 0)]);
+    eraseLabels(label, [labelIndex(label.dims, 3, 2, 1), -1, label.data.length]);
+    expect(label.dirty).toEqual({ minX: 1, minY: 1, minZ: 0, maxX: 3, maxY: 2, maxZ: 1 });
+  });
+
+  it('clearLabelId marks the cleared voxels dirty', () => {
+    const label = createLabelVolume(makeVolume(OBLIQUE));
+    paintLabels(label, 5, [labelIndex(label.dims, 0, 0, 0), labelIndex(label.dims, 2, 0, 0)]);
+    clearDirty(label);
+    clearLabelId(label, 5);
+    expect(label.dirty).toEqual({ minX: 0, minY: 0, minZ: 0, maxX: 2, maxY: 0, maxZ: 0 });
+  });
+
+  it('clearDirty resets to clean and markAllDirty spans the whole grid', () => {
+    const label = createLabelVolume(makeVolume(OBLIQUE));
+    paintLabels(label, 1, [0]);
+    clearDirty(label);
+    expect(label.dirty).toBeNull();
+    markAllDirty(label);
+    const [dimX, dimY, dimZ] = label.dims;
+    expect(label.dirty).toEqual({
+      minX: 0,
+      minY: 0,
+      minZ: 0,
+      maxX: dimX - 1,
+      maxY: dimY - 1,
+      maxZ: dimZ - 1,
+    });
   });
 });

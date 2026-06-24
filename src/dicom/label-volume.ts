@@ -42,6 +42,60 @@ export interface LabelVolume {
    * `0` = background. Mutated in place — see {@link LabelVolume}.
    */
   readonly data: Uint16Array;
+  /**
+   * Inclusive voxel-space bounding box of everything mutated since the display
+   * last uploaded, or `null` when clean. The mask display uploads only this
+   * sub-box instead of re-encoding and re-writing the whole ~78 MB grid on every
+   * brush event (a stamp touches ~`(2r)³` voxels). Expanded in place by the
+   * mutators alongside {@link data}; the consumer flushes it with
+   * {@link clearDirty} after uploading. Not `readonly`: it is reassigned
+   * `null` → box → `null`, part of the same mutate-in-place contract as `data`.
+   */
+  dirty: DirtyBox | null;
+}
+
+/** Inclusive voxel-space bounding box of the region touched since the last upload. */
+export interface DirtyBox {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+}
+
+/** Grow `label.dirty` to include voxel `(x, y, z)` (creating it when clean). */
+export function markDirty(label: LabelVolume, x: number, y: number, z: number): void {
+  const b = label.dirty;
+  if (!b) {
+    label.dirty = { minX: x, minY: y, minZ: z, maxX: x, maxY: y, maxZ: z };
+    return;
+  }
+  if (x < b.minX) b.minX = x;
+  else if (x > b.maxX) b.maxX = x;
+  if (y < b.minY) b.minY = y;
+  else if (y > b.maxY) b.maxY = y;
+  if (z < b.minZ) b.minZ = z;
+  else if (z > b.maxZ) b.maxZ = z;
+}
+
+/** Mark the whole grid dirty (a full re-upload), e.g. after a bulk clear. */
+export function markAllDirty(label: LabelVolume): void {
+  const [dimX, dimY, dimZ] = label.dims;
+  label.dirty = { minX: 0, minY: 0, minZ: 0, maxX: dimX - 1, maxY: dimY - 1, maxZ: dimZ - 1 };
+}
+
+/** Flush the dirty region back to clean, after the consumer has uploaded it. */
+export function clearDirty(label: LabelVolume): void {
+  label.dirty = null;
+}
+
+/** Grow `label.dirty` to include the voxel at flat index `i`. */
+function markDirtyIndex(label: LabelVolume, i: number, dimX: number, dimY: number): void {
+  const x = i % dimX;
+  const y = ((i / dimX) | 0) % dimY;
+  const z = (i / (dimX * dimY)) | 0;
+  markDirty(label, x, y, z);
 }
 
 /**
@@ -69,6 +123,7 @@ export function createLabelVolume(volume: Volume): LabelVolume {
     spacing: volume.spacing,
     geometry: resolveGeometry(volume),
     data: new Uint16Array(dimX * dimY * dimZ),
+    dirty: null,
   };
 }
 
@@ -112,16 +167,24 @@ export function labelVoxelAtPatient(
  */
 export function paintLabels(label: LabelVolume, roiId: number, voxels: Iterable<number>): void {
   const { data } = label;
+  const [dimX, dimY] = label.dims;
   for (const i of voxels) {
-    if (i >= 0 && i < data.length) data[i] = roiId;
+    if (i >= 0 && i < data.length) {
+      data[i] = roiId;
+      markDirtyIndex(label, i, dimX, dimY);
+    }
   }
 }
 
 /** Erase the given voxels back to background (`0`), in place. See {@link paintLabels}. */
 export function eraseLabels(label: LabelVolume, voxels: Iterable<number>): void {
   const { data } = label;
+  const [dimX, dimY] = label.dims;
   for (const i of voxels) {
-    if (i >= 0 && i < data.length) data[i] = 0;
+    if (i >= 0 && i < data.length) {
+      data[i] = 0;
+      markDirtyIndex(label, i, dimX, dimY);
+    }
   }
 }
 
@@ -133,9 +196,11 @@ export function eraseLabels(label: LabelVolume, voxels: Iterable<number>): void 
 export function clearLabelId(label: LabelVolume, roiId: number): number {
   const { data } = label;
   let cleared = 0;
+  const [dimX, dimY] = label.dims;
   for (let i = 0; i < data.length; i++) {
     if (data[i] === roiId) {
       data[i] = 0;
+      markDirtyIndex(label, i, dimX, dimY);
       cleared++;
     }
   }

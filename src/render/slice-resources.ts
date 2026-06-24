@@ -1,5 +1,5 @@
 import { f32ToF16, floatsToHalf } from '../dicom/half';
-import type { LabelVolume } from '../dicom/label-volume';
+import type { DirtyBox, LabelVolume } from '../dicom/label-volume';
 import type { Volume } from '../dicom/types';
 import type { PaneRect } from './layout';
 
@@ -54,6 +54,40 @@ export function writeLabelTexture(
   for (let i = 0; i < label.data.length; i++) halves[i] = f32ToF16(label.data[i]);
   device.queue.writeTexture(
     { texture },
+    halves,
+    { bytesPerRow: width * BYTES_PER_HALF, rowsPerImage: height },
+    { width, height, depthOrArrayLayers: depth },
+  );
+}
+
+/**
+ * Re-upload only the dirty sub-box of a label volume, converting just that region
+ * to half-float. A brush stamp touches a tiny `(2r)³` corner of the grid, so this
+ * keeps a paint event off the ~78 MB whole-volume re-encode + `writeTexture` that
+ * {@link writeLabelTexture} does — the difference between smooth and laggy
+ * painting. `box` is inclusive in voxel coordinates (see {@link LabelVolume.dirty}).
+ */
+export function writeLabelTextureRegion(
+  device: GPUDevice,
+  texture: GPUTexture,
+  label: LabelVolume,
+  box: DirtyBox,
+): void {
+  const [dimX, dimY] = label.dims;
+  const { data } = label;
+  const width = box.maxX - box.minX + 1;
+  const height = box.maxY - box.minY + 1;
+  const depth = box.maxZ - box.minZ + 1;
+  const halves = new Uint16Array(width * height * depth);
+  let out = 0;
+  for (let z = box.minZ; z <= box.maxZ; z++) {
+    for (let y = box.minY; y <= box.maxY; y++) {
+      let src = (z * dimY + y) * dimX + box.minX;
+      for (let x = 0; x < width; x++) halves[out++] = f32ToF16(data[src++]);
+    }
+  }
+  device.queue.writeTexture(
+    { texture, origin: { x: box.minX, y: box.minY, z: box.minZ } },
     halves,
     { bytesPerRow: width * BYTES_PER_HALF, rowsPerImage: height },
     { width, height, depthOrArrayLayers: depth },

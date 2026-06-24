@@ -14,7 +14,7 @@
  * so it unit-tests without a GPU.
  */
 
-import type { LabelVolume } from './label-volume';
+import { markDirty, type LabelVolume } from './label-volume';
 import type { Contour, Roi } from './types';
 import { patientToVoxel } from './volume';
 
@@ -147,6 +147,7 @@ export function rasterizeRoiContours(label: LabelVolume, roi: Roi, roiId: number
     const base = z * sliceVoxels;
     fillLoops(loops, dimX, dimY, (x, y) => {
       data[base + y * dimX + x] = roiId;
+      markDirty(label, x, y, z);
       filled++;
     });
   }
