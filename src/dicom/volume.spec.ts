@@ -1,5 +1,5 @@
 import type { Slice, VolumeGeometry } from './types';
-import { buildVolume, patientToVoxel, VolumeBuildError } from './volume';
+import { buildVolume, patientToVoxel, voxelToPatient, VolumeBuildError } from './volume';
 
 /** A 2×2 axial slice at the given z position, filled with a constant value. */
 function axialSlice(z: number, value: number, instanceNumber: number): Slice {
@@ -220,5 +220,33 @@ describe('patientToVoxel', () => {
       origin: [0, 0, 0],
     };
     expect(patientToVoxel(geometry, [1, 1, 1])).toBeNull();
+  });
+});
+
+describe('voxelToPatient', () => {
+  it('places the origin voxel at the geometry origin', () => {
+    const geometry: VolumeGeometry = {
+      iStep: [1, 0, 0],
+      jStep: [0, 2, 0],
+      kStep: [0, 0, 3],
+      origin: [10, 20, 30],
+    };
+    expect(voxelToPatient(geometry, [0, 0, 0])).toEqual([10, 20, 30]);
+    expect(voxelToPatient(geometry, [3, 4, 5])).toEqual([13, 28, 45]);
+  });
+
+  it('round-trips patientToVoxel for an oblique geometry', () => {
+    const geometry: VolumeGeometry = {
+      iStep: [0.6, 0.8, 0],
+      jStep: [-0.8, 0.6, 0],
+      kStep: [0, 0, 2.5],
+      origin: [-5, 7, 12],
+    };
+    const point = [3.25, -4.75, 18.5] as const;
+    const voxel = patientToVoxel(geometry, point)!;
+    const back = voxelToPatient(geometry, voxel);
+    expect(back[0]).toBeCloseTo(point[0], 9);
+    expect(back[1]).toBeCloseTo(point[1], 9);
+    expect(back[2]).toBeCloseTo(point[2], 9);
   });
 });
