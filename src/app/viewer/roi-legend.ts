@@ -8,6 +8,15 @@ export interface RoiLegendEntry {
   readonly key: string;
   /** Index of the structure set this ROI belongs to. */
   readonly setIndex: number;
+  /** ROI Number (3006,0022), needed to resolve the source ROI for promotion (#271). */
+  readonly roiNumber: number;
+  /**
+   * Whether the ROI has at least one fillable (area-bounding) contour, so it can
+   * be promoted to an editable mask. Polyline/point-only ROIs cannot.
+   */
+  readonly promotable: boolean;
+  /** Whether the ROI has been rasterized into an editable mask (#271). */
+  readonly promoted: boolean;
   /** ROI Name, or a fallback when the RTSTRUCT left it blank. */
   readonly name: string;
   /** Interpreted type (ORGAN/PTV/GTV…) as a short upper-case badge, or '' when none. */
@@ -46,6 +55,7 @@ export function buildRoiLegend(
   colorOverrides: ReadonlyMap<string, string>,
   opacities: ReadonlyMap<string, number>,
   selectedSetIndex: number,
+  promoted: ReadonlySet<string> = new Set(),
 ): RoiLegendEntry[] {
   const entries: RoiLegendEntry[] = [];
   structureSets.forEach((ss, setIndex) => {
@@ -57,6 +67,11 @@ export function buildRoiLegend(
       entries.push({
         key,
         setIndex,
+        roiNumber: roi.number,
+        promotable: roi.contours.some(
+          (c) => c.geometricType !== 'OPEN_PLANAR' && c.geometricType !== 'POINT',
+        ),
+        promoted: promoted.has(key),
         name: roi.name || `ROI ${roi.number}`,
         type: roi.interpretedType ? roi.interpretedType.toUpperCase() : '',
         color: override ?? rgbColor(roi.color),

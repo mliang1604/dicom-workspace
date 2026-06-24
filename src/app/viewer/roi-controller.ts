@@ -1,7 +1,9 @@
-import { Injectable, computed, signal, type Signal } from '@angular/core';
+import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { loftRoiMesh, type RoiSurfaceMesh } from '../../render/surface';
+import { EditableStructuresStore } from './editable-structures-store';
 import {
   roiContourCoords,
+  roiKeyOf,
   roiPlaneShapes,
   roiScreenShapes,
   type ContourPaneOverlay,
@@ -60,8 +62,13 @@ export interface RoiInit {
 export class RoiController {
   private deps: RoiInit | null = null;
 
+  /** The authored-structures store, so imported ROIs can be promoted to editable masks (#271). */
+  private readonly editable = inject(EditableStructuresStore);
+
   /** Keys of ROIs whose contours are hidden (see {@link allRoiKeys}). */
   readonly hiddenRois = signal<ReadonlySet<string>>(new Set());
+  /** Keys of imported ROIs promoted to editable masks; their contours hide and the mask draws instead. */
+  readonly promotedRois = signal<ReadonlySet<string>>(new Set());
   /** Per-ROI colour overrides (`#rrggbb`), keyed by ROI key; empty by default. */
   readonly roiColorOverrides = signal<ReadonlyMap<string, string>>(new Map());
   /** Per-ROI draw opacity in `[0, 1]`, keyed by ROI key; default 1. */
@@ -103,6 +110,7 @@ export class RoiController {
       this.roiColorOverrides(),
       this.roiOpacities(),
       this.selectedSetIndex(),
+      this.promotedRois(),
     ),
   );
 
@@ -227,11 +235,31 @@ export class RoiController {
     this.selectedSetIndex.set(Number((event.target as HTMLSelectElement).value));
   }
 
+  /**
+   * Promote an imported ROI to an editable mask (#271): rasterize its planar
+   * contours into the label volume through the {@link EditableStructuresStore},
+   * carrying over its name, colour and interpreted type, then hide its read-only
+   * contours so the freshly-painted mask draws in their place. The original
+   * contours stay in the structure set (only hidden), so the lossy raster
+   * conversion is deliberate and reversible by re-showing them. No-op when the ROI
+   * is unknown, has nothing fillable, or no volume is loaded.
+   */
+  promoteRoi(setIndex: number, roiNumber: number): void {
+    const roi = this.structureSets()[setIndex]?.rois.find((r) => r.number === roiNumber);
+    if (!roi) return;
+    const promotion = this.editable.promoteRoi(roi);
+    if (!promotion) return;
+    const key = roiKeyOf(setIndex, roiNumber);
+    this.hiddenRois.update((hidden) => new Set(hidden).add(key));
+    this.promotedRois.update((promoted) => new Set(promoted).add(key));
+  }
+
   /** Reset the ROI state for a freshly loaded volume: hide all contours, drop overrides. */
   resetForLoad(structureSets: readonly StructureSet[]): void {
     this.hiddenRois.set(allRoiKeys(structureSets)); // contours start hidden (#257)
     this.roiColorOverrides.set(new Map()); // and at its RTSTRUCT colours…
     this.roiOpacities.set(new Map()); // …fully opaque
     this.selectedSetIndex.set(-1); // showing every associated structure set
+    this.promotedRois.set(new Set()); // nothing promoted to an editable mask yet (#271)
   }
 }

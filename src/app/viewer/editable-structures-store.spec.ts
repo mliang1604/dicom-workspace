@@ -1,5 +1,6 @@
 import { labelIndex } from '../../dicom/label-volume';
-import type { Volume } from '../../dicom/types';
+import { voxelToPatient } from '../../dicom/volume';
+import type { Roi, Vec3, Volume, VolumeGeometry } from '../../dicom/types';
 import { EditableStructuresStore } from './editable-structures-store';
 
 function makeVolume(): Volume {
@@ -109,6 +110,90 @@ describe('EditableStructuresStore voxel mutation', () => {
     const v = s.version();
     s.deleteRoi(roi.id);
     expect(s.version()).toBe(v);
+  });
+});
+
+describe('EditableStructuresStore promoteRoi', () => {
+  // The fallback geometry resolveLabelVolume builds for a metadata-less volume:
+  // a patient point equals its voxel index, so contour corners are easy to author.
+  const UNIT: VolumeGeometry = {
+    iStep: [1, 0, 0],
+    jStep: [0, 1, 0],
+    kStep: [0, 0, 1],
+    origin: [0, 0, 0],
+  };
+
+  /** A `CLOSED_PLANAR` contour from voxel-corner points on slice `z`. */
+  function loop(corners: readonly (readonly [number, number])[], z: number): Vec3[] {
+    return corners.map(([x, y]) => voxelToPatient(UNIT, [x, y, z]));
+  }
+
+  function importedRoi(over: Partial<Roi> = {}): Roi {
+    return {
+      number: 5,
+      name: 'Heart',
+      color: [10, 20, 30],
+      interpretedType: 'ORGAN',
+      contours: [
+        {
+          geometricType: 'CLOSED_PLANAR',
+          points: loop(
+            [
+              [1.5, 1.5],
+              [2.5, 1.5],
+              [2.5, 2.5],
+              [1.5, 2.5],
+            ],
+            0,
+          ),
+        },
+      ],
+      ...over,
+    };
+  }
+
+  it('mints an editable ROI carrying the import identity and rasterizes its contours', () => {
+    const s = store();
+    const before = s.version();
+
+    const promotion = s.promoteRoi(importedRoi());
+    expect(promotion).not.toBeNull();
+    const { roi, result } = promotion!;
+
+    expect(roi.id).toBe(1);
+    expect(roi.name).toBe('Heart');
+    expect(roi.color).toEqual([10, 20, 30]);
+    expect(roi.interpretedType).toBe('ORGAN');
+
+    expect(result.filled).toBe(1); // the single pixel (2, 2) the loop encloses
+    expect(result.skipped).toBe(0);
+    expect(s.labelVolume()!.data[labelIndex(s.labelVolume()!.dims, 2, 2, 0)]).toBe(roi.id);
+    expect(s.version()).toBe(before + 1);
+  });
+
+  it('falls back to a palette colour and numbered name when the import omits them', () => {
+    const s = store();
+    const { roi } = s.promoteRoi(importedRoi({ name: '', color: null }))!;
+    expect(roi.name).toBe('ROI 5');
+    expect(roi.color).toHaveLength(3);
+  });
+
+  it('does not bump the version when nothing is filled', () => {
+    const s = store();
+    const before = s.version();
+    // A point contour bounds no area: the ROI is registered but no voxel is written.
+    const { result } = s.promoteRoi(
+      importedRoi({ contours: [{ geometricType: 'POINT', points: loop([[1.5, 1.5]], 0) }] }),
+    )!;
+    expect(result.filled).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(s.version()).toBe(before);
+  });
+
+  it('returns null before a volume is loaded', () => {
+    const s = new EditableStructuresStore();
+    s.resetForLoad(null);
+    expect(s.promoteRoi(importedRoi())).toBeNull();
   });
 });
 
