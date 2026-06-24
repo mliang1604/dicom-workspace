@@ -528,6 +528,24 @@
                     [attr.aria-label]="roi.name + ' opacity'"
                     [title]="roi.name + ' opacity: ' + roi.opacityPercent + '%'"
                   />
+                  @if (roi.promoted) {
+                    <span
+                      class="roi-mask-badge"
+                      title="Converted to an editable mask — edit it with the brush. The original contours are hidden, not removed."
+                      >mask</span
+                    >
+                  } @else {
+                    <button
+                      type="button"
+                      class="roi-edit"
+                      (click)="roiCtl.promoteRoi(roi.setIndex, roi.roiNumber)"
+                      [disabled]="!roi.promotable"
+                      title="Convert to an editable mask: rasterize these contours into the volume so the brush can edit them. Lossy — a later export won't reproduce the original points; the read-only contours are kept (hidden) so you can revert."
+                      [attr.aria-label]="'Convert ' + roi.name + ' to editable mask'"
+                    >
+                      ✎ Edit
+                    </button>
+                  }
                 </div>
               }
             }

@@ -525,6 +525,24 @@ button.active {
   cursor: pointer;
 }
 
+/* Promote-to-editable action + its post-conversion badge (#271). */
+.roi-edit {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  font-size: 0.72em;
+  white-space: nowrap;
+}
+
+.roi-mask-badge {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.7em;
+  letter-spacing: 0.02em;
+  background: rgba(96, 179, 113, 0.3);
+  opacity: 0.9;
+}
+
 /* In-pane fusion blend bar: positioned over the largest MPR pane. */
 .blend-bar {
   position: absolute;

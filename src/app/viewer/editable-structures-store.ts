@@ -6,7 +6,8 @@ import {
   paintLabels,
   type LabelVolume,
 } from '../../dicom/label-volume';
-import type { Volume } from '../../dicom/types';
+import { rasterizeRoiContours, type RasterizeResult } from '../../dicom/contour-raster';
+import type { Roi, Volume } from '../../dicom/types';
 
 /**
  * One authored (hand-painted) structure: its identity, colour, and interpreted
@@ -117,6 +118,32 @@ export class EditableStructuresStore {
     };
     this._rois.set([...rois, roi]);
     return roi;
+  }
+
+  /**
+   * Promote an imported RTSTRUCT {@link Roi} to an editable structure (#271): mint
+   * a new {@link EditableRoi} carrying the import's identity (name, ROI Display
+   * Color, interpreted type) and rasterize its planar contours into the label
+   * volume tagged with the new id, so the brush can edit it and the mask overlay
+   * draws it. Returns the created structure and how many voxels were filled (and
+   * non-fillable contours skipped), or null before a load.
+   *
+   * Lossy by design — the contours are sampled onto the voxel grid, so a later
+   * marching-squares export won't reproduce the original points. The caller keeps
+   * the read-only contours intact (the panel only hides them), making the
+   * conversion deliberate. Bumps {@link version} when any voxel was written.
+   */
+  promoteRoi(roi: Roi): { roi: EditableRoi; result: RasterizeResult } | null {
+    const label = this._labelVolume();
+    if (!label) return null;
+    const created = this.createRoi(
+      roi.name || `ROI ${roi.number}`,
+      roi.color ?? undefined,
+      roi.interpretedType ?? undefined,
+    );
+    const result = rasterizeRoiContours(label, roi, created.id);
+    if (result.filled > 0) this.bump();
+    return { roi: created, result };
   }
 
   /** Rename a structure; no-op when the id is unknown. */

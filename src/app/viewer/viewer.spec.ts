@@ -236,6 +236,42 @@ describe('buildRoiLegend', () => {
     });
   });
 
+  it('carries the ROI number and a promotable flag, defaulting to not promoted', () => {
+    const legend = buildRoiLegend(
+      [
+        set([
+          roi({ number: 4 }),
+          roi({
+            number: 5,
+            name: 'Line',
+            contours: [{ geometricType: 'OPEN_PLANAR', points: [[0, 0, 0]] }],
+          }),
+        ]),
+      ],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+    );
+
+    expect(legend[0]).toMatchObject({ roiNumber: 4, promotable: true, promoted: false });
+    expect(legend[1]).toMatchObject({ roiNumber: 5, promotable: false }); // polyline only
+  });
+
+  it('marks an ROI promoted when its key is in the promoted set', () => {
+    const key = roiKeyOf(0, 1);
+    const legend = buildRoiLegend(
+      [set([roi({})])],
+      new Set(),
+      noOverrides,
+      noOpacities,
+      -1,
+      new Set([key]),
+    );
+
+    expect(legend[0].promoted).toBe(true);
+  });
+
   it('skips ROIs that carry no contours', () => {
     const legend = buildRoiLegend(
       [set([roi({ number: 2, contours: [] })])],
