@@ -1,7 +1,7 @@
 import { clamp01 } from './math';
 import { orderSlicesThroughPlane, throughPlaneNormal } from './slice-order';
 import type { MissingSlices, Slice, Vec3, Volume, VolumeGeometry } from './types';
-import { cross, dot, scale, sub } from './vec3';
+import { add, cross, dot, scale, sub } from './vec3';
 
 export class VolumeBuildError extends Error {}
 
@@ -32,6 +32,25 @@ export function patientToVoxel(geometry: VolumeGeometry, point: Vec3): Vec3 | nu
     dot(cross(kStep, iStep), rel) / det,
     dot(cross(iStep, jStep), rel) / det,
   ];
+}
+
+/**
+ * Map a continuous voxel index `(i, j, k)` — column, row, slice — back to its
+ * patient-space point (LPS, mm). The forward placement
+ * `patient = origin + i·iStep + j·jStep + k·kStep` described on
+ * {@link VolumeGeometry}, and the exact inverse of {@link patientToVoxel}.
+ *
+ * Used when authoring leaves the app: a label voxel (or a contour vertex traced
+ * over the label grid) is turned into the patient coordinates RTSTRUCT Contour
+ * Data is defined in, so an exported structure re-associates with the same image
+ * series on import.
+ */
+export function voxelToPatient(geometry: VolumeGeometry, voxel: Vec3): Vec3 {
+  const { iStep, jStep, kStep, origin } = geometry;
+  return add(
+    add(origin, scale(iStep, voxel[0])),
+    add(scale(jStep, voxel[1]), scale(kStep, voxel[2])),
+  );
 }
 
 /**
