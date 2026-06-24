@@ -28,6 +28,13 @@ export type Drag =
   | { readonly kind: 'orbit'; readonly lastX: number; readonly lastY: number }
   | { readonly kind: 'cameraPan'; readonly lastX: number; readonly lastY: number }
   | {
+      readonly kind: 'draw';
+      /** Which MPR pane the brush stroke is painting into. */
+      readonly orientation: Orientation;
+      /** Compare-group the painted pane belongs to (0 outside Compare). */
+      readonly group: number;
+    }
+  | {
       readonly kind: 'zoom';
       readonly orientation: Orientation;
       /** Compare-group the zoomed pane belongs to (0 outside Compare). */
@@ -185,4 +192,19 @@ export interface InteractionInit {
     placement: Extract<PanePlacement, { kind: 'mpr' }>,
     event: PointerEvent,
   ) => void;
+
+  /** Whether a brush/eraser mode is selected, so a left-drag paints instead of pans. */
+  readonly brushActive: () => boolean;
+  /** Begin a brush stroke at the press point on an MPR pane. */
+  readonly beginStroke: (
+    placement: Extract<PanePlacement, { kind: 'mpr' }>,
+    event: PointerEvent,
+  ) => void;
+  /** Extend the in-progress brush stroke to the cursor's current voxel. */
+  readonly extendStroke: (
+    placement: Extract<PanePlacement, { kind: 'mpr' }>,
+    event: PointerEvent,
+  ) => void;
+  /** End the in-progress brush stroke. */
+  readonly endStroke: () => void;
 }

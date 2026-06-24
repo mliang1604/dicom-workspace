@@ -90,6 +90,9 @@ function setup(overrides: Partial<InteractionInit> = {}): Harness {
     setFocus: vi.fn(),
     setFocusFromMip: vi.fn(),
     placeMeasurePoint: vi.fn(),
+    beginStroke: vi.fn(),
+    extendStroke: vi.fn(),
+    endStroke: vi.fn(),
   } as const;
 
   const deps: InteractionInit = {
@@ -114,6 +117,7 @@ function setup(overrides: Partial<InteractionInit> = {}): Harness {
     camera3d: camera,
     renderer: () => ({ sliceCount: () => 16 }) as unknown as SliceRenderer,
     activeTool: () => 'none',
+    brushActive: () => false,
     ...fns,
     ...overrides,
   };
@@ -214,6 +218,13 @@ describe('InteractionController', () => {
       expect(controller.drag()).toBeNull();
     });
 
+    it('begins a brush stroke instead of panning when a brush mode is active', () => {
+      const { controller, fns } = setup({ brushActive: () => true });
+      controller.onPointerDown(pointer({ button: 0, clientX: 50, clientY: 50 }));
+      expect(fns.beginStroke).toHaveBeenCalledOnce();
+      expect(controller.drag()).toMatchObject({ kind: 'draw', orientation: Orientation.Axial });
+    });
+
     it('does nothing before the viewer is ready', () => {
       const { controller } = setup({ isReady: () => false });
       controller.onPointerDown(pointer({ button: 0, clientX: 50, clientY: 50 }));
@@ -230,6 +241,16 @@ describe('InteractionController', () => {
       expect(fns.setCursor).toHaveBeenCalledWith({ x: 60, y: 55 });
       expect(fns.setHoveredKey).toHaveBeenLastCalledWith('mpr:0:0');
       expect(fns.setActiveCompareGroup).toHaveBeenLastCalledWith(0);
+    });
+
+    it('extends a brush stroke on the pane it began on, then ends it on pointer-up', () => {
+      const { controller, fns } = setup({ brushActive: () => true });
+      controller.onPointerDown(pointer({ button: 0, clientX: 50, clientY: 50 }));
+      controller.onPointerMove(pointer({ clientX: 60, clientY: 55 }));
+      expect(fns.extendStroke).toHaveBeenCalledOnce();
+      controller.onPointerUp(pointer({ clientX: 60, clientY: 55 }));
+      expect(fns.endStroke).toHaveBeenCalledOnce();
+      expect(controller.drag()).toBeNull();
     });
 
     it('turns an orbit drag into camera azimuth/elevation', () => {
