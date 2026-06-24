@@ -1,4 +1,5 @@
-import { floatsToHalf } from '../dicom/half';
+import { f32ToF16, floatsToHalf } from '../dicom/half';
+import type { LabelVolume } from '../dicom/label-volume';
 import type { Volume } from '../dicom/types';
 import type { PaneRect } from './layout';
 
@@ -35,6 +36,49 @@ export function createVolumeTexture(device: GPUDevice, volume: Volume, label: st
   return texture;
 }
 
+/**
+ * Upload a {@link LabelVolume}'s ids into `texture` (an `r16float` 3D texture the
+ * same size as the base volume). The ids are integers, stored as half-floats and
+ * sampled NEAREST so they round-trip exactly — half-float represents integers up
+ * to 2048 exactly, which bounds a single load's structure count (ample for hand
+ * authoring). Used for both the initial upload and the in-place re-upload on a
+ * version bump (the buffer is mutated in place; see {@link LabelVolume}).
+ */
+export function writeLabelTexture(
+  device: GPUDevice,
+  texture: GPUTexture,
+  label: LabelVolume,
+): void {
+  const [width, height, depth] = label.dims;
+  const halves = new Uint16Array(label.data.length);
+  for (let i = 0; i < label.data.length; i++) halves[i] = f32ToF16(label.data[i]);
+  device.queue.writeTexture(
+    { texture },
+    halves,
+    { bytesPerRow: width * BYTES_PER_HALF, rowsPerImage: height },
+    { width, height, depthOrArrayLayers: depth },
+  );
+}
+
+/** Allocate the `r16float` 3D texture a {@link LabelVolume} uploads into, with a size guard. */
+export function createLabelTexture(device: GPUDevice, label: LabelVolume): GPUTexture {
+  const [width, height, depth] = label.dims;
+  const limit = device.limits.maxTextureDimension3D;
+  if (width > limit || height > limit || depth > limit) {
+    throw new Error(
+      `Label volume ${width}×${height}×${depth} exceeds this GPU's 3D texture limit of ${limit}.`,
+    );
+  }
+  const texture = device.createTexture({
+    dimension: '3d',
+    size: { width, height, depthOrArrayLayers: depth },
+    format: 'r16float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  writeLabelTexture(device, texture, label);
+  return texture;
+}
+
 /** Bake a 1-D RGBA `size`-texel LUT (transfer function or colormap) into `texture`. */
 export function writeLut1d(
   device: GPUDevice,
@@ -50,16 +94,25 @@ export function writeLut1d(
   );
 }
 
-/** The views/buffer an MPR slice pane binds: base + overlay textures, LUT, params. */
+/** The views/buffer an MPR slice pane binds: base + overlay + mask textures, LUTs, params. */
 export interface SliceBindResources {
   readonly sampler: GPUSampler;
   readonly base: GPUTextureView;
   readonly overlay: GPUTextureView;
   readonly lut: GPUTextureView;
   readonly buffer: GPUBuffer;
+  /** Label-mask texture (the base view when no mask; the shader skips it at opacity 0). */
+  readonly mask: GPUTextureView;
+  /** Nearest sampler for the label ids and their LUT. */
+  readonly maskSampler: GPUSampler;
+  /** The id→colour mask LUT (binding 7). */
+  readonly maskLut: GPUTextureView;
 }
 
-/** The MPR slice bind group (base 0, sampler 1, params 2, overlay 3, colormap LUT 4). */
+/**
+ * The MPR slice bind group (base 0, sampler 1, params 2, overlay 3, colormap LUT 4,
+ * mask texture 5, nearest mask sampler 6, mask LUT 7).
+ */
 export function sliceBindGroup(
   device: GPUDevice,
   layout: GPUBindGroupLayout,
@@ -73,6 +126,9 @@ export function sliceBindGroup(
       { binding: 2, resource: { buffer: r.buffer } },
       { binding: 3, resource: r.overlay },
       { binding: 4, resource: r.lut },
+      { binding: 5, resource: r.mask },
+      { binding: 6, resource: r.maskSampler },
+      { binding: 7, resource: r.maskLut },
     ],
   });
 }

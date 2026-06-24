@@ -25,10 +25,13 @@ import {
 } from './transfer-function';
 import {
   createMipPipeline,
+  createNearestSampler,
   createSlicePipeline,
   createSurfacePipeline,
   createVolumeSampler,
 } from './slice-pipelines';
+import { MASK_LUT_SIZE } from './mask';
+import type { LabelVolume } from '../dicom/label-volume';
 import { SURFACE_CAMERA_SIZE, type SurfaceFrame } from './surface-frame';
 import {
   MIP_PARAMS_SIZE,
@@ -39,11 +42,13 @@ import {
 } from './slice-params';
 import { aspectScale, clampRect } from './pan-zoom';
 import {
+  createLabelTexture,
   createVolumeTexture,
   encodeFrame,
   mipBindGroup,
   sliceBindGroup,
   uploadResizingBuffer,
+  writeLabelTexture,
   writeLut1d,
   type PaneDraw,
   type SurfacePass,
@@ -144,6 +149,18 @@ export class SliceRenderer {
   private overlayCheckerboard = false;
   /** Checkerboard density: cells across the image at zoom 1. Pixel size is per-pane. */
   private overlayCheckerCells = DEFAULT_CHECKER_CELLS;
+  /** Label-mask texture (authored segmentation), aligned to the base grid, or null. */
+  private maskTexture: GPUTexture | null = null;
+  /** The label volume currently uploaded, to detect a re-upload vs. a fresh grid. */
+  private maskLabel: LabelVolume | null = null;
+  /** Last uploaded mask version, to skip re-uploading unchanged voxels. */
+  private maskVersion = -1;
+  /** Composite opacity of the coloured mask over the slice, 0 when no mask is shown. */
+  private maskOpacity = 0;
+  /** Nearest sampler for the categorical label ids (and their LUT). */
+  private readonly maskSampler: GPUSampler;
+  /** 1-D RGBA LUT mapping an ROI id to its display colour (texel 0 = transparent). */
+  private readonly maskLut: GPUTexture;
   /** Patient→texture affine for the 3D raycaster; depends only on geometry. */
   private patientToTex: Float32Array = new Float32Array(16);
   /** Upper bound on MIP march steps: the volume's full voxel diagonal. */
@@ -166,6 +183,7 @@ export class SliceRenderer {
     });
 
     this.sampler = createVolumeSampler(this.device);
+    this.maskSampler = createNearestSampler(this.device);
 
     this.slots = Array.from({ length: MAX_MPR_PANES }, () => ({
       buffer: this.device.createBuffer({
@@ -202,6 +220,17 @@ export class SliceRenderer {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     this.uploadOverlayLut(colormap(DEFAULT_COLORMAP)); // valid seed; the flag gates use
+
+    // The label-mask id→colour LUT lives in its own 1-D RGBA texture, rewritten in
+    // place from the structures' colours by setMask. Seeded all-zero (transparent)
+    // so binding 7 is always valid to bind even before any mask is set.
+    this.maskLut = this.device.createTexture({
+      dimension: '1d',
+      size: { width: MASK_LUT_SIZE },
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    writeLut1d(this.device, this.maskLut, new Float32Array(MASK_LUT_SIZE * 4), MASK_LUT_SIZE);
   }
 
   /** Bake a colormap into the overlay's 1-D LUT texture. */
@@ -237,6 +266,10 @@ export class SliceRenderer {
     const baseView = this.texture.createView();
     const overlayView = this.overlayTexture?.createView() ?? baseView;
     const lutView = this.overlayLut.createView({ dimension: '1d' });
+    // No mask yet: bind the base view as a valid placeholder the shader skips
+    // (maskOpacity 0), the same trick the overlay binding uses.
+    const maskView = this.maskTexture?.createView() ?? baseView;
+    const maskLutView = this.maskLut.createView({ dimension: '1d' });
     const layout = this.pipeline.getBindGroupLayout(0);
     for (const slot of this.slots) {
       slot.bindGroup = sliceBindGroup(this.device, layout, {
@@ -245,6 +278,9 @@ export class SliceRenderer {
         overlay: overlayView,
         lut: lutView,
         buffer: slot.buffer,
+        mask: maskView,
+        maskSampler: this.maskSampler,
+        maskLut: maskLutView,
       });
     }
   }
@@ -261,10 +297,11 @@ export class SliceRenderer {
    * they're released with the device. Idempotent for the per-load resources.
    */
   dispose(): void {
-    // Per-load resources (also cleared on the next setVolume/setOverlay).
+    // Per-load resources (also cleared on the next setVolume/setOverlay/setMask).
     this.texture?.destroy();
     this.texture = null;
     this.clearOverlay();
+    this.clearMask();
     this.surfaceVertexBuffer?.destroy();
     this.surfaceVertexBuffer = null;
     this.surfaceIndexBuffer?.destroy();
@@ -275,6 +312,7 @@ export class SliceRenderer {
     for (const slot of this.slots) slot.buffer.destroy();
     this.tfTexture.destroy();
     this.overlayLut.destroy();
+    this.maskLut.destroy();
   }
 
   /** Drop any fusion overlay (texture + matrices + opacity + colormap). */
@@ -288,13 +326,60 @@ export class SliceRenderer {
     this.overlayColormap = false;
   }
 
+  /** Drop the label mask (texture + opacity), so the panes draw without it. */
+  private clearMask(): void {
+    this.maskTexture?.destroy();
+    this.maskTexture = null;
+    this.maskLabel = null;
+    this.maskVersion = -1;
+    this.maskOpacity = 0;
+  }
+
+  /**
+   * Set, update, or clear (`null` label) the authored label mask drawn over the
+   * MPR panes — a distinct slot from the fusion overlay (see {@link setOverlay}).
+   * The label grid shares the base volume's geometry, so it reuses the base
+   * reslice matrices; this only owns the id texture, the id→colour LUT, and the
+   * composite opacity.
+   *
+   * - A new label grid (re)allocates the 3D texture and uploads it.
+   * - The same grid at a newer `version` re-uploads its voxels in place (the brush
+   *   mutates the buffer in place and bumps the version; see {@link LabelVolume}).
+   * - The `lut` (id→colour, texel 0 transparent) and `opacity` are refreshed every
+   *   call — cheap — so a recolour or opacity change needs no texture work.
+   */
+  setMask(label: LabelVolume | null, lut: Float32Array, version: number, opacity: number): void {
+    if (!label) {
+      if (!this.maskTexture && this.maskOpacity === 0) return;
+      this.clearMask();
+      this.rebuildMprBindGroups();
+      return;
+    }
+    this.maskOpacity = opacity;
+    writeLut1d(this.device, this.maskLut, lut, MASK_LUT_SIZE);
+    if (label !== this.maskLabel) {
+      // A fresh label grid: (re)allocate the texture and rebind the panes to it.
+      this.maskTexture?.destroy();
+      this.maskTexture = createLabelTexture(this.device, label);
+      this.maskLabel = label;
+      this.maskVersion = version;
+      this.rebuildMprBindGroups();
+    } else if (version !== this.maskVersion && this.maskTexture) {
+      // Same grid, painted since the last upload: rewrite the voxels in place (no
+      // reallocation, no bind-group churn).
+      writeLabelTexture(this.device, this.maskTexture, label);
+      this.maskVersion = version;
+    }
+  }
+
   /** Replace the displayed volume, (re)allocating the GPU texture and bind groups. */
   setVolume(volume: Volume): void {
     this.texture?.destroy();
     this.texture = createVolumeTexture(this.device, volume, 'Volume');
-    // A fresh base load drops any previous fusion overlay; the viewer re-adds one
-    // through setOverlay when the new load carries an overlay layer.
+    // A fresh base load drops any previous fusion overlay and label mask; the
+    // viewer re-adds them through setOverlay / setMask for the new load.
     this.clearOverlay();
+    this.clearMask();
     this.rebuildMprBindGroups();
 
     this.mipSlot.bindGroup = mipBindGroup(this.device, this.mipPipeline.getBindGroupLayout(0), {
@@ -441,7 +526,19 @@ export class SliceRenderer {
       const colormapBase = useOverlay && this.overlayColormap;
       const bindGroup = useOverlay ? this.overlayAsBaseBindGroup(slot) : slot.bindGroup;
       if (!bindGroup) continue;
-      this.writeParams(slot.buffer, pane, rect, paneVolume, matrices, composite, colormapBase);
+      // The label mask is aligned to the base grid, so it draws only on base panes
+      // (not Compare's standalone overlay column, which samples the overlay's grid).
+      const mask = !useOverlay;
+      this.writeParams(
+        slot.buffer,
+        pane,
+        rect,
+        paneVolume,
+        matrices,
+        composite,
+        colormapBase,
+        mask,
+      );
       draws.push({ rect, bindGroup, pipeline: this.pipeline });
     }
 
@@ -515,6 +612,11 @@ export class SliceRenderer {
       overlay: view, // overlay binding unused (composite off)
       lut: this.overlayLut.createView({ dimension: '1d' }),
       buffer: slot.buffer,
+      // The mask is aligned to the base grid, not this standalone overlay column,
+      // so it isn't drawn here: bind a valid placeholder and leave maskOpacity 0.
+      mask: view,
+      maskSampler: this.maskSampler,
+      maskLut: this.maskLut.createView({ dimension: '1d' }),
     });
   }
 
@@ -526,6 +628,7 @@ export class SliceRenderer {
     matrices: readonly Float32Array[],
     composite: boolean,
     colormapBase: boolean,
+    maskActive: boolean,
   ): void {
     const count = sliceCountFor(volume, view.orientation);
     // Sample the centre of the voxel so the first/last slices aren't clamped away.
@@ -563,6 +666,13 @@ export class SliceRenderer {
           }
         : null;
 
+    // The label mask shares the base grid, so it samples through the very same
+    // (possibly oblique) reslice matrix as the slice — no separate co-registration.
+    const mask =
+      maskActive && this.maskTexture && this.maskOpacity > 0
+        ? { matrix, opacity: this.maskOpacity, lutSize: MASK_LUT_SIZE }
+        : null;
+
     const params = packSliceParams({
       matrix,
       scaleX: scaleX / zoom,
@@ -575,6 +685,7 @@ export class SliceRenderer {
       invert: !!view.invert,
       colormapBase,
       overlay,
+      mask,
     });
     this.device.queue.writeBuffer(buffer, 0, params);
   }

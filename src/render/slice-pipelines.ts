@@ -84,3 +84,18 @@ export function createVolumeSampler(device: GPUDevice): GPUSampler {
     addressModeW: 'clamp-to-edge',
   });
 }
+
+/**
+ * The nearest, clamped sampler for the label mask (its 3D id texture and 1-D
+ * colour LUT). Labels are categorical: interpolating ids would invent values
+ * between two structures, so they must be sampled nearest, not linearly.
+ */
+export function createNearestSampler(device: GPUDevice): GPUSampler {
+  return device.createSampler({
+    magFilter: 'nearest',
+    minFilter: 'nearest',
+    addressModeU: 'clamp-to-edge',
+    addressModeV: 'clamp-to-edge',
+    addressModeW: 'clamp-to-edge',
+  });
+}
