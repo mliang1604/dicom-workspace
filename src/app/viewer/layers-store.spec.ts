@@ -122,8 +122,8 @@ describe('LayersStore checkerboard state', () => {
     expect(store.checkerCells()).toBe(8);
     store.setCheckerCells(1); // below min (2)
     expect(store.checkerCells()).toBe(2);
-    store.setCheckerCells(99); // above max (20)
-    expect(store.checkerCells()).toBe(20);
+    store.setCheckerCells(99); // above max (30)
+    expect(store.checkerCells()).toBe(30);
   });
 });
 

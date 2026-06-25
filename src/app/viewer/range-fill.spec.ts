@@ -3,7 +3,7 @@ import { rangeFillPercent } from './range-fill';
 describe('rangeFillPercent', () => {
   it('maps the value to its position within the range', () => {
     expect(rangeFillPercent(0, 100, 50)).toBe(50);
-    expect(rangeFillPercent(2, 20, 11)).toBe(50); // checkerboard slider midpoint
+    expect(rangeFillPercent(2, 30, 16)).toBe(50); // checkerboard slider midpoint
     expect(rangeFillPercent(0, 2, 0.5)).toBe(25);
   });
 

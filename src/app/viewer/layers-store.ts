@@ -6,7 +6,7 @@ import type { WindowLevel } from '../../render/window-level';
 
 /** Checkerboard density bounds (cells across the image), shared by the slider. */
 const CHECKER_CELLS_MIN = 2;
-const CHECKER_CELLS_MAX = 20;
+const CHECKER_CELLS_MAX = 30;
 
 /** One layer listed in the layers panel, with its display controls. */
 export interface LayerLegendEntry {
